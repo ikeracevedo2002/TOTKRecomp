@@ -7,17 +7,20 @@ TOTK-specific target metadata.
 
 ## Current status
 
-The repository bootstrap is implemented: C++20/CMake build targets, common
-bounds-checked binary utilities, SHA-256 file validation, logging, versioned
-target-manifest validation, tests, CI, and the `nso-inspect` CLI skeleton are
+The repository bootstrap and Milestone 1 are implemented: C++20/CMake build
+targets, common bounds-checked binary utilities, SHA-256 file validation,
+logging, versioned target-manifest validation, strict fixed-size NSO0 header
+parsing, synthetic parser tests, CI, and the `nso-inspect` header report are
 present.
 
 No supported TOTK build is committed. The repository contains no game binaries,
 keys, firmware, SDKs, or extracted game assets. The committed TOTK manifest is an
 explicit `template` and contains no real hashes or Build IDs.
 
-There is not yet a complete NSO parser, AArch64 decoder, semantic IR, LLVM
-lowering, runtime, Horizon compatibility layer, renderer, or playable game.
+The NSO parser does not decompress sections or verify section hashes. MOD0
+parsing, dynamic tables, relocations, the AArch64 decoder, semantic IR, LLVM
+lowering, runtime, Horizon compatibility layer, renderer, and playable game
+are not implemented.
 
 ## Build and test
 
@@ -44,11 +47,12 @@ cmake --build build --config Debug
 ctest --test-dir build -C Debug --output-on-failure
 ```
 
-Run the current CLI skeleton:
+Inspect an NSO0 header:
 
 ```bash
 ./build/nso-inspect --help
 ./build/nso-inspect --version
+./build/nso-inspect path/to/module.nso
 ```
 
 On a multi-config generator, use `build/Debug/nso-inspect`.
@@ -67,7 +71,20 @@ Use only files you are legally entitled to inspect locally. Do not commit game
 binaries, title keys, firmware, proprietary SDKs, Nintendo libraries, or extracted
 game assets.
 
+## Implemented after Milestone 1
+
+- strict explicit-little-endian parsing of the fixed `0x100`-byte NSO0 header;
+- three segment descriptors, module/build ID, and section hashes;
+- compression, hash-required, execute-only, and ZBIC flag decoding;
+- checked file-range, memory-range, BSS, and RoData-relative metadata validation;
+- deterministic human-readable `nso-inspect` output.
+
+Still not implemented are LZ4/ZBIC decompression, section hash verification,
+materialized decompressed sections, MOD0/dynamic-table parsing, relocations,
+AArch64 decoding, IR, LLVM, runtime/HLE, renderer, exact TOTK target metadata,
+and game execution.
+
 ## Next milestone
 
-Milestone 1 is strict `NSO0` header parsing and an expanded `nso-inspect` report,
-using synthetic fixtures and user-provided local inputs only.
+Milestone 2 is NSO segment materialization and integrity verification, using
+controlled decompression, exact-size checks, and optional SHA-256 verification.
