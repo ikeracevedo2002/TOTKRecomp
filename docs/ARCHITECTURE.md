@@ -3,7 +3,7 @@
 > Status: Proposed architecture  
 > Repository snapshot: 2026-09-05  
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
-> Current repository state: Empty; no implementation, build system, CI, metadata, or supported game build has been committed.
+> Current repository state: Documentation-only; no implementation, build system, CI, tests, supported target manifest, recompiler, runtime, renderer, or generated metadata has been committed.
 
 This document is the primary engineering RFC for TotkRecomp. It describes the intended architecture, the evidence behind the design, the work required to validate it, and the boundaries of what is currently known.
 
@@ -13,7 +13,7 @@ It is deliberately conservative. A proposed component is not evidence that the c
 
 ### Existing
 
-At the time of this writing, the repository contains no committed files. There is therefore no existing source tree, build system, runtime, recompiler, metadata format, CI configuration, test suite, game version, symbol database, renderer, or documented implementation decision to preserve.
+At the time of this writing, the repository contains the architecture RFC and no implementation. There is therefore no committed source tree, build system, runtime, recompiler, supported target manifest, generated metadata, CI configuration, test suite, game version, symbol database, or renderer to preserve. The RFC itself is an existing documented design decision and is the primary artifact being revised.
 
 ### Proposed
 
@@ -150,6 +150,50 @@ TotkRecomp should own:
 
 A game-specific patch must not be added to SwitchRecomp merely because it makes TOTK boot.
 
+### 4.3 Exact-build target and manifest policy
+
+Exact-build targeting is a prerequisite, not a later packaging concern. The first supported target must identify one exact TOTK build, including version, region where relevant, title update, expected module set, module Build IDs, SHA-256 hashes, and any module relationship or ordering constraints that have evidence behind them. A manifest must be able to reject a wrong version, mixed modules from different builds, missing modules, unexpected Build IDs, and hash mismatches. The exact module set and loader behavior remain **Needs verification** until measured from the selected build.
+
+The project distinguishes public target metadata from local developer configuration.
+
+A public target manifest may contain legally appropriate metadata such as:
+
+- Game identifier, version, title update, and region if relevant.
+- Logical module names, module Build IDs, and SHA-256 hashes.
+- Expected decompressed segment sizes and observed module relationships.
+- Manifest schema version, required tool version, and supported/unsupported status.
+- Address-domain-aware metadata that does not contain protected game content.
+
+A conceptual location is:
+
+```
+targets/
+└── totk/
+    └── <version-or-build-id>/
+        └── manifest.json
+```
+
+The exact path is proposed. The public manifest must never contain game binaries, Nintendo assets, keys, title keys, encryption material, proprietary SDK data, absolute local filesystem paths, credentials, or user-specific dump locations.
+
+A local developer manifest or ignored configuration may contain:
+
+- Source dump paths and extracted module locations.
+- Local RomFS or other user-provided data paths.
+- Development overrides and analyst project paths.
+- Machine-specific cache directories.
+- Local trace, symbol, or experiment locations.
+
+Local paths and protected inputs remain outside Git. The repository can safely declare which build is supported without distributing that build.
+
+### 4.4 Project sequencing
+
+Three decisions must remain distinct:
+
+1. **First project decision:** freeze the exact supported target build and its expected module set.
+2. **First implementation milestone:** bootstrap the repository and build/test infrastructure, including CMake, the C++ standard, formatting, logging, dependency policy, and CI.
+3. **First functional engineering tool:** implement `nso-inspect` after the foundation and exact-build metadata exist.
+
+This ordering does not imply that the project can execute TOTK. Whole-module translation and runtime bring-up remain later gates that depend on validated analysis and differential testing.
 ## 5. Why static recompilation is viable, and why this target is difficult
 
 Static recompilation can be effective when a program's code can be analyzed ahead of time and its platform-dependent behavior can be supplied by a compatible runtime. Existing projects demonstrate several useful patterns:
@@ -324,15 +368,74 @@ Each module record should include:
 - Logical name.
 - Original module identifier/build ID.
 - SHA-256 of the relevant input.
-- Guest base and ranges.
+- Original image ranges and resolved guest ranges.
+- Guest base, load bias, and segment ranges.
 - Segment protections.
-- Entry/init/fini candidates.
-- Dynamic metadata ranges.
+- MOD0 location and dynamic metadata.
 - Exported/imported symbols.
 - Relocations.
+- TLS metadata.
+- Entry/init/fini candidates and module initialization state.
 - Function metadata source and version.
 - Whether it is recompiled, provided by the runtime, or currently unsupported.
 
+### 7.5 Module placement, load bias, and guest address identity
+
+The loader and analyzer must distinguish address domains instead of collapsing every value into a field named `address`. For each module, the conceptual model should distinguish:
+
+- **Module-relative offset:** an offset from the module image or a declared section base.
+- **Original image virtual address:** the address encoded by the original image before the selected load strategy is applied.
+- **Guest load base:** the base at which the module is represented in the guest address space.
+- **Load bias:** the transformation from the original image address domain to the resolved guest address domain.
+- **Resolved guest virtual address:** the guest-visible address used by code, data, pointers, diagnostics, and patches.
+- **Host backing address:** the native allocation or mapping used to store the guest bytes; it is never a guest pointer.
+
+The relationship is conceptually one of the following, depending on the target loader model:
+
+```
+guest_va = module_guest_base + module_relative_offset
+resolved_guest_va = original_image_va + load_bias
+```
+
+The exact relationship, alignment rules, module load bases, and whether the selected target preserves original image placement are **Needs verification**. The loader must record the chosen strategy explicitly and deterministically.
+
+Placement affects relocations, `ADR`, `ADRP`, literal loads, global pointers, vtables, callback tables, jump tables, inter-module symbols, function-pointer identity, stack traces, diagnostics, patches, and graphics structures that store guest addresses. A module must not be silently rebased in a way that changes guest-visible pointer identity without accounting for every affected reference.
+
+The architecture prefers preserving guest-visible addresses where practical. If exact original placement is not practical, the selected rebasing strategy must be recorded in the module state, generated metadata, and diagnostics, and all guest-visible references must resolve through that declared strategy.
+
+### 7.6 Module initialization and startup order
+
+Reaching a nominal module entry point is not sufficient to claim correct startup. The loader/runtime must model the initialization work required by the selected target, including:
+
+- Module dependencies and initialization order.
+- Initialization arrays or equivalent constructor metadata.
+- Global/static object constructors and their side effects.
+- TLS allocation and TLS constructors where relevant.
+- Init callbacks, failure propagation, and partial initialization state.
+- Fini arrays, destructors, and shutdown ordering.
+- Constructor functions implemented through recompiled code or runtime bindings.
+
+The conceptual startup pipeline is:
+
+```
+map modules
+    ↓
+apply relocations
+    ↓
+register imports/exports
+    ↓
+initialize TLS
+    ↓
+resolve dependency order
+    ↓
+run module initialization and static constructors
+    ↓
+enter target program startup
+```
+
+The exact structures, loader behavior, dependency ordering, and whether every stage applies to the selected build are **Needs verification**. Do not assume a conventional Linux ELF loader implementation.
+
+Synthetic and target-driven tests should eventually cover initialization order, constructor side effects, TLS constructor behavior if relevant, fini/destructor ordering, and failure when a required initialization dependency is unresolved.
 ## 8. Relocations and symbol resolution
 
 Relocations must be fully resolved or explicitly represented before translated code can execute.
@@ -624,6 +727,19 @@ versioned canonical metadata
 
 The analyzer must not silently overwrite hand-reviewed metadata. Conflicts should be reported with both sources and a resolution field.
 
+### 12.3 Runtime-generated or dynamically introduced executable code
+
+The static model assumes that executable guest code can be discovered and translated before execution. The selected build must be investigated for code that is generated, modified, decompressed, relocated, loaded, or introduced at runtime. This includes dynamically loaded executable modules, writable-then-executable regions, generated trampolines, runtime patching, code decompression, executable overlays, JIT-like behavior, and self-modifying code. Whether any of these occur in the selected TOTK build is **Needs verification**; the architecture must not claim that they do.
+
+The runtime/analyzer should detect and report at least:
+
+- Writes to a guest page currently marked executable.
+- A protection transition from writable to executable.
+- Registration of an executable module after initial load.
+- A branch or call to an executable guest address without a translated target.
+- Entry into a previously unknown executable range.
+
+The initial response is a fail-loud diagnostic trap and trace containing the guest address, module/segment context, current guest PC, access or branch type, and relevant load-bias information. It must not silently execute unknown guest code or silently treat it as data. A later dynamic translator or JIT is an architectural extension only if real target traces prove it is required; this RFC does not introduce one.
 ## 13. Metadata and Ghidra integration
 
 ### Decision
@@ -655,7 +771,8 @@ Example shape:
 
 The schema must support at least:
 
-- Module name, build ID, hash, guest ranges, and protections.
+- Module name, build ID, hash, original image ranges, guest base, load bias, resolved guest ranges, and protections.
+- Address-domain-aware module-relative offsets and guest virtual addresses.
 - Function guest start/end and additional entries.
 - Name, source, confidence, and analysis notes.
 - Basic blocks and control-flow edges.
@@ -1054,6 +1171,58 @@ The interface should be traceable and replayable. It must not expose Vulkan type
 - macOS Vulkan support may use a translation layer; this is a deployment choice, not a promise of performance or feature parity.
 - Do not implement three backends before the canonical interface and one backend pass conformance tests.
 
+### 21.5 CPU/GPU memory model and resource coherency
+
+The renderer must not assume that guest CPU memory and native GPU memory are unrelated universes. The selected target may use guest memory as GPU-visible storage, buffer-backed guest memory, mapped or persistently mapped buffers, CPU/GPU-shared resources, aliases between buffers and images, explicit cache flush/invalidate operations, resource ownership transitions, staging resources, GPU writes later observed by guest CPU code, or guest addresses embedded in graphics objects. Which of these behaviors occur in the selected build is **Needs verification**.
+
+The canonical renderer interface must represent enough information to preserve observable guest behavior, including:
+
+- Resource provenance and ownership.
+- Guest-to-native mapping and lifetime.
+- CPU mappings, unmapping, flush, and invalidate semantics.
+- Aliasing between guest ranges and native buffers/images.
+- Synchronization between guest CPU writes and GPU reads.
+- Synchronization between GPU writes and later guest CPU reads.
+- Staging/upload/download operations.
+- Resource layout and format conversions.
+- Address identity when graphics structures expose guest addresses.
+
+A native resource may be an implementation detail, but its guest memory provenance and synchronization obligations cannot be discarded. The design must be validated with trace/replay and targeted coherency tests before treating a renderer boundary as correct.
+
+### 21.6 Early graphics-boundary feasibility gate
+
+Before investing in whole-game runtime bring-up or a full renderer, the project should perform an analysis-only feasibility investigation for the exact target build. Its purpose is to determine at what graphics boundary TOTK can realistically be intercepted, not to produce a frame.
+
+Candidate boundaries remain **Needs verification**:
+
+- A high-level Nintendo graphics abstraction such as an `nn::gfx`-like layer.
+- NVN-facing calls.
+- Lower-level command and resource submission as a fallback.
+
+The investigation should begin once the exact target is frozen and enough NSO, decoder, metadata, and basic call-graph infrastructure exists to inspect the target meaningfully. It should inspect graphics-related imports, candidate SDK signatures, wrapper functions, statically linked or inlined graphics code, command submission paths, shader references, resource creation, presentation, and synchronization boundaries. Evidence may come from code patterns, constants, call-graph shape, known structure layouts, relocation patterns, strings, analyst annotations, and controlled traces. Function names must not be fabricated.
+
+The output should be a versioned analysis report, for example:
+
+```
+build/reports/graphics-boundary.md
+```
+
+or:
+
+```
+graphics-boundary-report.json
+```
+
+The report should record:
+
+- Candidate boundary.
+- Evidence and known call sites.
+- Confidence.
+- Unknowns.
+- Risk.
+- Next experiment.
+
+This gate does not prove that rendering is solved and does not move Vulkan implementation to the beginning of the roadmap. It determines whether the preferred high-level interception strategy is plausible before the project commits to deep runtime investment.
 ## 22. Shaders and pipelines
 
 The proposed shader path is:
@@ -1185,6 +1354,8 @@ The patch system should eventually support:
 - Bug fixes.
 - Separately staged timing/FPS patches.
 
+Patch metadata must make the target address domain explicit. A target may be identified by a module-relative offset, guest virtual address, symbol identity, instruction hash, or function hash. A robust patch should prefer a combination of exact module build hash, an explicit address domain, and original bytes or function hash.
+
 Example conceptual metadata:
 
 ```toml
@@ -1193,12 +1364,14 @@ schema_version = 1
 
 [[patches.instruction]]
 module = "main"
+address_domain = "module_offset" # module_offset | guest_address | symbol | instruction_hash | function_hash
 address = "0x..."
 bytes = "..."
 reason = "TBD"
 
 [[patches.function]]
 module = "main"
+address_domain = "guest_address"
 address = "0x..."
 replacement = "totk::replacement_name"
 reason = "TBD"
@@ -1264,6 +1437,17 @@ Unknown behavior must include enough context to reproduce it:
 - Recent memory faults.
 - Current mounts and resource path where relevant.
 - Trace sequence number.
+
+Address-related diagnostics should also include, when applicable:
+
+- Module name and module-relative offset.
+- Guest virtual address and load bias.
+- Owning mapped segment and permissions.
+- Host backing address only when safe and useful for a local diagnostic.
+- Relocation or address-formation source.
+- Access type and size.
+
+Public reports should avoid exposing sensitive local paths unnecessarily.
 
 A crash report should include:
 
@@ -1388,7 +1572,7 @@ Examples:
 
 ## 29. Build and generated-artifact strategy
 
-The repository is empty, so no current build-system claim can be made.
+The repository currently contains documentation only, so no current build-system claim can be made.
 
 ### Proposal
 
@@ -1628,17 +1812,38 @@ produces a trustworthy, diffable report and rejects malformed input.
 
 **Success:** Controlled multi-threaded workloads pass deterministic tests.
 
+### Cross-cutting gate — Graphics Boundary Feasibility Spike
+
+**Goal:** Determine the highest viable graphics interception boundary in the exact target build before deep runtime or renderer investment.
+
+**Output:** A versioned `graphics-boundary-report.md` or `graphics-boundary-report.json` containing candidate boundaries, evidence, confidence, call sites, unknowns, risk, and next experiments.
+
+**Success:** The report identifies whether a high-level, NVN-facing, or lower-level boundary is plausible. It is analysis only and does not claim that a renderer or first frame exists.
+
+### Cross-cutting gate — Runtime executable-code inventory
+
+**Goal:** Determine whether the selected build generates, modifies, decompresses, or dynamically loads executable guest code outside the statically analyzed module image.
+
+**Output:** A report of known executable ranges, module registration/loading behavior, writable-to-executable transitions, and unknown-target diagnostics.
+
+**Success:** Unknown executable targets fail visibly through a diagnostic trap/trace; no silent execution fallback or premature JIT is introduced.
+
+### Cross-cutting gate — Static initialization verification
+
+**Goal:** Inventory module initialization, constructor/TLS behavior, dependency ordering, and fini/destructor behavior before claiming that game startup can execute correctly.
+
+**Success:** Synthetic and target-driven evidence establishes the required startup sequence, or records the unresolved dependency and stops at a known diagnostic.
 ### Milestone 10 — Whole-main translation
 
-**Goal:** Analyze and translate the targeted `main` module. Unresolved imports may remain.
+**Goal:** Analyze and translate the targeted `main` module after the executable-code inventory and relevant metadata review. Unresolved imports may remain.
 
-**Success:** The whole target module can be statically analyzed, generated, and linked with a complete unresolved-dependency report. It does not need to boot.
+**Success:** The whole target module can be statically analyzed, generated, and linked with a complete unresolved-dependency report. It does not need to boot, and unknown executable regions are reported rather than silently executed.
 
 ### Milestone 11 — Enter game initialization
 
-**Goal:** Execute the recompiled entry path.
+**Goal:** Execute the recompiled entry path through the verified module initialization sequence.
 
-**Success:** Execution reaches initialization and stops at a known unsupported dependency, with a useful diagnostic.
+**Success:** Execution reaches initialization, static constructors/TLS setup as required by the target are accounted for, and the process stops at a known unsupported dependency with a useful diagnostic. Reaching an entry point alone is not considered proof of correct startup.
 
 ### Milestone 12 — Runtime bring-up
 
@@ -1706,7 +1911,9 @@ produces a trustworthy, diffable report and rejects malformed input.
 | FP/NEON mismatch | Critical | Physics, animation, rendering, and math diverge | Reference execution, FP status/rounding tests |
 | Static SDK code | High | Imports may not remain identifiable | Pattern/signature analysis, behavior tests, version-specific metadata |
 | Horizon API surface | High | Boot may reach many services | On-demand implementation, service traces, fail-loud diagnostics |
-| Graphics boundary choice | Critical | Wrong abstraction can require a GPU emulator | Trace candidate boundaries, choose highest viable boundary |
+| Graphics boundary choice | Critical | Wrong abstraction can require a GPU emulator | Early exact-build boundary report, trace candidate boundaries, choose highest viable boundary |
+| CPU/GPU memory/coherency mismatch | Critical | Guest CPU and native GPU may observe shared or aliased resource state differently, causing corruption, stale data, incorrect rendering, or crashes | Resource provenance tracking, mapping semantics, explicit synchronization, trace/replay, boundary validation |
+| Runtime-generated executable code | High | Static translation may miss code introduced or modified after analysis | Executable-page tracking, W^X transition detection, module registration tracing, unknown-target diagnostics, later extension only if traces require it |
 | Shader translation | Critical | No visual output or wrong rendering | Shader IR, validation, golden tests, license review |
 | Streaming/filesystem | High | Open-world loading depends on it | Async I/O tests, path traces, cache/streaming instrumentation |
 | Exceptions/unwinding | High | Initialization or C++ cleanup may fail | Inventory metadata, staged support, guest-aware crash reports |
@@ -1746,6 +1953,12 @@ produces a trustworthy, diffable report and rejects malformed input.
 24. Which parts of the reference projects are research only, and which can be cleanly depended on?
 25. What metadata should be manually reviewed before allowing whole-module translation?
 26. What is the minimum deterministic boot trace that proves a runtime change is correct?
+27. Does the selected build ever generate, modify, decompress, or dynamically load executable guest code?
+28. What module load bases and load biases are used by the target loader, and which guest addresses must preserve exact identity across modules and runtime boundaries?
+29. What initialization arrays, constructor mechanisms, TLS initialization, module dependencies, and startup ordering exist in the selected build?
+30. Which guest memory regions are CPU/GPU shared, aliased, persistently mapped, or synchronized through explicit flush/invalidate behavior?
+31. Can GPU-visible guest resource addresses be represented without breaking guest pointer identity?
+32. What evidence is required before committing to an \`nn::gfx\`-like, NVN-facing, or lower-level graphics interception boundary?
 
 ## 37. Immediate Next Steps
 
@@ -1755,13 +1968,13 @@ These are the first practical engineering tasks. They intentionally stop before 
 
 - **Goal:** Define one supported TOTK executable and module set.
 - **Inputs:** Legally obtained developer-provided build; local-only version information.
-- **Output:** A private build manifest containing version/region/build ID, module names, and SHA-256 hashes.
-- **Success:** A loader can reject a different or incomplete build.
+- **Output:** A public target manifest containing version/region/update, module names, Build IDs, SHA-256 hashes, expected module relationships, schema/tool versions, and supported status; a separate ignored local developer manifest containing source paths and local overrides.
+- **Success:** A loader can reject a different version, incomplete module set, mixed modules, unexpected Build IDs, or hash mismatch without exposing local paths in public metadata.
 - **Dependencies:** None; this is the project’s first external input decision.
 
 ### 2. Establish repository foundation
 
-- **Goal:** Add the initial CMake layout, C++ standard, formatter, test runner, CI, and dependency policy.
+- **Goal:** Add the initial CMake layout, C++ standard, formatter, test runner, logging, CI, and dependency policy.
 - **Inputs:** This RFC and the selected host/toolchain.
 - **Output:** A minimal build with logging and one passing test.
 - **Success:** Clean configure/build/test from a fresh checkout.
@@ -1773,7 +1986,7 @@ These are the first practical engineering tasks. They intentionally stop before 
 - **Inputs:** Synthetic fixtures and a locally supplied target file.
 - **Output:** Parser library and structured report.
 - **Success:** Correct fields, bounds checks, unknown flag reporting, and malformed-file tests.
-- **Dependencies:** Milestone 0.
+- **Dependencies:** Repository foundation.
 
 ### 4. Implement bounded section decompression and hash checks
 
@@ -1788,7 +2001,7 @@ These are the first practical engineering tasks. They intentionally stop before 
 - **Goal:** Locate and report module/dynamic metadata using a versioned schema.
 - **Inputs:** Target module and public format research.
 - **Output:** MOD0/dynamic parser and warnings for unsupported fields.
-- **Success:** A trustworthy report of parsed ranges, symbols, and relocation records.
+- **Success:** A trustworthy report of parsed ranges, symbols, relocations, TLS metadata, and init/fini candidates.
 - **Dependencies:** NSO loader; exact-build manifest.
 
 ### 6. Build `nso-inspect`
@@ -1796,7 +2009,7 @@ These are the first practical engineering tasks. They intentionally stop before 
 - **Goal:** Make the inspection pipeline useful before any lifting exists.
 - **Inputs:** Parser libraries and manifest.
 - **Output:** Stable text/JSON reports with exit codes.
-- **Success:** Two runs on the same input produce identical reports.
+- **Success:** Two runs on the same input produce identical reports, including module placement and hash status.
 - **Dependencies:** Steps 3–5.
 
 ### 7. Add synthetic NSO/MOD0/relocation fixtures
@@ -1804,23 +2017,23 @@ These are the first practical engineering tasks. They intentionally stop before 
 - **Goal:** Prevent format work from relying only on a commercial target.
 - **Inputs:** Hand-authored or generated fixtures.
 - **Output:** Unit tests for valid, compressed, relocated, truncated, overlapping, and unknown-field cases.
-- **Success:** Tests cover every implemented parser branch.
+- **Success:** Tests cover every implemented parser branch, including init metadata and module placement.
 - **Dependencies:** Parser implementation.
 
-### 8. Implement guest memory abstraction
+### 8. Implement the guest address and module placement model
 
-- **Goal:** Model guest ranges, protections, BSS, and address translation.
-- **Inputs:** Module report and synthetic memory layouts.
-- **Output:** `GuestAddress`, `GuestMemory`, mapping/protection tests.
-- **Success:** Valid reads/writes work; invalid/unmapped/protected accesses fail with guest diagnostics.
+- **Goal:** Model `GuestAddress`, module bases, module-relative offsets, original image ranges, load bias, resolved guest ranges, segment protections, and host backing.
+- **Inputs:** Module reports and synthetic memory layouts.
+- **Output:** Typed address-domain structures, `GuestMemory`, mapping/protection tests, and deterministic placement diagnostics.
+- **Success:** Valid reads/writes and address formation work; invalid/unmapped/protected accesses fail with guest diagnostics; rebasing never silently changes guest-visible pointer identity.
 - **Dependencies:** NSO report.
 
-### 9. Load a module and apply initial relocations
+### 9. Load modules and apply initial relocations
 
-- **Goal:** Reconstruct a test module in guest memory.
-- **Inputs:** Synthetic module and supported relocation records.
-- **Output:** Loader state and relocation log.
-- **Success:** Expected guest-visible pointers and instruction fields are present before execution.
+- **Goal:** Reconstruct test modules in guest memory and account for all supported address domains.
+- **Inputs:** Synthetic modules and supported relocation records.
+- **Output:** Loader state, relocation log, module registry, and unresolved-reference report.
+- **Success:** Expected guest-visible pointers, instruction fields, inter-module references, and load-bias calculations are present before execution.
 - **Dependencies:** Guest memory and relocation parser.
 
 ### 10. Integrate an AArch64 decoder
@@ -1831,47 +2044,55 @@ These are the first practical engineering tasks. They intentionally stop before 
 - **Success:** Coverage and unknown-instruction reports are deterministic.
 - **Dependencies:** Build foundation; dependency/license review.
 
-### 11. Define canonical function metadata
+### 11. Define canonical function and build metadata
 
-- **Goal:** Version function, block, symbol, jump-table, relocation, and patch schemas.
+- **Goal:** Version function, block, symbol, jump-table, relocation, module-placement, and patch schemas.
 - **Inputs:** Analyzer requirements and Ghidra export needs.
-- **Output:** JSON schema plus validator and sample metadata.
-- **Success:** Metadata can be reviewed, diffed, and rejected when hashes do not match.
+- **Output:** JSON schema plus validator and sample metadata with explicit address domains.
+- **Success:** Metadata can be reviewed, diffed, and rejected when hashes, module placement, or original bytes do not match.
 - **Dependencies:** NSO reports and decoder.
 
 ### 12. Build the smallest CFG analyzer
 
 - **Goal:** Analyze synthetic functions seeded by known entry points and direct branches.
 - **Inputs:** AArch64 decoder and synthetic binaries.
-- **Output:** Basic blocks, edges, call targets, and unsupported-edge diagnostics.
-- **Success:** Known synthetic CFGs match expected metadata.
+- **Output:** Basic blocks, edges, call targets, executable-range inventory, and unsupported-edge diagnostics.
+- **Success:** Known synthetic CFGs match expected metadata, and branches into unknown executable ranges fail visibly.
 - **Dependencies:** Decoder and metadata schema.
 
 ### 13. Export analyst metadata
 
-- **Goal:** Prototype a minimal Ghidra exporter for functions, symbols, ranges, and references.
+- **Goal:** Prototype a minimal Ghidra exporter for functions, symbols, ranges, references, and graphics-relevant call sites.
 - **Inputs:** Synthetic/legally supplied analysis project.
 - **Output:** Versioned JSON accepted by the validator.
-- **Success:** Import/export round trips preserve addresses and review annotations.
+- **Success:** Import/export round trips preserve address domains, load-bias context, and review annotations.
 - **Dependencies:** Metadata schema.
 
-### 14. Lift one trivial function
+### 14. Run the graphics boundary feasibility spike
+
+- **Goal:** Determine the highest viable graphics interception boundary in the exact target build.
+- **Inputs:** Exact-build manifest, NSO reports, decoder/CFG output, candidate signatures, and controlled traces where available.
+- **Output:** Versioned `graphics-boundary-report.md` or `.json`.
+- **Success:** Candidate boundaries, evidence, confidence, known call sites, unknowns, risks, and next experiments are recorded. No Vulkan renderer is implemented here.
+- **Dependencies:** Steps 1, 5, 10–13.
+
+### 15. Lift one trivial function
 
 - **Goal:** Prove the semantic IR and LLVM lowering path.
 - **Inputs:** Functions such as `add x0, x0, x1; ret`.
 - **Output:** Generated native object and guest/native address map.
-- **Success:** Native execution matches the reference harness.
+- **Success:** Native execution matches the reference harness while preserving the AArch64 → semantic IR → LLVM boundary.
 - **Dependencies:** Decoder, IR, runtime context, differential harness.
 
-### 15. Expand only under differential coverage
+### 16. Expand only under differential coverage
 
 - **Goal:** Add loads/stores, branches, flags, calls, then FP/SIMD/atomics in gated groups.
 - **Inputs:** Differential tests and failure corpus.
 - **Output:** Increasingly capable semantic IR/code generator.
-- **Success:** Each group passes tests before it is enabled for larger analysis.
+- **Success:** Each group passes tests before it is enabled for larger analysis; static initialization and runtime executable-code assumptions remain explicit.
 - **Dependencies:** All prior test infrastructure.
 
-Only after these steps should whole-module TOTK translation be attempted. The first implementation task is therefore **exact-build manifest plus NSO inspection**, not a game boot attempt.
+Only after these steps should whole-module TOTK translation be attempted. The first project decision is the exact-build freeze, the first implementation milestone is repository foundation, and the first functional engineering tool is `nso-inspect`; none of these is a game boot attempt.
 
 ## 38. Reference sources
 
@@ -1910,9 +2131,16 @@ Reference links are for research and provenance. They do not grant permission to
 
 This RFC is complete when:
 
-- The repository state is accurately described as empty.
+- The repository state is accurately described as documentation-only, with no implementation, build system, CI, tests, supported target manifest, runtime, recompiler, renderer, or generated metadata committed yet.
 - Existing, proposed, future, and verification-needed items are distinguishable.
+- The first project decision, first implementation milestone, and first functional engineering tool are explicitly distinguished.
 - The architecture explicitly avoids becoming a full Switch emulator.
+- Public target manifests and local/private developer configuration are clearly separated, and mixed or wrong target modules can conceptually be rejected.
+- Module placement, load bias, guest address identity, original/resolved ranges, and host backing are explicit.
+- Runtime-generated or dynamically introduced executable code is represented as a target-dependent risk with visible unknown-target failure behavior and no premature JIT.
+- Static initialization, TLS initialization, module ordering, constructors, fini/destructor behavior, and startup failure are represented without assuming a conventional desktop loader.
+- CPU/GPU shared memory, aliasing, mapping, ownership, synchronization, and resource provenance are treated as first-class graphics concerns.
+- The graphics interception boundary remains target-dependent and has an early analysis-only feasibility gate before deep renderer/runtime investment.
 - NSO, MOD0, dynamic data, relocations, guest memory, CPU state, function discovery, indirect calls, jump tables, runtime services, files, threads, atomics, exceptions, graphics, shaders, input, audio, timing, testing, debugging, build, licensing, risks, milestones, open questions, and immediate tasks are covered.
 - The first implementation task is obvious and does not involve attempting to boot TOTK.
 - Every target-specific unknown remains marked as **Needs verification**.
