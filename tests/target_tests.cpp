@@ -35,6 +35,19 @@ constexpr char kRealLikeManifest[] = R"json({
   }]
 })json";
 
+constexpr char kDuplicateManifest[] = R"json({
+  "schema_version": 1,
+  "game": "totk",
+  "support_status": "experimental",
+  "version": "1.0.0",
+  "region": "global",
+  "title_update": "1.0",
+  "modules": [
+    {"name": "main", "build_id": "0123456789abcdef", "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"},
+    {"name": "main", "build_id": "fedcba9876543210", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+  ]
+})json";
+
 } // namespace
 
 TEST_CASE("template manifest accepts explicit placeholders")
@@ -50,14 +63,7 @@ TEST_CASE("real-like manifest validates and rejects duplicate modules")
     const auto manifest = switchrecomp::target::parse_manifest(kRealLikeManifest);
     REQUIRE(manifest);
 
-    auto duplicate = std::string(kRealLikeManifest);
-    const auto module_end = duplicate.find("  }]\n})");
-    REQUIRE(module_end != std::string::npos);
-    duplicate.replace(
-        module_end,
-        5,
-        "  },{\"name\":\"main\",\"build_id\":\"0123456789abcdef\",\"sha256\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\"}]\n})");
-    const auto duplicate_result = switchrecomp::target::parse_manifest(duplicate);
+    const auto duplicate_result = switchrecomp::target::parse_manifest(kDuplicateManifest);
     REQUIRE_FALSE(duplicate_result);
     REQUIRE(duplicate_result.error().message.find("duplicate module name") != std::string::npos);
 }
@@ -72,7 +78,7 @@ TEST_CASE("manifest validation rejects malformed hashes and future schema")
     REQUIRE(hash_result.error().message.find("sha256") != std::string::npos);
 
     auto future_schema = std::string(kRealLikeManifest);
-    future_schema.replace(future_schema.find("\"schema_version\": 1"), 20, "\"schema_version\": 3");
+    future_schema.replace(future_schema.find("\"schema_version\": 1"), 19, "\"schema_version\": 3");
     const auto schema_result = switchrecomp::target::parse_manifest(future_schema);
     REQUIRE_FALSE(schema_result);
     REQUIRE(schema_result.error().code == switchrecomp::ErrorCode::Unsupported);
