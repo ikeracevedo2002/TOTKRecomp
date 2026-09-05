@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "game": "totk",
+  "support_status": "template",
+  "version": "TBD",
+  "region": "TBD",
+  "title_update": "TBD",
+  "notes": "Template only. Populate from one verified exact build; no supported TOTK build is committed.",
+  "modules": [
+    {
+      "name": "main",
+      "build_id": "TBD",
+      "sha256": "TBD",
+      "notes": "Logical example only; this is not verified target metadata."
+    }
+  ]
+}

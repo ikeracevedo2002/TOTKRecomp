@@ -1,0 +1,9 @@
+{
+  "target_manifest": "targets/totk/template/manifest.json",
+  "modules": {
+    "main": "/path/to/your/local/main.nso"
+  },
+  "romfs": "/path/to/your/local/romfs",
+  "cache": "build/cache",
+  "analysis_project": "/path/to/your/local/analysis-project"
+}
