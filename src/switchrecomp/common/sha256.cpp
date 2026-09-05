@@ -9,6 +9,7 @@
 #include <vector>
 
 #ifdef _WIN32
+#include <windows.h>
 #include <bcrypt.h>
 #else
 #include <openssl/evp.h>
