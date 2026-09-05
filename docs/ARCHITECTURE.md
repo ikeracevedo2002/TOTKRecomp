@@ -420,6 +420,8 @@ void* translate(GuestAddress address, Access access);
 | Page-table mapping | Map guest pages to host allocations through a page index | Portable, sparse, protects gaps, useful for diagnostics | More overhead and a hot-path lookup |
 | Hybrid | Reserve common ranges when possible, fall back to page translation for sparse/exceptional regions | Fast common path with correctness fallback | More implementation and testing complexity |
 
+Host ASLR must be treated as normal behavior. A fixed reservation can fail because the requested range is occupied, and the loader must not disable host security features or silently relocate guest addresses without updating every guest-visible reference. The selected mapping mode and any rebasing must be recorded in diagnostics.
+
 ### Decision
 
 Start with a page-aware memory manager and a clear translation API. Add a fixed-offset or rebased fast path only after tests prove that guest addresses, protections, and diagnostics remain correct.
@@ -527,6 +529,7 @@ Required families include:
 - Multiply, multiply-accumulate, divide.
 - Bitfield and bit-manipulation operations.
 - Loads/stores, sign extension, pair operations, literals.
+- Literal loads, including PC-relative LDR literal forms.
 - Address formation: `ADR`, `ADRP`, add-immediate sequences.
 - Conditional branches, unconditional branches, calls, returns.
 - Conditional select and conditional compare.
@@ -710,6 +713,7 @@ Candidate structures:
 | Perfect hash | Very fast for a fixed set | Regeneration and dynamic modules complicate it |
 | Page-indexed table | One page lookup plus slot lookup, sparse-friendly | Requires address-space metadata and module updates |
 | Address transform | Extremely cheap when layout permits | Depends on strong address assumptions |
+| Linker-generated map | Can provide compact generated target metadata | Depends on the native toolchain and is not sufficient for dynamic modules by itself |
 
 Recommended path:
 
@@ -1539,6 +1543,8 @@ The repository and releases must not contain:
 
 The intended distribution model is original project code and legally distributable metadata/tools. Users/developers provide their own legally obtained game data through a workflow that does not require the project to redistribute Nintendo content.
 
+The loader should consume an already legally obtained and appropriately prepared/decrypted input supplied by the developer or user when that is required by the target format. It must not distribute title keys, implement key extraction, or add decryption/DRM-circumvention helpers to the project.
+
 The repository may contain:
 
 - Synthetic fixtures.
@@ -1911,5 +1917,3 @@ This RFC is complete when:
 - The first implementation task is obvious and does not involve attempting to boot TOTK.
 - Every target-specific unknown remains marked as **Needs verification**.
 - Any future implementation claiming progress points back to a test, report, or exact-build artifact.
-
-
