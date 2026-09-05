@@ -166,7 +166,7 @@ Result<Sha256Digest> sha256_file(const std::filesystem::path& path)
     }
     std::vector<UCHAR> object(object_size);
     status = BCryptCreateHash(algorithm, &hash, object.data(), object_size, nullptr, 0, 0);
-    std::array<char, 1024 * 1024> buffer{};
+    std::vector<char> buffer(64U * 1024U);
     while (status >= 0 && input)
     {
         input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
@@ -199,7 +199,7 @@ Result<Sha256Digest> sha256_file(const std::filesystem::path& path)
         return Result<Sha256Digest>::failure(hash_error("OpenSSL SHA-256 initialization failed"));
     }
 
-    std::array<char, 1024 * 1024> buffer{};
+    std::vector<char> buffer(64U * 1024U);
     while (input)
     {
         input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
