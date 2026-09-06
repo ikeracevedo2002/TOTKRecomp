@@ -255,8 +255,8 @@ class ModuleLowerer
                 assign(instruction, ConstantInt::get(cast<IntegerType>(result_type), 0U));
                 return Result<void>::success();
             }
-            auto* loaded = builder_.CreateLoad(Type::getInt64Ty(context_), register_pointer(instruction.reg),
-                                               "register.read");
+            Value* loaded = builder_.CreateLoad(Type::getInt64Ty(context_), register_pointer(instruction.reg),
+                                                "register.read");
             if (instruction.reg.width == ir::RegisterWidth::W32)
             {
                 loaded = builder_.CreateTrunc(loaded, Type::getInt32Ty(context_), "register.w");
@@ -497,7 +497,7 @@ class ModuleLowerer
             {
                 return checked;
             }
-            auto* loaded = builder_.CreateLoad(Type::getInt64Ty(context_), output, "guest.load.value");
+            Value* loaded = builder_.CreateLoad(Type::getInt64Ty(context_), output, "guest.load.value");
             if (instruction.result_type == ir::i32_type())
             {
                 loaded = builder_.CreateTrunc(loaded, Type::getInt32Ty(context_), "guest.load.w");
@@ -654,26 +654,26 @@ Result<runtime::ExecutionResult> LlvmBackend::execute(const ir::Function& functi
     {
         return Result<runtime::ExecutionResult>::failure(module.error());
     }
-    auto jit = LLJITBuilder().create();
+    auto jit = llvm::orc::LLJITBuilder().create();
     if (!jit)
     {
         return Result<runtime::ExecutionResult>::failure(
             expected_error(ErrorCode::JitCompilationFailed, "failed to create LLVM JIT: ", jit.takeError()));
     }
     auto& dylib = (*jit)->getMainJITDylib();
-    auto define = dylib.define(absoluteSymbols({
+    auto define = dylib.define(llvm::orc::absoluteSymbols({
         {(*jit)->mangleAndIntern("switchrecomp_runtime_guest_load"),
-         JITEvaluatedSymbol(pointerToJITTargetAddress(&runtime::switchrecomp_runtime_guest_load),
-                            JITSymbolFlags::Exported)},
+         llvm::orc::JITEvaluatedSymbol(llvm::orc::pointerToJITTargetAddress(&runtime::switchrecomp_runtime_guest_load),
+                                       llvm::JITSymbolFlags::Exported)},
         {(*jit)->mangleAndIntern("switchrecomp_runtime_guest_store"),
-         JITEvaluatedSymbol(pointerToJITTargetAddress(&runtime::switchrecomp_runtime_guest_store),
-                            JITSymbolFlags::Exported)},
+         llvm::orc::JITEvaluatedSymbol(llvm::orc::pointerToJITTargetAddress(&runtime::switchrecomp_runtime_guest_store),
+                                       llvm::JITSymbolFlags::Exported)},
         {(*jit)->mangleAndIntern("switchrecomp_runtime_guest_address_add"),
-         JITEvaluatedSymbol(pointerToJITTargetAddress(&runtime::switchrecomp_runtime_guest_address_add),
-                            JITSymbolFlags::Exported)},
+         llvm::orc::JITEvaluatedSymbol(llvm::orc::pointerToJITTargetAddress(&runtime::switchrecomp_runtime_guest_address_add),
+                                       llvm::JITSymbolFlags::Exported)},
         {(*jit)->mangleAndIntern("switchrecomp_runtime_trap"),
-         JITEvaluatedSymbol(pointerToJITTargetAddress(&runtime::switchrecomp_runtime_trap),
-                            JITSymbolFlags::Exported)},
+         llvm::orc::JITEvaluatedSymbol(llvm::orc::pointerToJITTargetAddress(&runtime::switchrecomp_runtime_trap),
+                                       llvm::JITSymbolFlags::Exported)},
     }));
     if (define)
     {
@@ -682,7 +682,7 @@ Result<runtime::ExecutionResult> LlvmBackend::execute(const ir::Function& functi
                            std::move(define)));
     }
     auto added = (*jit)->addIRModule(
-        ThreadSafeModule(std::move(module.value()), std::move(context)));
+        llvm::orc::ThreadSafeModule(std::move(module.value()), std::move(context)));
     if (added)
     {
         return Result<runtime::ExecutionResult>::failure(
