@@ -1,9 +1,9 @@
 # TotkRecomp Architecture and Implementation Plan
 
-> Status: Proposed architecture  
+> Status: Proposed architecture with Milestone 0 bootstrap implemented  
 > Repository snapshot: 2026-09-05  
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
-> Current repository state: Empty; no implementation, build system, CI, metadata, or supported game build has been committed.
+> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, and the `nso-inspect` CLI skeleton are committed; no supported game build has been committed.
 
 This document is the primary engineering RFC for TotkRecomp. It describes the intended architecture, the evidence behind the design, the work required to validate it, and the boundaries of what is currently known.
 
@@ -13,7 +13,7 @@ It is deliberately conservative. A proposed component is not evidence that the c
 
 ### Existing
 
-At the time of this writing, the repository contains no committed files. There is therefore no existing source tree, build system, runtime, recompiler, metadata format, CI configuration, test suite, game version, symbol database, renderer, or documented implementation decision to preserve.
+The repository now contains the initial Milestone 0 bootstrap: a C++20 source tree, CMake build, common safety utilities, manifest validation, tests, and CI. There is still no runtime, recompiler, metadata for a supported game version, symbol database, renderer, or supported game build to preserve.
 
 ### Proposed
 
@@ -1910,7 +1910,7 @@ Reference links are for research and provenance. They do not grant permission to
 
 This RFC is complete when:
 
-- The repository state is accurately described as empty.
+- The repository state is accurately described, including the initial bootstrap foundation.
 - Existing, proposed, future, and verification-needed items are distinguishable.
 - The architecture explicitly avoids becoming a full Switch emulator.
 - NSO, MOD0, dynamic data, relocations, guest memory, CPU state, function discovery, indirect calls, jump tables, runtime services, files, threads, atomics, exceptions, graphics, shaders, input, audio, timing, testing, debugging, build, licensing, risks, milestones, open questions, and immediate tasks are covered.

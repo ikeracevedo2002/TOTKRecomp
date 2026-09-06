@@ -1,0 +1,27 @@
+# Build output
+/build/
+/out/
+/.cache/
+
+# Local developer configuration
+/config/local.json
+/config/*.local.json
+/totkrecomp.local.toml
+
+# Local game data and analysis material; never commit these directories.
+/local-game-data/
+/targets/totk/local/
+/analysis-local/
+
+# Generated reports and logs
+*.log
+/reports/
+/build/generated/
+/build/reports/
+/build/cache/
+
+# IDE state
+.vs/
+.vscode/
+.idea/
+compile_commands.json
