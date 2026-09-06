@@ -663,17 +663,17 @@ Result<runtime::ExecutionResult> LlvmBackend::execute(const ir::Function& functi
     auto& dylib = (*jit)->getMainJITDylib();
     auto define = dylib.define(llvm::orc::absoluteSymbols({
         {(*jit)->mangleAndIntern("switchrecomp_runtime_guest_load"),
-         llvm::JITEvaluatedSymbol(llvm::pointerToJITTargetAddress(&runtime::switchrecomp_runtime_guest_load),
-                                  llvm::JITSymbolFlags::Exported)},
+         llvm::orc::ExecutorSymbolDef::fromPtr(&runtime::switchrecomp_runtime_guest_load,
+                                               llvm::JITSymbolFlags::Exported)},
         {(*jit)->mangleAndIntern("switchrecomp_runtime_guest_store"),
-         llvm::JITEvaluatedSymbol(llvm::pointerToJITTargetAddress(&runtime::switchrecomp_runtime_guest_store),
-                                  llvm::JITSymbolFlags::Exported)},
+         llvm::orc::ExecutorSymbolDef::fromPtr(&runtime::switchrecomp_runtime_guest_store,
+                                               llvm::JITSymbolFlags::Exported)},
         {(*jit)->mangleAndIntern("switchrecomp_runtime_guest_address_add"),
-         llvm::JITEvaluatedSymbol(llvm::pointerToJITTargetAddress(&runtime::switchrecomp_runtime_guest_address_add),
-                                  llvm::JITSymbolFlags::Exported)},
+         llvm::orc::ExecutorSymbolDef::fromPtr(&runtime::switchrecomp_runtime_guest_address_add,
+                                               llvm::JITSymbolFlags::Exported)},
         {(*jit)->mangleAndIntern("switchrecomp_runtime_trap"),
-         llvm::JITEvaluatedSymbol(llvm::pointerToJITTargetAddress(&runtime::switchrecomp_runtime_trap),
-                                  llvm::JITSymbolFlags::Exported)},
+         llvm::orc::ExecutorSymbolDef::fromPtr(&runtime::switchrecomp_runtime_trap,
+                                               llvm::JITSymbolFlags::Exported)},
     }));
     if (define)
     {
