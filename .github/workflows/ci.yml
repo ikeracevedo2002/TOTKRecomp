@@ -47,6 +47,34 @@ jobs:
       - name: LLVM lift smoke test
         run: build/aarch64-lift --hex 0000018bc0035fd6 --show-disassembly --show-ir --show-llvm --execute-ir --execute-native
 
+  linux-sanitizers:
+    name: Linux / GCC / ASan + UBSan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes cmake ninja-build libssl-dev
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DTOTKRECOMP_ENABLE_LLVM=OFF -DTOTKRECOMP_ENABLE_SANITIZERS=ON
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  linux-thread-sanitizer:
+    name: Linux / GCC / TSan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes cmake ninja-build libssl-dev
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DTOTKRECOMP_ENABLE_LLVM=OFF -DTOTKRECOMP_ENABLE_THREAD_SANITIZER=ON
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
   windows:
     name: Windows / MSVC
     runs-on: windows-2025

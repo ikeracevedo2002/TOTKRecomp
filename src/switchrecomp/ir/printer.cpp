@@ -141,6 +141,34 @@ std::string print(const Function& function)
                 print_operands(output, instruction);
                 output << " (16 bytes)";
             }
+            else if (instruction.opcode == Opcode::AtomicLoad ||
+                     instruction.opcode == Opcode::AtomicStore ||
+                     instruction.opcode == Opcode::ExclusiveLoad ||
+                     instruction.opcode == Opcode::ExclusiveStore)
+            {
+                output << " size=" << static_cast<unsigned int>(instruction.memory_size)
+                       << " order=" << memory_order_name(instruction.memory_order);
+                if (!instruction.operands.empty())
+                {
+                    output << " ";
+                    print_operands(output, instruction);
+                }
+            }
+            else if (instruction.opcode == Opcode::MemoryBarrier)
+            {
+                output << " kind=" << barrier_kind_name(instruction.barrier_kind)
+                       << " option=" << barrier_option_name(instruction.barrier_option);
+            }
+            else if (instruction.opcode == Opcode::ReadSystemRegister ||
+                     instruction.opcode == Opcode::WriteSystemRegister)
+            {
+                output << " " << system_register_name(instruction.system_register);
+                if (!instruction.operands.empty())
+                {
+                    output << ", ";
+                    print_operands(output, instruction);
+                }
+            }
             else if (!instruction.operands.empty())
             {
                 output << ' ';

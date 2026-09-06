@@ -22,11 +22,16 @@ class LlvmBackend
 
     [[nodiscard]] static Result<std::unique_ptr<LlvmBackend>> create();
 
-    // Lowers and verifies a function, returning textual LLVM IR for diagnostics and tests.
+#ifndef SWITCHRECOMP_LEGACY_LLVM_IMPL
     [[nodiscard]] Result<std::string> lower_to_llvm_ir(const ir::Function& function) const;
-
-    // Compiles the Semantic IR with LLVM's native JIT and invokes the internal ABI.
     [[nodiscard]] Result<runtime::ExecutionResult> execute(
+        const ir::Function& function, runtime::CpuState& cpu, runtime::RuntimeContext& runtime,
+        const runtime::ExecutionOptions& options = {}) const;
+#endif
+
+    // Internal Milestone 0-8 backend retained for functions that do not contain concurrency IR.
+    [[nodiscard]] Result<std::string> lower_to_llvm_ir_legacy(const ir::Function& function) const;
+    [[nodiscard]] Result<runtime::ExecutionResult> execute_legacy(
         const ir::Function& function, runtime::CpuState& cpu, runtime::RuntimeContext& runtime,
         const runtime::ExecutionOptions& options = {}) const;
 

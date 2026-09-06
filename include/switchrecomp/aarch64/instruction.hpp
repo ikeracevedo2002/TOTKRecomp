@@ -21,96 +21,34 @@ enum class SimdOperation : std::uint8_t
     Trn1, Trn2, Fcmeq, Fcmgt, Fcmge, Cmeq, Cmgt, Cmge, Cmhi, Cmhs,
 };
 
+enum class AtomicMemoryOrder : std::uint8_t { Relaxed, Acquire, Release };
+enum class BarrierKind : std::uint8_t { Dmb, Dsb, Isb };
+enum class BarrierOption : std::uint8_t {
+    Sy, St, Ld, Ish, Ishst, Ishld, Nsh, Nshst, Nshld, Osh, Oshst, Oshld, Invalid
+};
+enum class SystemRegister : std::uint8_t { None, TpidrEl0, TpidrroEl0 };
+
 enum class InstructionId : std::uint16_t
 {
     Unknown,
     Nop,
-    Add,
-    Adds,
-    Sub,
-    Subs,
-    And,
-    Ands,
-    Orr,
-    Orn,
-    Eor,
-    Eon,
-    Bic,
-    Bics,
-    Mov,
-    Mvn,
-    Cmp,
-    Cmn,
-    Ccmp,
-    Ccmn,
-    Tst,
-    Neg,
-    Negs,
-    Csel,
-    Csinc,
-    Csinv,
-    Csneg,
-    Cset,
-    Csetm,
-    Cinc,
-    Cinv,
-    Cneg,
-    Movz,
-    Movk,
-    Movn,
-    Lsl,
-    Lsr,
-    Asr,
-    Ror,
-    Ubfm,
-    Sbfm,
-    Bfm,
-    Mul,
-    Madd,
-    Msub,
-    Mneg,
-    Udiv,
-    Sdiv,
-    Adr,
-    Adrp,
-    Ldr,
-    Ldrb,
-    Ldrh,
-    Ldrsb,
-    Ldrsh,
-    Ldrsw,
-    Str,
-    Strb,
-    Strh,
-    Ldp,
-    Stp,
-    Ldur,
-    Stur,
-    LdrLiteral,
-    B,
-    Bl,
-    BCond,
-    Br,
-    Blr,
-    Ret,
-    Cbz,
-    Cbnz,
-    Tbz,
-    Tbnz,
+    Add, Adds, Sub, Subs, And, Ands, Orr, Orn, Eor, Eon, Bic, Bics,
+    Mov, Mvn, Cmp, Cmn, Ccmp, Ccmn, Tst, Neg, Negs,
+    Csel, Csinc, Csinv, Csneg, Cset, Csetm, Cinc, Cinv, Cneg,
+    Movz, Movk, Movn, Lsl, Lsr, Asr, Ror, Ubfm, Sbfm, Bfm,
+    Mul, Madd, Msub, Mneg, Udiv, Sdiv, Adr, Adrp,
+    Ldr, Ldrb, Ldrh, Ldrsb, Ldrsh, Ldrsw, Str, Strb, Strh,
+    Ldp, Stp, Ldur, Stur, LdrLiteral,
+    B, Bl, BCond, Br, Blr, Ret, Cbz, Cbnz, Tbz, Tbnz,
     FpSimd,
-    Ldxr,
-    Stxr,
-    Ldaxr,
-    Stlxr,
-    Dmb,
-    Dsb,
-    Isb,
-    Svc,
-    Brk,
-    Hlt,
-    Hvc,
-    Smc,
-    Eret,
+    Ldxr, Ldxrb, Ldxrh, Stxr, Stxrb, Stxrh,
+    Ldaxr, Ldaxrb, Ldaxrh, Stlxr, Stlxrb, Stlxrh,
+    Ldar, Ldarb, Ldarh, Stlr, Stlrb, Stlrh,
+    Ldxp, Ldaxp, Stxp, Stlxp,
+    Clrex,
+    Dmb, Dsb, Isb,
+    Mrs, Msr,
+    Svc, Brk, Hlt, Hvc, Smc, Eret,
 };
 
 enum class ControlFlowKind : std::uint8_t
@@ -150,10 +88,18 @@ struct DecodedInstruction
     bool backend_decoded = false;
     bool normalized = false;
     SimdOperation simd_operation = SimdOperation::None;
+    AtomicMemoryOrder memory_order = AtomicMemoryOrder::Relaxed;
+    std::uint8_t atomic_width = 0U;
+    std::optional<Register> exclusive_status_register;
+    BarrierKind barrier_kind = BarrierKind::Dmb;
+    BarrierOption barrier_option = BarrierOption::Sy;
+    SystemRegister system_register = SystemRegister::None;
 };
 
 [[nodiscard]] std::string_view instruction_id_name(InstructionId id) noexcept;
 [[nodiscard]] std::string_view control_flow_kind_name(ControlFlowKind kind) noexcept;
 [[nodiscard]] std::string_view simd_operation_name(SimdOperation operation) noexcept;
+[[nodiscard]] std::string_view barrier_option_name(BarrierOption option) noexcept;
+[[nodiscard]] std::string_view system_register_name(SystemRegister reg) noexcept;
 
 } // namespace switchrecomp::aarch64

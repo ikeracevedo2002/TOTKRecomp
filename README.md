@@ -7,7 +7,7 @@ TOTK-specific target metadata.
 
 ## Current status
 
-Milestones 0, 1, 2A, 2B, 3, 4, 5, 6, 7, and 8 are implemented: C++20/CMake build targets, common
+Milestones 0, 1, 2A, 2B, 3, 4, 5, 6, 7, 8, and 9 are implemented: C++20/CMake build targets, common
 bounds-checked binary utilities, SHA-256 validation, logging, versioned
 target-manifest validation, strict fixed-size NSO0 parsing, bounded section
 materialization, a checked host-backed guest memory map, MOD0/dynamic/RELA
@@ -23,6 +23,11 @@ semantics, adds deterministic synthetic coverage fixtures, and provides the
 Milestone 8 adds a project-owned AArch64 FP/SIMD state model, scalar IEEE-754
 reference semantics, required NEON lane operations, S/D/Q memory forms, and
 interpreter/LLVM lowering through the same typed IR.
+Milestone 9 adds joinable native guest threads, per-thread CpuState/TLS and
+exclusive monitors, synchronized shared guest memory, acquire/release ordering,
+barriers, a stable C runtime ABI, and interpreter/LLVM lowering for the
+documented atomic subset. Pair-exclusive/LSE forms, WFE/WFI, and Horizon
+services remain explicit unsupported boundaries.
 
 No supported TOTK build is committed. The repository contains no game binaries,
 keys, firmware, SDKs, or extracted game assets. The committed TOTK manifest is an
@@ -79,6 +84,7 @@ On a multi-config generator, use `build/Debug/nso-inspect`.
 - [Milestone 4 AArch64 analysis design](docs/MILESTONE_4.md)
 - [Semantic IR and expanded AArch64 lifting](docs/SEMANTIC_IR.md)
 - [Milestone 8 FP/SIMD design and support boundary](docs/MILESTONE_8.md)
+- [Milestone 9 threads, TLS, atomics, and memory ordering](docs/MILESTONE_9.md)
 - [AArch64 support matrix and coverage workflow](docs/AARCH64_SUPPORT.md)
 - [Build notes](docs/BUILD.md)
 - [Dependency policy](docs/DEPENDENCIES.md)
@@ -119,14 +125,22 @@ game assets.
   pair-memory, and test-branch semantics through the project-owned Semantic IR;
 - reference interpreter execution and optional LLVM lowering share the same
   typed IR primitives, with deterministic synthetic coverage reports.
+- joinable native guest threads with stable project-owned IDs and captured
+  worker errors;
+- per-thread CpuState/TLS and exclusive monitor state, synchronized shared guest
+  memory, acquire/release ordering, deterministic 64-byte reservations, and
+  DMB/DSB/ISB runtime barriers;
+- normalized AArch64 M9 IR, reference interpretation, LLVM 18 helper lowering,
+  and decoder-to-backend end-to-end fixtures.
 
 The default materialization limits are 256 MiB per segment and 512 MiB for the
 combined `.text`, `.rodata`, `.data`, and BSS buffers. Library callers can pass
 smaller or larger limits explicitly; limits are checked before allocation.
 
 ZBIC decoding, REL tables, lazy PLT binding, symbol versioning, function-map
-dispatch, atomics, Horizon/runtime HLE, renderer, exact TOTK target metadata, and
-game execution remain unimplemented. LLVM is optional and is enabled with
+dispatch, pair-exclusive/LSE atomics, WFE/WFI, Horizon/runtime HLE, renderer,
+exact TOTK target metadata, and game execution remain unimplemented. LLVM is
+optional and is enabled with
 `-DTOTKRECOMP_ENABLE_LLVM=ON` when a pinned LLVM installation is available.
 `nso-inspect` accepts `--header-only` when a caller needs
 to inspect a ZBIC-marked header without claiming materialization succeeded.
@@ -143,6 +157,7 @@ to inspect a ZBIC-marked header without claiming materialization succeeded.
 - Milestone 6 — Semantic IR and minimal AArch64 lifting: implemented.
 - Milestone 7 — Expanded AArch64 semantics and real-code coverage tooling: implemented.
 - Milestone 8 — AArch64 FP/SIMD state, semantics, and required vector memory: implemented.
+- Milestone 9 — Native threads, TLS, atomics, barriers, and memory ordering: implemented for the documented synthetic subset.
 
 Materialization consumes a legally obtained, already prepared local NSO. The
 repository does not decrypt, extract, or distribute Nintendo content.

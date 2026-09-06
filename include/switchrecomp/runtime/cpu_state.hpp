@@ -24,6 +24,8 @@ struct CpuState
     std::uint32_t fpcr = 0U;
     std::uint32_t fpsr = 0U;
     std::array<Vector128, 32> vreg{};
+    std::uint64_t tpidr_el0 = 0U;
+    std::uint64_t tpidrro_el0 = 0U;
 };
 
 static_assert(std::is_standard_layout_v<CpuState>);
@@ -34,6 +36,9 @@ static_assert(offsetof(CpuState, pc) == 32U * sizeof(std::uint64_t));
 static_assert(offsetof(CpuState, fpcr) == 268U);
 static_assert(offsetof(CpuState, fpsr) == 272U);
 static_assert(offsetof(CpuState, vreg) == 280U);
+static_assert(offsetof(CpuState, tpidr_el0) == 792U);
+static_assert(offsetof(CpuState, tpidrro_el0) == 800U);
+static_assert(sizeof(CpuState) == 808U);
 
 [[nodiscard]] std::uint64_t read_register(const CpuState& state, const ir::GuestRegister& reg) noexcept;
 void write_register(CpuState& state, const ir::GuestRegister& reg, std::uint64_t value) noexcept;

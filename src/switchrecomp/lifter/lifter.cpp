@@ -3043,12 +3043,33 @@ bool is_instruction_liftable(aarch64::InstructionId id) noexcept
     case aarch64::InstructionId::Sdiv:
     case aarch64::InstructionId::FpSimd:
     case aarch64::InstructionId::Ldxr:
+    case aarch64::InstructionId::Ldxrb:
+    case aarch64::InstructionId::Ldxrh:
     case aarch64::InstructionId::Stxr:
+    case aarch64::InstructionId::Stxrb:
+    case aarch64::InstructionId::Stxrh:
     case aarch64::InstructionId::Ldaxr:
+    case aarch64::InstructionId::Ldaxrb:
+    case aarch64::InstructionId::Ldaxrh:
     case aarch64::InstructionId::Stlxr:
+    case aarch64::InstructionId::Stlxrb:
+    case aarch64::InstructionId::Stlxrh:
+    case aarch64::InstructionId::Ldar:
+    case aarch64::InstructionId::Ldarb:
+    case aarch64::InstructionId::Ldarh:
+    case aarch64::InstructionId::Stlr:
+    case aarch64::InstructionId::Stlrb:
+    case aarch64::InstructionId::Stlrh:
+    case aarch64::InstructionId::Ldxp:
+    case aarch64::InstructionId::Ldaxp:
+    case aarch64::InstructionId::Stxp:
+    case aarch64::InstructionId::Stlxp:
+    case aarch64::InstructionId::Clrex:
     case aarch64::InstructionId::Dmb:
     case aarch64::InstructionId::Dsb:
     case aarch64::InstructionId::Isb:
+    case aarch64::InstructionId::Mrs:
+    case aarch64::InstructionId::Msr:
     case aarch64::InstructionId::Svc:
     case aarch64::InstructionId::Brk:
     case aarch64::InstructionId::Hlt:

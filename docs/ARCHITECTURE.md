@@ -1,6 +1,6 @@
 # TotkRecomp Architecture and Implementation Plan
 
-> Status: Proposed architecture with Milestones 0–8 implemented
+> Status: Proposed architecture with Milestones 0–9 implemented
 > Repository snapshot: 2026-09-06
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
 > Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, MOD0/dynamic/RELA metadata discovery, dynamic symbol/relocation application, expanded AArch64 Semantic IR and lifting, synthetic tests, and deterministic inspection/coverage reports are committed; no supported game build has been committed.
@@ -17,7 +17,8 @@ The repository contains the Milestone 0 bootstrap, Milestone 1 strict NSO0
 header parser, Milestone 2A image materializer, Milestone 2B guest loader,
 Milestone 3 MOD0/dynamic metadata parser, Milestone 4 decoder/CFG, Milestone 5
 dynamic linking, Milestone 6 Semantic IR/lifting, Milestone 7 expanded
-AArch64 semantics and coverage, and Milestone 8 FP/SIMD state and semantics:
+AArch64 semantics and coverage, Milestone 8 FP/SIMD state and semantics, and
+the controlled Milestone 9 thread/TLS/atomic runtime subset:
 a C++20 source tree, CMake build, common safety utilities, manifest validation,
 tests, CI, strict NSO0 inspection, safe NSO image
 materialization, integrity verification, a checked guest-memory loader, and a
@@ -25,8 +26,10 @@ deterministic `nso-inspect` report, an LLVM-independent typed Semantic IR, a
 verifier, a reference interpreter, and an optional LLVM lowering/JIT backend for
 synthetic standalone functions, normalized scalar memory/control-flow semantics,
 and a local whole-range coverage scanner. Milestone 8 adds shared V-register
-state, FPCR/FPSR, reference FP/NEON operations, and checked vector memory. There
-is still no game-specific runtime,
+state, FPCR/FPSR, reference FP/NEON operations, and checked vector memory.
+Milestone 9 adds joinable native guest threads, per-thread CPU/TLS state,
+checked shared memory, exclusive reservations, acquire/release ordering, and
+barriers through a stable runtime ABI. There is still no game-specific runtime,
 metadata for a supported game version, renderer, or supported game build to
 preserve.
 
@@ -1794,15 +1797,18 @@ documented in `docs/MILESTONE_8.md`.
 **Success:** Synthetic scalar and vector fixtures agree across the interpreter
 and optional LLVM backend, including raw IEEE edge cases and checked memory.
 
-### Milestone 9 — Threads and atomics
+### Milestone 9 — Threads and atomics — implemented
 
-**Goal:** Add native thread mapping, TLS, synchronization, barriers, exclusive
-operations, and the memory ordering required by translated code. Function-map
-dispatch and indirect-call identity remain prerequisites to be designed under
-the same evidence gate.
+**Implemented:** Joinable native guest threads with stable project-owned IDs,
+per-thread `CpuState`/TLS and exclusive monitors, checked synchronized shared
+memory, acquire/release order, deterministic 64-byte exclusive reservations,
+barriers, runtime ABI helpers, normalized M9 Semantic IR, reference interpreter
+execution, and optional LLVM 18 helper lowering. Pair-exclusive/LSE forms,
+WFE/WFI, Horizon services, and function-map dispatch remain explicit future
+boundaries.
 
 **Success:** Controlled multi-threaded workloads pass deterministic tests with
-explicit failure behavior for unsupported synchronization patterns.
+structured failures for unsupported synchronization patterns.
 
 ### Milestone 10 — Whole-main translation
 
@@ -2051,9 +2057,9 @@ These are the first practical engineering tasks. They intentionally stop before 
 - **Success:** Interpreter and native execution match the reference harness.
 - **Dependencies:** Decoder, IR, and runtime context.
 
-### 15. Expand only under differential coverage — Milestones 7 and 8 implemented
+### 15. Expand only under differential coverage — Milestones 7, 8, and 9 implemented
 
-- **Goal:** Add each architectural group only after differential coverage is available. FP/SIMD is now implemented in Milestone 8; function-map dispatch, threads, and atomics remain gated future work.
+- **Goal:** Add each architectural group only after differential coverage is available. FP/SIMD is implemented in Milestone 8, and the controlled native-thread/atomic subset is implemented in Milestone 9; function-map dispatch, pair-exclusive/LSE semantics, and Horizon services remain gated future work.
 - **Inputs:** Differential tests and failure corpus.
 - **Output:** Increasingly capable semantic IR/code generator and versioned coverage corpus.
 - **Success:** Each group passes tests before it is enabled for larger analysis.

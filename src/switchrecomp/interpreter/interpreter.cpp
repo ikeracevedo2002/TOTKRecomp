@@ -680,6 +680,10 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
                     return runtime_failure(runtime);
                 break;
             }
+            default:
+                return Result<runtime::ExecutionResult>::failure(make_error(
+                    ErrorCode::UnsupportedInstruction,
+                    "legacy interpreter received a Milestone 9 opcode"));
             }
         }
 
