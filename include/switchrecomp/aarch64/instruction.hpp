@@ -1,0 +1,107 @@
+#pragma once
+
+#include "switchrecomp/aarch64/operand.hpp"
+#include "switchrecomp/memory/guest_memory.hpp"
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace switchrecomp::aarch64
+{
+
+using GuestAddress = memory::GuestAddress;
+
+enum class InstructionId : std::uint16_t
+{
+    Unknown,
+    Nop,
+    Add,
+    Adds,
+    Sub,
+    Subs,
+    And,
+    Orr,
+    Eor,
+    Mov,
+    Cmp,
+    Csel,
+    Movz,
+    Movk,
+    Adr,
+    Adrp,
+    Ldr,
+    Str,
+    Ldp,
+    Stp,
+    Ldur,
+    Stur,
+    LdrLiteral,
+    B,
+    Bl,
+    BCond,
+    Br,
+    Blr,
+    Ret,
+    Cbz,
+    Cbnz,
+    Tbz,
+    Tbnz,
+    FpSimd,
+    Ldxr,
+    Stxr,
+    Ldaxr,
+    Stlxr,
+    Dmb,
+    Dsb,
+    Isb,
+    Svc,
+    Brk,
+    Hlt,
+    Hvc,
+    Smc,
+    Eret,
+};
+
+enum class ControlFlowKind : std::uint8_t
+{
+    Fallthrough,
+    DirectBranch,
+    ConditionalBranch,
+    DirectCall,
+    IndirectBranch,
+    IndirectCall,
+    Return,
+    Trap,
+    Exception,
+    Unknown,
+};
+
+struct ControlFlowInfo
+{
+    ControlFlowKind kind = ControlFlowKind::Fallthrough;
+    std::optional<GuestAddress> target;
+    std::optional<Register> register_target;
+    std::optional<Register> return_register;
+    std::optional<ConditionCode> condition;
+    bool has_fallthrough = true;
+};
+
+struct DecodedInstruction
+{
+    GuestAddress address = 0U;
+    std::uint32_t opcode = 0U;
+    InstructionId id = InstructionId::Unknown;
+    std::vector<Operand> operands;
+    ControlFlowInfo control_flow;
+    std::optional<GuestAddress> pc_relative_value;
+    std::string disassembly;
+    bool backend_decoded = false;
+    bool normalized = false;
+};
+
+[[nodiscard]] std::string_view instruction_id_name(InstructionId id) noexcept;
+[[nodiscard]] std::string_view control_flow_kind_name(ControlFlowKind kind) noexcept;
+
+} // namespace switchrecomp::aarch64

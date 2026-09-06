@@ -110,10 +110,10 @@ MOD0, positive and negative offsets, overflow/underflow, cross-region reads,
 dynamic termination limits, unknown and duplicate tags, string/symbol/RELA/
 JMPREL validation, signed RELA addends, and GuestMemory immutability.
 
-The next stage is Milestone 4: relocation application over `ModuleMetadata`,
-`DynamicInfo`, `RelaEntry`, and `GuestMemory`. Symbol resolution, import
-resolution, AArch64 decoding, XCI/NCA handling, keys, and runtime/HLE remain
-out of scope.
+Milestone 4 is the implemented AArch64 decoding and control-flow layer. It
+consumes executable `GuestMemory` bytes without applying relocations or
+resolving imports. Symbol resolution, relocation application, XCI/NCA handling,
+keys, and runtime/HLE remain out of scope.
 
 ## Technical references
 

@@ -2,7 +2,8 @@
 
 TOTKRecomp uses an out-of-source CMake build and requires C++20. A clean
 configure fetches the pinned nlohmann/json, Catch2, and LZ4 sources through
-CMake `FetchContent`; no game files are downloaded.
+CMake `FetchContent`; no game files are downloaded. Capstone v5.0.3 is fetched
+at the pinned commit listed in `docs/DEPENDENCIES.md` for the AArch64 decoder.
 
 ## Configure, build, and test
 
@@ -10,6 +11,14 @@ CMake `FetchContent`; no game files are downloaded.
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ctest --test-dir build --output-on-failure
+```
+
+The decoder/CFG CLI accepts a legally obtained raw AArch64 code blob. For a
+smoke test without target content, a caller can provide a synthetic four-byte
+instruction file and run:
+
+```bash
+build/aarch64-analyze --base 0x1000 --entry 0x1000 path/to/raw-aarch64-code.bin
 ```
 
 Ninja is preferred but not mandatory. With a multi-config generator such as

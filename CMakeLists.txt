@@ -37,6 +37,36 @@ if(NOT TARGET lz4_static)
     add_subdirectory(${lz4_SOURCE_DIR}/build/cmake ${lz4_BINARY_DIR} EXCLUDE_FROM_ALL)
 endif()
 
+set(CAPSTONE_BUILD_SHARED_LIBS OFF CACHE BOOL "Build Capstone as a static library" FORCE)
+set(CAPSTONE_BUILD_TESTS OFF CACHE BOOL "Disable Capstone tests" FORCE)
+set(CAPSTONE_BUILD_CSTOOL OFF CACHE BOOL "Disable the Capstone command-line tool" FORCE)
+set(CAPSTONE_ARCHITECTURE_DEFAULT OFF CACHE BOOL "Disable unused Capstone architectures" FORCE)
+set(CAPSTONE_ARM_SUPPORT OFF CACHE BOOL "Disable Capstone ARM support" FORCE)
+set(CAPSTONE_ARM64_SUPPORT ON CACHE BOOL "Enable Capstone AArch64 support" FORCE)
+set(CAPSTONE_M68K_SUPPORT OFF CACHE BOOL "Disable Capstone M68K support" FORCE)
+set(CAPSTONE_MIPS_SUPPORT OFF CACHE BOOL "Disable Capstone MIPS support" FORCE)
+set(CAPSTONE_PPC_SUPPORT OFF CACHE BOOL "Disable Capstone PPC support" FORCE)
+set(CAPSTONE_SPARC_SUPPORT OFF CACHE BOOL "Disable Capstone SPARC support" FORCE)
+set(CAPSTONE_SYSZ_SUPPORT OFF CACHE BOOL "Disable Capstone SystemZ support" FORCE)
+set(CAPSTONE_XCORE_SUPPORT OFF CACHE BOOL "Disable Capstone XCore support" FORCE)
+set(CAPSTONE_X86_SUPPORT OFF CACHE BOOL "Disable Capstone X86 support" FORCE)
+set(CAPSTONE_TMS320C64X_SUPPORT OFF CACHE BOOL "Disable Capstone TMS320C64x support" FORCE)
+set(CAPSTONE_M680X_SUPPORT OFF CACHE BOOL "Disable Capstone M680X support" FORCE)
+set(CAPSTONE_EVM_SUPPORT OFF CACHE BOOL "Disable Capstone EVM support" FORCE)
+set(CAPSTONE_WASM_SUPPORT OFF CACHE BOOL "Disable Capstone WebAssembly support" FORCE)
+set(CAPSTONE_MOS65XX_SUPPORT OFF CACHE BOOL "Disable Capstone MOS65XX support" FORCE)
+set(CAPSTONE_BPF_SUPPORT OFF CACHE BOOL "Disable Capstone BPF support" FORCE)
+set(CAPSTONE_RISCV_SUPPORT OFF CACHE BOOL "Disable Capstone RISC-V support" FORCE)
+set(CAPSTONE_SH_SUPPORT OFF CACHE BOOL "Disable Capstone SH support" FORCE)
+set(CAPSTONE_TRICORE_SUPPORT OFF CACHE BOOL "Disable Capstone TriCore support" FORCE)
+FetchContent_Declare(
+    capstone
+    GIT_REPOSITORY https://github.com/capstone-engine/capstone.git
+    GIT_TAG 5cca00533dadfe53181f1de3525f859769f69b65
+    GIT_SHALLOW FALSE
+)
+FetchContent_MakeAvailable(capstone)
+
 if(TOTKRECOMP_BUILD_TESTS)
     enable_testing()
     FetchContent_Declare(
@@ -146,11 +176,45 @@ target_link_libraries(switchrecomp-memory
 totkrecomp_enable_project_warnings(switchrecomp-memory)
 totkrecomp_enable_sanitizers(switchrecomp-memory)
 
+add_library(switchrecomp-aarch64
+    src/switchrecomp/aarch64/register.cpp
+    src/switchrecomp/aarch64/instruction.cpp
+    src/switchrecomp/aarch64/decoder.cpp
+)
+target_include_directories(switchrecomp-aarch64
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-aarch64
+    PUBLIC switchrecomp-common switchrecomp-memory
+    PRIVATE capstone
+)
+totkrecomp_enable_project_warnings(switchrecomp-aarch64)
+totkrecomp_enable_sanitizers(switchrecomp-aarch64)
+
+add_library(switchrecomp-analysis
+    src/switchrecomp/analysis/control_flow_graph.cpp
+    src/switchrecomp/analysis/cfg_analyzer.cpp
+)
+target_include_directories(switchrecomp-analysis
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-analysis
+    PUBLIC switchrecomp-common switchrecomp-memory switchrecomp-aarch64
+)
+totkrecomp_enable_project_warnings(switchrecomp-analysis)
+totkrecomp_enable_sanitizers(switchrecomp-analysis)
+
 add_executable(nso-inspect tools/nso-inspect/main.cpp)
 target_link_libraries(nso-inspect PRIVATE switchrecomp-memory)
 target_compile_definitions(nso-inspect PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
 totkrecomp_enable_project_warnings(nso-inspect)
 totkrecomp_enable_sanitizers(nso-inspect)
+
+add_executable(aarch64-analyze tools/aarch64-analyze/main.cpp)
+target_link_libraries(aarch64-analyze PRIVATE switchrecomp-analysis)
+target_compile_definitions(aarch64-analyze PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
+totkrecomp_enable_project_warnings(aarch64-analyze)
+totkrecomp_enable_sanitizers(aarch64-analyze)
 
 if(TOTKRECOMP_BUILD_TESTS)
     add_executable(switchrecomp-tests
@@ -161,12 +225,16 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/nso_materialization_tests.cpp
         tests/mod0_dynamic_tests.cpp
         tests/target_tests.cpp
+        tests/aarch64_decoder_tests.cpp
+        tests/cfg_analyzer_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE
             switchrecomp-common
             switchrecomp-format
             switchrecomp-memory
+            switchrecomp-aarch64
+            switchrecomp-analysis
             switchrecomp-target
             lz4_static
             Catch2::Catch2WithMain
@@ -178,4 +246,4 @@ if(TOTKRECOMP_BUILD_TESTS)
     catch_discover_tests(switchrecomp-tests)
 endif()
 
-install(TARGETS nso-inspect RUNTIME DESTINATION bin)
+install(TARGETS nso-inspect aarch64-analyze RUNTIME DESTINATION bin)
