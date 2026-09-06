@@ -6,6 +6,44 @@
 namespace switchrecomp::ir
 {
 
+enum class MemoryOrder : std::uint8_t
+{
+    Relaxed,
+    Acquire,
+    Release,
+    AcquireRelease,
+    SequentiallyConsistent,
+};
+
+enum class BarrierKind : std::uint8_t
+{
+    Dmb,
+    Dsb,
+    Isb,
+};
+
+enum class BarrierOption : std::uint8_t
+{
+    Sy,
+    St,
+    Ld,
+    Ish,
+    Ishst,
+    Ishld,
+    Nsh,
+    Nshst,
+    Nshld,
+    Osh,
+    Oshst,
+    Oshld,
+};
+
+enum class SystemRegister : std::uint8_t
+{
+    TpidrEl0,
+    TpidrroEl0,
+};
+
 enum class Opcode : std::uint8_t
 {
     Constant,
@@ -43,6 +81,14 @@ enum class Opcode : std::uint8_t
     GuestAddressAddValue,
     GuestLoad,
     GuestStore,
+    AtomicLoad,
+    AtomicStore,
+    ExclusiveLoad,
+    ExclusiveStore,
+    ClearExclusive,
+    MemoryBarrier,
+    ReadSystemRegister,
+    WriteSystemRegister,
     BitCast,
     ReadVectorRegister,
     WriteVectorRegister,
@@ -117,5 +163,9 @@ enum class ConditionCode : std::uint8_t
 [[nodiscard]] std::string_view flag_name(Flag flag) noexcept;
 [[nodiscard]] std::string_view condition_code_name(ConditionCode condition) noexcept;
 [[nodiscard]] std::string_view vector_arrangement_name(VectorArrangement arrangement) noexcept;
+[[nodiscard]] std::string_view memory_order_name(MemoryOrder order) noexcept;
+[[nodiscard]] std::string_view barrier_kind_name(BarrierKind kind) noexcept;
+[[nodiscard]] std::string_view barrier_option_name(BarrierOption option) noexcept;
+[[nodiscard]] std::string_view system_register_name(SystemRegister reg) noexcept;
 
 } // namespace switchrecomp::ir
