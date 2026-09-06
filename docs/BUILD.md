@@ -4,6 +4,10 @@ TOTKRecomp uses an out-of-source CMake build and requires C++20. A clean
 configure fetches the pinned nlohmann/json, Catch2, and LZ4 sources through
 CMake `FetchContent`; no game files are downloaded. Capstone v5.0.3 is fetched
 at the pinned commit listed in `docs/DEPENDENCIES.md` for the AArch64 decoder.
+The LLVM backend is discovered with `find_package(LLVM CONFIG)` and prefers
+LLVM 22.1.8. Set `LLVM_DIR` to the installed LLVM CMake package directory to
+enable lowering, ORC JIT execution, and native object emission. The core and
+interpreter remain buildable with `-DSWITCHRECOMP_ENABLE_LLVM=OFF`.
 
 ## Configure, build, and test
 
@@ -19,6 +23,8 @@ instruction file and run:
 
 ```bash
 build/aarch64-analyze --base 0x1000 --entry 0x1000 path/to/raw-aarch64-code.bin
+build/aarch64-lift --base 0x1000 --entry 0x1000 path/to/raw-aarch64-code.bin
+build/aarch64-lift --print-llvm --base 0x1000 --entry 0x1000 path/to/raw-aarch64-code.bin
 ```
 
 Ninja is preferred but not mandatory. With a multi-config generator such as
@@ -42,3 +48,7 @@ cmake -S . -B build -G Ninja \
 
 The normal build never accesses game files and never requires Nintendo keys or
 other proprietary content.
+
+LLVM-specific smoke tests and object emission run only when LLVM is found. A
+missing LLVM package is reported as `llvm_unavailable`; there is no implicit
+interpreter fallback for a requested LLVM operation.

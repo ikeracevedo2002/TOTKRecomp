@@ -80,10 +80,12 @@ little-endian fetch, permissions, truncation, invalid opcodes, loops, diamonds,
 self-loops, calls, limits, invalid targets, deterministic rendering, and block
 splitting. No Nintendo or TOTK input is required.
 
-## Future Milestone 5 contract
+## Milestone 5/6 handoff contract
 
 Milestone 5 can consume a `ControlFlowGraph` whose instructions already contain
 registers, immediates, memory operands, conditions, direct targets, original
 opcodes, and stable instruction boundaries. It must not need to parse raw bytes
-again to reconstruct those properties. Semantic lifting remains a separate
-layer and is not implied by `backend_decoded` or `normalized`.
+again to reconstruct those properties. Milestone 5 consumes this contract for
+dynamic linking, and Milestone 6 consumes it for semantic lifting. Semantic
+lifting remains a separate layer and is not implied by `backend_decoded` or
+`normalized`.
