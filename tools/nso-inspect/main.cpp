@@ -1,4 +1,8 @@
+#include "switchrecomp/common/checked_arithmetic.hpp"
 #include "switchrecomp/format/nso.hpp"
+#include "switchrecomp/format/module_metadata.hpp"
+#include "switchrecomp/loader/nso_guest_loader.hpp"
+#include "switchrecomp/memory/guest_memory.hpp"
 #include "switchrecomp/version.hpp"
 
 #include <cstddef>
@@ -10,6 +14,7 @@
 #include <iostream>
 #include <limits>
 #include <new>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -120,6 +125,71 @@ void print_header(std::ostream& output, const switchrecomp::format::NsoHeader& h
            << '\n';
 }
 
+[[nodiscard]] std::string guest_address_or_absent(
+    const std::optional<switchrecomp::format::DynamicPointer>& pointer)
+{
+    return pointer ? hex_value(pointer->address, 16U) : "not-present";
+}
+
+void print_module_metadata(std::ostream& output,
+                           const switchrecomp::format::ModuleMetadata& metadata)
+{
+    output << "\nMOD0:\n";
+    if (!metadata.mod0)
+    {
+        output << "  found: no\n"
+                  "  status: optional metadata absent\n"
+                  "Dynamic:\n"
+                  "  status: not available (MOD0 absent)\n";
+        return;
+    }
+
+    const auto& mod0 = metadata.mod0.value();
+    output << "  found: yes\n"
+           << "  address: " << hex_value(mod0.address, 16U) << '\n'
+           << "  dynamic: " << hex_value(mod0.dynamic_address, 16U) << '\n'
+           << "  bss_start: " << hex_value(mod0.bss_start_address, 16U) << '\n'
+           << "  bss_end: " << hex_value(mod0.bss_end_address, 16U) << '\n'
+           << "  exception_info_start: "
+           << hex_value(mod0.exception_info_start_address, 16U) << '\n'
+           << "  exception_info_end: " << hex_value(mod0.exception_info_end_address, 16U)
+           << '\n'
+           << "  module_object: " << hex_value(mod0.module_object_address, 16U) << '\n';
+
+    output << "Dynamic:\n";
+    if (!metadata.dynamic)
+    {
+        output << "  status: not available\n";
+        return;
+    }
+
+    const auto& dynamic = metadata.dynamic.value();
+    output << "  entries: " << dynamic.entry_count << '\n'
+           << "  strtab: " << guest_address_or_absent(dynamic.strtab) << '\n'
+           << "  strsz: "
+           << (dynamic.strsz ? std::to_string(dynamic.strsz.value()) : "not-present") << '\n'
+           << "  symtab: " << guest_address_or_absent(dynamic.symtab) << '\n'
+           << "  syment: "
+           << (dynamic.syment ? std::to_string(dynamic.syment.value()) : "not-present") << '\n'
+           << "  rela: " << guest_address_or_absent(dynamic.rela) << '\n'
+           << "  relasz: "
+           << (dynamic.relasz ? std::to_string(dynamic.relasz.value()) : "not-present") << '\n'
+           << "  relaent: "
+           << (dynamic.relaent ? std::to_string(dynamic.relaent.value()) : "not-present")
+           << '\n'
+           << "  relocation_count: "
+           << (dynamic.rela_count ? std::to_string(dynamic.rela_count.value()) : "not-present")
+           << '\n'
+           << "  jmprel: " << guest_address_or_absent(dynamic.jmprel) << '\n'
+           << "  pltrelsz: "
+           << (dynamic.pltrelsz ? std::to_string(dynamic.pltrelsz.value()) : "not-present")
+           << '\n'
+           << "  jmprel_count: "
+           << (dynamic.jmprel_count ? std::to_string(dynamic.jmprel_count.value())
+                                    : "not-present")
+           << '\n';
+}
+
 [[nodiscard]] ExitCode error_exit_code(switchrecomp::ErrorCode code) noexcept
 {
     switch (code)
@@ -135,6 +205,8 @@ void print_header(std::ostream& output, const switchrecomp::format::NsoHeader& h
     case switchrecomp::ErrorCode::DecompressionFailed:
     case switchrecomp::ErrorCode::ResourceLimit:
     case switchrecomp::ErrorCode::HashMismatch:
+    case switchrecomp::ErrorCode::PermissionDenied:
+    case switchrecomp::ErrorCode::UnmappedMemory:
         return ExitCode::MalformedInput;
     default:
         return ExitCode::GeneralError;
@@ -259,6 +331,48 @@ int main(int argc, char** argv)
         return static_cast<int>(exit_code);
     }
 
+    std::optional<switchrecomp::format::ModuleMetadata> metadata;
+    if (!image.value().text.bytes.empty())
+    {
+        switchrecomp::memory::GuestMemory guest_memory;
+        const auto loaded = switchrecomp::loader::load_nso(image.value(), guest_memory);
+        if (!loaded)
+        {
+            const auto exit_code = error_exit_code(loaded.error().code);
+            std::cerr << "malformed input: " << loaded.error().message << '\n';
+            return static_cast<int>(exit_code);
+        }
+
+        const auto text_base = switchrecomp::checked_add_u64(
+            0U, static_cast<std::uint64_t>(image.value().text.memory_offset));
+        if (!text_base)
+        {
+            std::cerr << "malformed input: could not resolve the loaded text base\n";
+            return static_cast<int>(ExitCode::MalformedInput);
+        }
+        const auto parsed_metadata = switchrecomp::format::parse_module_metadata(
+            guest_memory, text_base.value());
+        if (!parsed_metadata)
+        {
+            const auto exit_code = error_exit_code(parsed_metadata.error().code);
+            std::cerr << "malformed input: " << parsed_metadata.error().message << '\n';
+            return static_cast<int>(exit_code);
+        }
+        metadata = parsed_metadata.value();
+    }
+
     print_header(std::cout, parsed.value(), &image.value());
+    if (metadata)
+    {
+        print_module_metadata(std::cout, metadata.value());
+    }
+    else
+    {
+        std::cout << "\nMOD0:\n"
+                     "  found: no\n"
+                     "  status: text segment empty; metadata not inspected\n"
+                     "Dynamic:\n"
+                     "  status: not available\n";
+    }
     return static_cast<int>(ExitCode::Success);
 }

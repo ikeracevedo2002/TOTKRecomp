@@ -130,6 +130,12 @@ totkrecomp_enable_sanitizers(switchrecomp-format)
 add_library(switchrecomp-memory
     src/switchrecomp/memory/guest_memory.cpp
     src/switchrecomp/loader/nso_guest_loader.cpp
+    # Metadata parsers consume GuestMemory, so they live in this layer while
+    # retaining their public format headers under include/.../format.
+    src/switchrecomp/format/module_metadata.cpp
+    src/switchrecomp/format/mod0.cpp
+    src/switchrecomp/format/elf_dynamic.cpp
+    src/switchrecomp/format/elf_rela.cpp
 )
 target_include_directories(switchrecomp-memory
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -141,7 +147,7 @@ totkrecomp_enable_project_warnings(switchrecomp-memory)
 totkrecomp_enable_sanitizers(switchrecomp-memory)
 
 add_executable(nso-inspect tools/nso-inspect/main.cpp)
-target_link_libraries(nso-inspect PRIVATE switchrecomp-format)
+target_link_libraries(nso-inspect PRIVATE switchrecomp-memory)
 target_compile_definitions(nso-inspect PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
 totkrecomp_enable_project_warnings(nso-inspect)
 totkrecomp_enable_sanitizers(nso-inspect)
@@ -153,6 +159,7 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/guest_memory_tests.cpp
         tests/nso_tests.cpp
         tests/nso_materialization_tests.cpp
+        tests/mod0_dynamic_tests.cpp
         tests/target_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
