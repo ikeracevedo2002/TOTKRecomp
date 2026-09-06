@@ -39,6 +39,10 @@ struct Instruction
     VectorCompareOperation vector_compare = VectorCompareOperation::Equal;
     bool signaling = false;
     bool signed_operation = false;
+    MemoryOrder memory_order = MemoryOrder::Relaxed;
+    BarrierKind barrier_kind = BarrierKind::Dmb;
+    BarrierOption barrier_option = BarrierOption::Sy;
+    SystemRegister system_register = SystemRegister::TpidrEl0;
 };
 
 enum class TerminatorKind : std::uint8_t
