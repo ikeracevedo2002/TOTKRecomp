@@ -217,7 +217,9 @@ class LoweringContext
     {
         auto* continuation = llvm::BasicBlock::Create(
             context_, "runtime_ok_" + std::to_string(runtime_block_counter_++), &function_);
-        builder.CreateCondBr(status, error_, continuation);
+        auto* failed = builder.CreateICmpNE(
+            status, llvm::ConstantInt::get(status->getType(), 0U), "runtime_failed");
+        builder.CreateCondBr(failed, error_, continuation);
         builder.SetInsertPoint(continuation);
     }
 
