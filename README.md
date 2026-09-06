@@ -79,6 +79,7 @@ On a multi-config generator, use `build/Debug/nso-inspect`.
 - [Milestone 4 AArch64 analysis design](docs/MILESTONE_4.md)
 - [Semantic IR and expanded AArch64 lifting](docs/SEMANTIC_IR.md)
 - [Milestone 8 FP/SIMD design and support boundary](docs/MILESTONE_8.md)
+- [Milestone 9 threads, TLS, atomics, and memory ordering](docs/MILESTONE_9.md)
 - [AArch64 support matrix and coverage workflow](docs/AARCH64_SUPPORT.md)
 - [Build notes](docs/BUILD.md)
 - [Dependency policy](docs/DEPENDENCIES.md)

@@ -815,6 +815,19 @@ Result<void> verify(const Function& function)
                     else checked = require_void();
                 }
                 break;
+            // Milestone 9 extends the verifier in verifier_m9.cpp. Keep these opcodes
+            // visible to the legacy structural verifier so a mixed function can be
+            // checked in one pass without treating the extension as an unknown opcode.
+            case Opcode::AtomicLoad:
+            case Opcode::AtomicStore:
+            case Opcode::ExclusiveLoad:
+            case Opcode::ExclusiveStore:
+            case Opcode::ClearExclusive:
+            case Opcode::MemoryBarrier:
+            case Opcode::ReadSystemRegister:
+            case Opcode::WriteSystemRegister:
+                checked = Result<void>::success();
+                break;
             default:
                 checked = invalid("instruction has an unknown opcode");
                 break;

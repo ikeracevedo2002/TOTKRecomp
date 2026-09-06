@@ -7,7 +7,12 @@ include(FetchContent)
 option(TOTKRECOMP_BUILD_TESTS "Build the TOTKRecomp test suite" ON)
 option(TOTKRECOMP_ENABLE_WARNINGS "Enable warnings for project-owned targets" ON)
 option(TOTKRECOMP_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(TOTKRECOMP_ENABLE_THREAD_SANITIZER "Enable ThreadSanitizer for project-owned targets" OFF)
 option(TOTKRECOMP_ENABLE_LLVM "Build the optional LLVM lowering and JIT backend" OFF)
+
+if(TOTKRECOMP_ENABLE_SANITIZERS AND TOTKRECOMP_ENABLE_THREAD_SANITIZER)
+    message(FATAL_ERROR "AddressSanitizer/UBSan and ThreadSanitizer cannot be enabled together")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -98,15 +103,20 @@ function(totkrecomp_enable_project_warnings target)
 endfunction()
 
 function(totkrecomp_enable_sanitizers target)
-    if(NOT TOTKRECOMP_ENABLE_SANITIZERS)
+    if(NOT TOTKRECOMP_ENABLE_SANITIZERS AND NOT TOTKRECOMP_ENABLE_THREAD_SANITIZER)
         return()
     endif()
 
     if(MSVC)
-        message(WARNING "TOTKRECOMP_ENABLE_SANITIZERS is not supported by this project on MSVC")
+        message(WARNING "Sanitizers are not supported by this project on MSVC")
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-        target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+        if(TOTKRECOMP_ENABLE_THREAD_SANITIZER)
+            target_compile_options(${target} PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
+            target_link_options(${target} PRIVATE -fsanitize=thread)
+        else()
+            target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+            target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+        endif()
     endif()
 endfunction()
 
@@ -253,10 +263,14 @@ totkrecomp_enable_sanitizers(switchrecomp-runtime-core)
 
 add_library(switchrecomp-lifter
     src/switchrecomp/lifter/lifter.cpp
+    src/switchrecomp/lifter/lifter_entry.cpp
     src/switchrecomp/lifter/lifter_m9.cpp
 )
 set_source_files_properties(src/switchrecomp/lifter/lifter.cpp PROPERTIES
     COMPILE_DEFINITIONS "SWITCHRECOMP_LEGACY_LIFTER_IMPL;lift_function=lift_function_legacy;is_instruction_liftable=is_instruction_liftable_legacy"
+)
+set_source_files_properties(src/switchrecomp/lifter/lifter_m9.cpp PROPERTIES
+    COMPILE_DEFINITIONS "lift_function=lift_function_m9_injected"
 )
 target_include_directories(switchrecomp-lifter
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -269,6 +283,10 @@ totkrecomp_enable_sanitizers(switchrecomp-lifter)
 
 add_library(switchrecomp-interpreter
     src/switchrecomp/interpreter/interpreter.cpp
+    src/switchrecomp/interpreter/interpreter_m9.cpp
+)
+set_source_files_properties(src/switchrecomp/interpreter/interpreter.cpp PROPERTIES
+    COMPILE_DEFINITIONS "SWITCHRECOMP_LEGACY_INTERPRETER_IMPL;execute=execute_legacy"
 )
 target_include_directories(switchrecomp-interpreter
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -286,6 +304,10 @@ if(TOTKRECOMP_ENABLE_LLVM)
         set(TOTKRECOMP_HAS_LLVM ON)
         add_library(switchrecomp-codegen-llvm
             src/switchrecomp/codegen/llvm_backend.cpp
+            src/switchrecomp/codegen/llvm_backend_m9.cpp
+        )
+        set_source_files_properties(src/switchrecomp/codegen/llvm_backend.cpp PROPERTIES
+            COMPILE_DEFINITIONS "SWITCHRECOMP_LEGACY_LLVM_IMPL;lower_to_llvm_ir=lower_to_llvm_ir_legacy;execute=execute_legacy"
         )
         target_include_directories(switchrecomp-codegen-llvm
             PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include

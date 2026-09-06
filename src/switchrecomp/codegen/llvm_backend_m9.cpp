@@ -65,7 +65,8 @@ class M9Lowerer
         auto* vector_pair = StructType::get(context_, {Type::getInt64Ty(context_), Type::getInt64Ty(context_)});
         auto* vector_array = ArrayType::get(vector_pair, 32U);
         cpu_type_->setBody({x_type, Type::getInt64Ty(context_), Type::getInt64Ty(context_), flags_type,
-                            Type::getInt32Ty(context_), Type::getInt32Ty(context_), vector_array});
+                            Type::getInt32Ty(context_), Type::getInt32Ty(context_), vector_array,
+                            Type::getInt64Ty(context_), Type::getInt64Ty(context_)});
     }
 
     [[nodiscard]] Result<std::unique_ptr<Module>> run()

@@ -1,6 +1,6 @@
 # Semantic IR and expanded AArch64 lifting
 
-Milestones 6, 7, and 8 provide an executable recompilation path for synthetic,
+Milestones 6, 7, 8, and 9 provide an executable recompilation path for synthetic,
 standalone AArch64 functions, with expanded integer, memory, and control-flow
 semantics:
 
@@ -39,6 +39,31 @@ Every lifted operation carries a `SourceLocation` containing the guest PC,
 original opcode, and (when enabled) the decoder's disassembly. The printer
 uses stable vector order and never emits host pointers.
 
+## Milestone 9 concurrency IR
+
+Concurrency is represented with orthogonal, project-owned IR metadata rather
+than host-language atomics embedded in lifted code:
+
+| IR operation | Meaning | Runtime boundary |
+| --- | --- | --- |
+| `AtomicLoad` / `AtomicStore` | checked shared access with `Relaxed`, `Acquire`, `Release`, or `SequentiallyConsistent` order | `switchrecomp_runtime_atomic_*` |
+| `ExclusiveLoad` / `ExclusiveStore` | LDXR-family monitor and status result | `switchrecomp_runtime_exclusive_*` |
+| `ClearExclusive` | CLREX | `switchrecomp_runtime_clear_exclusive` |
+| `MemoryBarrier` | DMB, DSB, or ISB plus encoded option | `switchrecomp_runtime_memory_barrier` |
+| `ReadSystemRegister` / `WriteSystemRegister` | TPIDR_EL0 and read-only TPIDRRO_EL0 | `switchrecomp_runtime_*_system_register` |
+
+`ir::MemoryOrder` is deliberately separate from `std::memory_order`; the
+verifier validates which order is legal for each access. All implementations
+use `SharedRuntimeState` and checked `GuestMemory` operations. Guest memory is
+never represented by a host pointer or an `atomic_ref`. Exclusive reservations
+are per thread and use deterministic 64-byte granules; any normal shared write
+invalidates overlapping reservations.
+
+The decoder normalizes acquire/release suffixes, access width, barrier kind and
+option, and system-register identity. The M9 lifter consumes only normalized
+forms. Pair-exclusive operations, LSE atomics, WFE/WFI, and Horizon scheduling
+are decoded or classified where possible but remain explicitly unsupported.
+
 ## CPU state and ABI
 
 `runtime::CpuState` contains X0–X30, SP, PC, the four NZCV flags, FPCR, FPSR,
@@ -75,7 +100,7 @@ instructions the lifter emits the result, N/Z calculations, and dedicated
 carry/overflow primitives. The same formulas are lowered independently by the
 interpreter and LLVM backend and are covered by boundary tests.
 
-## Milestone 8 instruction coverage
+## Milestones 8–9 instruction coverage
 
 Only the documented forms are supported. Other forms fail explicitly with an
 unsupported-instruction diagnostic containing the guest PC, opcode, and
@@ -100,7 +125,12 @@ disassembly.
 | Scalar FP and required conversions/rounding | FMOV, FADD/FSUB/FMUL/FDIV, FNEG/FABS/FSQRT, FCMP/FCSEL, SCVTF/UCVTF, FCVTZS/FCVTZU/FCVT, FRINTN/P/M/Z, FMIN/FMAX | FPCR/FPSR runtime state | read/write | supported forms |
 | NEON lane/data operations | DUP, INS, UMOV, SMOV, EXT, ZIP/UZP/TRN, logical/integer/FP vector arithmetic and comparisons | no | read/write | supported arrangements |
 | FP/SIMD memory | S/D/Q LDR/STR and LDP/STP | no | read/write | checked guest memory |
-| FP/SIMD fused multiply-add, atomics, system instructions | — | — | — | explicit rejection |
+| FP/SIMD fused multiply-add | — | — | — | explicit rejection |
+| LDXR/STXR and LDAXR/STLXR, B/H/W/X | yes | yes | yes | deterministic per-thread 64-byte reservations |
+| LDAR/STLR, B/H/W/X | yes | yes | yes | acquire/release checked shared accesses |
+| CLREX and DMB/DSB/ISB | yes | yes | yes | explicit barrier kind and option |
+| TPIDR_EL0 and TPIDRRO_EL0 | yes | yes | yes | per-thread `CpuState` TLS; TPIDRRO is read-only |
+| Pair-exclusive and LSE atomics | yes | no | no | explicit deferred semantics |
 
 Literal loads remain supported only when their validated guest target is mapped.
 Indirect calls and branches return through the explicit guest `CpuState::pc`
@@ -140,7 +170,9 @@ coverage scanner. The scanner is an instruction-family baseline: operand-form
 validation still happens during lifting and unsupported forms remain structured
 errors.
 
-Explicitly deferred are BL/BLR/BR function-map dispatch, exclusive atomics and
-memory ordering, system-call/Horizon behavior, whole-module
-execution, renderer integration, XCI/NSP/NCA extraction, and all TOTK-specific
-metadata or patches.
+Explicitly deferred are BL/BLR/BR function-map dispatch, pair-exclusive and
+LSE atomics, WFE/WFI and system-call/Horizon behavior, whole-module execution,
+renderer integration, XCI/NSP/NCA extraction, and all TOTK-specific metadata or
+patches. Native thread mapping and the M9 atomic subset are implemented only for
+controlled synthetic functions; they do not imply a game scheduler or playable
+runtime.
