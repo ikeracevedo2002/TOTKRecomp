@@ -127,6 +127,19 @@ target_link_libraries(switchrecomp-format
 totkrecomp_enable_project_warnings(switchrecomp-format)
 totkrecomp_enable_sanitizers(switchrecomp-format)
 
+add_library(switchrecomp-memory
+    src/switchrecomp/memory/guest_memory.cpp
+    src/switchrecomp/loader/nso_guest_loader.cpp
+)
+target_include_directories(switchrecomp-memory
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-memory
+    PUBLIC switchrecomp-common switchrecomp-format
+)
+totkrecomp_enable_project_warnings(switchrecomp-memory)
+totkrecomp_enable_sanitizers(switchrecomp-memory)
+
 add_executable(nso-inspect tools/nso-inspect/main.cpp)
 target_link_libraries(nso-inspect PRIVATE switchrecomp-format)
 target_compile_definitions(nso-inspect PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
@@ -137,6 +150,7 @@ if(TOTKRECOMP_BUILD_TESTS)
     add_executable(switchrecomp-tests
         tests/common_tests.cpp
         tests/format_tests.cpp
+        tests/guest_memory_tests.cpp
         tests/nso_tests.cpp
         tests/nso_materialization_tests.cpp
         tests/target_tests.cpp
@@ -145,6 +159,7 @@ if(TOTKRECOMP_BUILD_TESTS)
         PRIVATE
             switchrecomp-common
             switchrecomp-format
+            switchrecomp-memory
             switchrecomp-target
             lz4_static
             Catch2::Catch2WithMain

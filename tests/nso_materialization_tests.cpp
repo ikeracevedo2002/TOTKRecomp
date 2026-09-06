@@ -1,5 +1,7 @@
 #include "switchrecomp/common/sha256.hpp"
 #include "switchrecomp/format/nso.hpp"
+#include "switchrecomp/loader/nso_guest_loader.hpp"
+#include "switchrecomp/memory/guest_memory.hpp"
 
 #include <algorithm>
 #include <array>
@@ -584,4 +586,146 @@ TEST_CASE("A zero-sized compressed section accepts an empty stored range only")
             .set_declared_memory_size(NsoSegmentKind::Text, 0U));
     const auto result = switchrecomp::format::materialize_nso(invalid.bytes, invalid.header);
     require_error(result, ErrorCode::DecompressionFailed, "declared decompressed size is zero");
+}
+
+TEST_CASE("A materialized NSO loads into checked guest memory with expected permissions")
+{
+    const auto text = SyntheticNsoImageBuilder::pattern(17U, 0x10U);
+    const auto rodata = SyntheticNsoImageBuilder::pattern(11U, 0x50U);
+    const auto data = SyntheticNsoImageBuilder::pattern(13U, 0x90U);
+    const auto image = materialize_fixture(SyntheticNsoImageBuilder{}
+                                               .set_segment(NsoSegmentKind::Text, text)
+                                               .set_segment(NsoSegmentKind::RoData, rodata)
+                                               .set_segment(NsoSegmentKind::Data, data)
+                                               .set_compressed(NsoSegmentKind::Text)
+                                               .set_bss_size(19U));
+
+    switchrecomp::memory::GuestMemory memory;
+    const auto loaded = switchrecomp::loader::load_nso(
+        image, memory, switchrecomp::loader::NsoGuestLoadOptions{0x10000000U});
+    REQUIRE(loaded);
+    REQUIRE(memory.region_count() == 4U);
+
+    const auto module_base = 0x10000000ULL;
+    const auto text_address = module_base + image.text.memory_offset;
+    const auto rodata_address = module_base + image.rodata.memory_offset;
+    const auto data_address = module_base + image.data.memory_offset;
+    const auto bss_address = module_base + image.bss_memory_offset;
+
+    std::vector<std::byte> actual_text(text.size());
+    std::vector<std::byte> actual_rodata(rodata.size());
+    std::vector<std::byte> actual_data(data.size());
+    std::vector<std::byte> actual_bss(image.bss.size());
+    REQUIRE(memory.read(text_address, actual_text));
+    REQUIRE(memory.read(rodata_address, actual_rodata));
+    REQUIRE(memory.read(data_address, actual_data));
+    REQUIRE(memory.read(bss_address, actual_bss));
+    REQUIRE(actual_text == text);
+    REQUIRE(actual_rodata == rodata);
+    REQUIRE(actual_data == data);
+    REQUIRE(std::all_of(actual_bss.begin(), actual_bss.end(),
+                        [](std::byte value) { return value == std::byte{0}; }));
+
+    REQUIRE(memory.permissions_at(text_address).value() ==
+            (switchrecomp::memory::GuestMemoryPermissions::Read |
+             switchrecomp::memory::GuestMemoryPermissions::Execute));
+    REQUIRE(memory.permissions_at(rodata_address).value() ==
+            switchrecomp::memory::GuestMemoryPermissions::Read);
+    REQUIRE(memory.permissions_at(data_address).value() ==
+            (switchrecomp::memory::GuestMemoryPermissions::Read |
+             switchrecomp::memory::GuestMemoryPermissions::Write));
+    REQUIRE(memory.permissions_at(bss_address).value() ==
+            (switchrecomp::memory::GuestMemoryPermissions::Read |
+             switchrecomp::memory::GuestMemoryPermissions::Write));
+    REQUIRE(memory.is_executable(text_address).value());
+    REQUIRE_FALSE(memory.is_executable(rodata_address).value());
+    REQUIRE_FALSE(memory.is_executable(data_address).value());
+    REQUIRE_FALSE(memory.is_executable(bss_address).value());
+
+    const auto patch = std::array<std::byte, 1>{std::byte{0xa5}};
+    REQUIRE(memory.write(data_address, patch));
+    REQUIRE(memory.write(bss_address, patch));
+    REQUIRE_FALSE(memory.write(text_address, patch));
+    REQUIRE_FALSE(memory.write(rodata_address, patch));
+}
+
+TEST_CASE("NSO loader supports a zero module base and high rebased addresses")
+{
+    const auto image = materialize_fixture(
+        SyntheticNsoImageBuilder{}
+            .set_segment(NsoSegmentKind::Text, SyntheticNsoImageBuilder::pattern(4U, 0x01U))
+            .set_segment(NsoSegmentKind::Data, SyntheticNsoImageBuilder::pattern(4U, 0x11U))
+            .set_bss_size(4U));
+
+    switchrecomp::memory::GuestMemory zero_base;
+    REQUIRE(switchrecomp::loader::load_nso(image, zero_base,
+                                           switchrecomp::loader::NsoGuestLoadOptions{0U}));
+    REQUIRE(zero_base.region_at(image.text.memory_offset));
+    REQUIRE(zero_base.region_at(image.bss_memory_offset));
+
+    constexpr std::uint64_t high_base = 0x7100000000ULL;
+    switchrecomp::memory::GuestMemory high_base_memory;
+    REQUIRE(switchrecomp::loader::load_nso(image, high_base_memory,
+                                           switchrecomp::loader::NsoGuestLoadOptions{high_base}));
+    REQUIRE(high_base_memory.region_at(high_base + image.text.memory_offset));
+    REQUIRE(high_base_memory.region_at(high_base + image.bss_memory_offset));
+}
+
+TEST_CASE("NSO loader rejects inconsistent guest metadata and preserves state on failure")
+{
+    auto image = materialize_fixture(
+        SyntheticNsoImageBuilder{}
+            .set_segment(NsoSegmentKind::Text, SyntheticNsoImageBuilder::pattern(8U, 0x21U))
+            .set_segment(NsoSegmentKind::RoData, SyntheticNsoImageBuilder::pattern(8U, 0x31U))
+            .set_segment(NsoSegmentKind::Data, SyntheticNsoImageBuilder::pattern(8U, 0x41U))
+            .set_bss_size(8U));
+
+    image.header.rodata.memory_offset = image.header.text.memory_offset + 1U;
+    image.rodata.memory_offset = image.header.rodata.memory_offset;
+    switchrecomp::memory::GuestMemory overlap_memory;
+    const auto overlap = switchrecomp::loader::load_nso(image, overlap_memory);
+    require_error(overlap, ErrorCode::InvalidArgument, "overlaps");
+    REQUIRE(overlap_memory.region_count() == 0U);
+
+    const auto valid_image = materialize_fixture(
+        SyntheticNsoImageBuilder{}
+            .set_segment(NsoSegmentKind::Text, SyntheticNsoImageBuilder::pattern(8U, 0x51U))
+            .set_segment(NsoSegmentKind::RoData, SyntheticNsoImageBuilder::pattern(8U, 0x61U))
+            .set_segment(NsoSegmentKind::Data, SyntheticNsoImageBuilder::pattern(8U, 0x71U))
+            .set_bss_size(8U));
+    switchrecomp::memory::GuestMemory atomic_memory;
+    const auto original = std::array<std::byte, 4>{std::byte{0xca}, std::byte{0xfe},
+                                                   std::byte{0xba}, std::byte{0xbe}};
+    REQUIRE(atomic_memory.map(0x3000U, original, switchrecomp::memory::GuestMemoryPermissions::Read,
+                              "existing"));
+    const auto failed = switchrecomp::loader::load_nso(valid_image, atomic_memory);
+    require_error(failed, ErrorCode::InvalidArgument, "overlaps");
+    REQUIRE(atomic_memory.region_count() == 1U);
+    std::array<std::byte, 4> preserved{};
+    REQUIRE(atomic_memory.read(0x3000U, preserved));
+    REQUIRE(preserved == original);
+}
+
+TEST_CASE("NSO loader does not create phantom mappings for empty segments")
+{
+    const auto image = materialize_fixture(SyntheticNsoImageBuilder{}.set_bss_size(8U));
+    switchrecomp::memory::GuestMemory memory;
+    REQUIRE(switchrecomp::loader::load_nso(image, memory));
+    REQUIRE(memory.region_count() == 1U);
+    const auto bss = memory.region_at(image.bss_memory_offset);
+    REQUIRE(bss);
+    REQUIRE(bss.value().kind == switchrecomp::memory::GuestRegionKind::Bss);
+    REQUIRE(bss.value().size == image.bss.size());
+}
+
+TEST_CASE("NSO loader rejects module-base address overflow")
+{
+    const auto image = materialize_fixture(SyntheticNsoImageBuilder{}.set_segment(
+        NsoSegmentKind::Text, SyntheticNsoImageBuilder::pattern(4U, 0x81U)));
+    switchrecomp::memory::GuestMemory memory;
+    const auto result = switchrecomp::loader::load_nso(
+        image, memory,
+        switchrecomp::loader::NsoGuestLoadOptions{std::numeric_limits<std::uint64_t>::max()});
+    require_error(result, ErrorCode::ArithmeticOverflow, "module base plus segment offset");
+    REQUIRE(memory.region_count() == 0U);
 }

@@ -3,6 +3,7 @@
 #include "switchrecomp/common/result.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <string>
 

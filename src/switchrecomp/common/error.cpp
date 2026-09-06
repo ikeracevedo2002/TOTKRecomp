@@ -11,6 +11,10 @@ std::string_view error_code_name(ErrorCode code) noexcept
         return "invalid_argument";
     case ErrorCode::OutOfBounds:
         return "out_of_bounds";
+    case ErrorCode::UnmappedMemory:
+        return "unmapped_memory";
+    case ErrorCode::PermissionDenied:
+        return "permission_denied";
     case ErrorCode::ArithmeticOverflow:
         return "arithmetic_overflow";
     case ErrorCode::ArithmeticUnderflow:
