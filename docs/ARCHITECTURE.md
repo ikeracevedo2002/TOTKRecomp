@@ -328,8 +328,9 @@ before committing them, so overlap, limit, and allocation failures leave an
 existing `GuestMemory` unchanged.
 
 The current implementation is intentionally not a page table, MMU, native
-address mirror, or CPU memory subsystem. Relocation application and any
-temporary privileged write path for relocation remain future work.
+address mirror, or CPU memory subsystem. Milestone 5 adds an explicit
+loader-time privileged write path for relocation application while preserving
+normal guest write permission checks.
 
 ### 7.3 MOD0 and dynamic information — Milestone 3
 
@@ -365,6 +366,23 @@ the ELF64 symbol/type split. No parser in this milestone writes guest memory.
 The actual MOD0 fields, pointer bases, dynamic tags, and loader conventions for
 the selected TOTK build remain **Needs verification** where the exact target
 build could differ. A module report states which optional metadata is present.
+
+### 7.4 Dynamic symbols and relocations — Milestone 5
+
+The dynamic linking layer owns `DT_STRTAB`/`DT_STRSZ`, ELF64 `dynsym`, and RELA
+metadata independently from the NSO parser. Symbol-table size is derived only
+from validated `DT_HASH` or `DT_GNU_HASH` metadata and bounded by configured
+limits. Symbol values remain module-relative until a resolver adds the guest
+module base. Undefined imports are explicit and can be satisfied by a generic
+external registry.
+
+The semantic relocation pipeline supports the AArch64 ABI types `NONE`,
+`ABS64`, `GLOB_DAT`, `JUMP_SLOT`, and `RELATIVE`. It uses checked `S + A` / `B + A`
+arithmetic, writes little-endian guest values through
+`GuestMemory::loader_write`, and stages all writes so a failed relocation does
+not partially modify the image. REL, lazy binding, symbol versioning,
+multi-module link order, and Horizon resolution remain future layers. See
+[`RELOCATIONS.md`](RELOCATIONS.md).
 
 ### 7.4 Multiple modules
 

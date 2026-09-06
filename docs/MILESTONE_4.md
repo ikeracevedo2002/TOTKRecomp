@@ -22,9 +22,10 @@ The implementation provides:
 ## Non-goals
 
 This milestone does not implement semantic IR, LLVM lowering, native execution,
-CPU emulation, relocation application, import or symbol resolution, whole-TOTK
-function recovery, indirect-target recovery, jump-table analysis, or validation
-against a real game binary.
+CPU emulation, whole-TOTK function recovery, indirect-target recovery,
+jump-table analysis, or validation against a real game binary. Dynamic symbols
+and relocations are implemented by the separate Milestone 5 linking layer and
+are intentionally not part of this decoder/CFG contract.
 
 ## Decoder backend
 

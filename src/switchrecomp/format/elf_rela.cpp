@@ -116,6 +116,72 @@ using memory::GuestMemory;
 
 } // namespace
 
+AArch64RelocationType aarch64_relocation_type(std::uint32_t raw_type) noexcept
+{
+    switch (raw_type)
+    {
+    case 0U:
+        return AArch64RelocationType::None;
+    case 257U:
+        return AArch64RelocationType::Abs64;
+    case 1027U:
+        return AArch64RelocationType::Relative;
+    case 1025U:
+        return AArch64RelocationType::GlobDat;
+    case 1026U:
+        return AArch64RelocationType::JumpSlot;
+    default:
+        return AArch64RelocationType::Unknown;
+    }
+}
+
+std::string_view aarch64_relocation_type_name(AArch64RelocationType type) noexcept
+{
+    switch (type)
+    {
+    case AArch64RelocationType::None:
+        return "R_AARCH64_NONE";
+    case AArch64RelocationType::Abs64:
+        return "R_AARCH64_ABS64";
+    case AArch64RelocationType::Relative:
+        return "R_AARCH64_RELATIVE";
+    case AArch64RelocationType::GlobDat:
+        return "R_AARCH64_GLOB_DAT";
+    case AArch64RelocationType::JumpSlot:
+        return "R_AARCH64_JUMP_SLOT";
+    case AArch64RelocationType::Unknown:
+        return "R_AARCH64_UNKNOWN";
+    }
+    return "R_AARCH64_UNKNOWN";
+}
+
+Result<std::vector<Relocation>> make_relocations(std::span<const RelaEntry> entries)
+{
+    try
+    {
+        std::vector<Relocation> result;
+        result.reserve(entries.size());
+        for (const auto& entry : entries)
+        {
+            result.push_back(Relocation{entry.offset, entry.target_address,
+                                        entry.relocation_type(),
+                                        aarch64_relocation_type(entry.relocation_type()),
+                                        entry.symbol_index(), entry.addend});
+        }
+        return Result<std::vector<Relocation>>::success(std::move(result));
+    }
+    catch (const std::bad_alloc&)
+    {
+        return Result<std::vector<Relocation>>::failure(
+            make_error(ErrorCode::ResourceLimit, "semantic relocation allocation failed"));
+    }
+    catch (const std::length_error&)
+    {
+        return Result<std::vector<Relocation>>::failure(
+            make_error(ErrorCode::ResourceLimit, "semantic relocation table exceeds host limits"));
+    }
+}
+
 Result<std::vector<RelaEntry>> parse_rela_table(const GuestMemory& guest_memory,
                                                 const DynamicInfo& dynamic,
                                                 const DynamicParseLimits& limits)

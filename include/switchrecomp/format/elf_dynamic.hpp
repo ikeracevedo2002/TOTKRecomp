@@ -160,12 +160,14 @@ inline constexpr std::size_t dynamic_default_max_entries = 65536U;
 inline constexpr std::size_t dynamic_default_max_relocations = 1024U * 1024U;
 inline constexpr std::uint64_t dynamic_default_max_string_table_size =
     std::uint64_t{256U} * std::uint64_t{1024U} * std::uint64_t{1024U};
+inline constexpr std::size_t dynamic_default_max_symbols = 1024U * 1024U;
 
 struct DynamicParseLimits
 {
     std::size_t max_dynamic_entries = dynamic_default_max_entries;
     std::size_t max_relocations = dynamic_default_max_relocations;
     std::uint64_t max_string_table_size = dynamic_default_max_string_table_size;
+    std::size_t max_symbols = dynamic_default_max_symbols;
 };
 
 // Parse an ELF64-style dynamic table from guest memory. dynamic_address is the

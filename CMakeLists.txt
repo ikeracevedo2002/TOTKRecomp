@@ -166,6 +166,9 @@ add_library(switchrecomp-memory
     src/switchrecomp/format/mod0.cpp
     src/switchrecomp/format/elf_dynamic.cpp
     src/switchrecomp/format/elf_rela.cpp
+    src/switchrecomp/format/dynamic_symbols.cpp
+    src/switchrecomp/loader/symbol_resolver.cpp
+    src/switchrecomp/loader/relocation_processor.cpp
 )
 target_include_directories(switchrecomp-memory
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -216,6 +219,14 @@ target_compile_definitions(aarch64-analyze PRIVATE SWITCHRECOMP_VERSION="${PROJE
 totkrecomp_enable_project_warnings(aarch64-analyze)
 totkrecomp_enable_sanitizers(aarch64-analyze)
 
+add_executable(nso-dynamic-inspect tools/nso-dynamic-inspect/main.cpp)
+target_link_libraries(nso-dynamic-inspect
+    PRIVATE switchrecomp-memory nlohmann_json::nlohmann_json
+)
+target_compile_definitions(nso-dynamic-inspect PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
+totkrecomp_enable_project_warnings(nso-dynamic-inspect)
+totkrecomp_enable_sanitizers(nso-dynamic-inspect)
+
 if(TOTKRECOMP_BUILD_TESTS)
     add_executable(switchrecomp-tests
         tests/common_tests.cpp
@@ -227,6 +238,7 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/target_tests.cpp
         tests/aarch64_decoder_tests.cpp
         tests/cfg_analyzer_tests.cpp
+        tests/relocation_symbol_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE
@@ -246,4 +258,4 @@ if(TOTKRECOMP_BUILD_TESTS)
     catch_discover_tests(switchrecomp-tests)
 endif()
 
-install(TARGETS nso-inspect aarch64-analyze RUNTIME DESTINATION bin)
+install(TARGETS nso-inspect nso-dynamic-inspect aarch64-analyze RUNTIME DESTINATION bin)
