@@ -3,7 +3,6 @@
 #include "switchrecomp/ir/verifier.hpp"
 
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
-#include <llvm/ExecutionEngine/Orc/AbsoluteSymbols.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
