@@ -7,6 +7,7 @@ include(FetchContent)
 option(TOTKRECOMP_BUILD_TESTS "Build the TOTKRecomp test suite" ON)
 option(TOTKRECOMP_ENABLE_WARNINGS "Enable warnings for project-owned targets" ON)
 option(TOTKRECOMP_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(SWITCHRECOMP_ENABLE_LLVM "Enable the optional LLVM lowering/JIT backend" ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -207,6 +208,96 @@ target_link_libraries(switchrecomp-analysis
 totkrecomp_enable_project_warnings(switchrecomp-analysis)
 totkrecomp_enable_sanitizers(switchrecomp-analysis)
 
+add_library(switchrecomp-runtime
+    src/switchrecomp/runtime/cpu_state.cpp
+    src/switchrecomp/runtime/abi.cpp
+)
+target_include_directories(switchrecomp-runtime
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-runtime
+    PUBLIC switchrecomp-common switchrecomp-memory switchrecomp-aarch64
+)
+totkrecomp_enable_project_warnings(switchrecomp-runtime)
+totkrecomp_enable_sanitizers(switchrecomp-runtime)
+
+add_library(switchrecomp-ir
+    src/switchrecomp/ir/type.cpp
+    src/switchrecomp/ir/instruction.cpp
+    src/switchrecomp/ir/builder.cpp
+    src/switchrecomp/ir/verifier.cpp
+    src/switchrecomp/ir/printer.cpp
+    src/switchrecomp/ir/interpreter.cpp
+)
+target_include_directories(switchrecomp-ir
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-ir
+    PUBLIC switchrecomp-common switchrecomp-memory switchrecomp-aarch64 switchrecomp-runtime
+)
+totkrecomp_enable_project_warnings(switchrecomp-ir)
+totkrecomp_enable_sanitizers(switchrecomp-ir)
+
+add_library(switchrecomp-lift
+    src/switchrecomp/lift/aarch64_lifter.cpp
+)
+target_include_directories(switchrecomp-lift
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-lift
+    PUBLIC switchrecomp-common switchrecomp-aarch64 switchrecomp-analysis switchrecomp-ir
+)
+totkrecomp_enable_project_warnings(switchrecomp-lift)
+totkrecomp_enable_sanitizers(switchrecomp-lift)
+
+if(SWITCHRECOMP_ENABLE_LLVM)
+    find_package(LLVM CONFIG QUIET)
+endif()
+
+if(LLVM_FOUND)
+    set(SWITCHRECOMP_LLVM_HEADERS_FOUND OFF)
+    foreach(llvm_include_dir IN LISTS LLVM_INCLUDE_DIRS)
+        if(EXISTS "${llvm_include_dir}/llvm/IR/LLVMContext.h" AND
+           EXISTS "${llvm_include_dir}/llvm/ExecutionEngine/Orc/LLJIT.h" AND
+           EXISTS "${llvm_include_dir}/llvm/Target/TargetMachine.h")
+            set(SWITCHRECOMP_LLVM_HEADERS_FOUND ON)
+        endif()
+    endforeach()
+    if(NOT SWITCHRECOMP_LLVM_HEADERS_FOUND)
+        message(WARNING "LLVMConfig.cmake was found but LLVM development headers are missing; disabling the LLVM backend")
+        set(LLVM_FOUND FALSE)
+    endif()
+endif()
+
+if(LLVM_FOUND)
+    message(STATUS "SwitchRecomp LLVM backend enabled: LLVM ${LLVM_VERSION_STRING}")
+    if(DEFINED LLVM_VERSION_MAJOR AND NOT LLVM_VERSION_MAJOR EQUAL 22)
+        message(WARNING "SwitchRecomp prefers LLVM 22.1.8; found LLVM ${LLVM_VERSION_STRING}")
+    endif()
+    llvm_map_components_to_libnames(SWITCHRECOMP_LLVM_LIBS
+        Core Analysis Support IRReader AsmParser OrcJIT ExecutionEngine MC Target CodeGen native)
+endif()
+
+add_library(switchrecomp-codegen
+    src/switchrecomp/codegen/llvm_lowerer.cpp
+    src/switchrecomp/codegen/llvm_jit.cpp
+    src/switchrecomp/codegen/llvm_object_emitter.cpp
+)
+target_include_directories(switchrecomp-codegen
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-codegen
+    PUBLIC switchrecomp-common switchrecomp-ir switchrecomp-runtime
+)
+if(LLVM_FOUND)
+    target_compile_definitions(switchrecomp-codegen PRIVATE SWITCHRECOMP_HAS_LLVM=1)
+    target_include_directories(switchrecomp-codegen SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+    target_compile_definitions(switchrecomp-codegen PRIVATE ${LLVM_DEFINITIONS})
+    target_link_libraries(switchrecomp-codegen PRIVATE ${SWITCHRECOMP_LLVM_LIBS})
+endif()
+totkrecomp_enable_project_warnings(switchrecomp-codegen)
+totkrecomp_enable_sanitizers(switchrecomp-codegen)
+
 add_executable(nso-inspect tools/nso-inspect/main.cpp)
 target_link_libraries(nso-inspect PRIVATE switchrecomp-memory)
 target_compile_definitions(nso-inspect PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
@@ -218,6 +309,15 @@ target_link_libraries(aarch64-analyze PRIVATE switchrecomp-analysis)
 target_compile_definitions(aarch64-analyze PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
 totkrecomp_enable_project_warnings(aarch64-analyze)
 totkrecomp_enable_sanitizers(aarch64-analyze)
+
+add_executable(aarch64-lift tools/aarch64-lift/main.cpp)
+target_link_libraries(aarch64-lift PRIVATE switchrecomp-lift switchrecomp-codegen)
+target_compile_definitions(aarch64-lift PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
+if(UNIX AND NOT APPLE)
+    target_link_options(aarch64-lift PRIVATE -rdynamic)
+endif()
+totkrecomp_enable_project_warnings(aarch64-lift)
+totkrecomp_enable_sanitizers(aarch64-lift)
 
 add_executable(nso-dynamic-inspect tools/nso-dynamic-inspect/main.cpp)
 target_link_libraries(nso-dynamic-inspect
@@ -239,6 +339,8 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/aarch64_decoder_tests.cpp
         tests/cfg_analyzer_tests.cpp
         tests/relocation_symbol_tests.cpp
+        tests/semantic_ir_tests.cpp
+        tests/reference_executor.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE
@@ -247,10 +349,17 @@ if(TOTKRECOMP_BUILD_TESTS)
             switchrecomp-memory
             switchrecomp-aarch64
             switchrecomp-analysis
+            switchrecomp-runtime
+            switchrecomp-ir
+            switchrecomp-lift
+            switchrecomp-codegen
             switchrecomp-target
             lz4_static
             Catch2::Catch2WithMain
     )
+    if(UNIX AND NOT APPLE)
+        target_link_options(switchrecomp-tests PRIVATE -rdynamic)
+    endif()
     totkrecomp_enable_project_warnings(switchrecomp-tests)
     totkrecomp_enable_sanitizers(switchrecomp-tests)
 
@@ -258,4 +367,4 @@ if(TOTKRECOMP_BUILD_TESTS)
     catch_discover_tests(switchrecomp-tests)
 endif()
 
-install(TARGETS nso-inspect nso-dynamic-inspect aarch64-analyze RUNTIME DESTINATION bin)
+install(TARGETS nso-inspect nso-dynamic-inspect aarch64-analyze aarch64-lift RUNTIME DESTINATION bin)

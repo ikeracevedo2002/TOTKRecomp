@@ -1,9 +1,9 @@
 # TotkRecomp Architecture and Implementation Plan
 
-> Status: Proposed architecture with Milestones 0, 1, 2A, 2B, 3, and 4 implemented
+> Status: Proposed architecture with Milestones 0–6 implemented
 > Repository snapshot: 2026-09-05  
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
-> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, MOD0/dynamic/RELA metadata discovery, synthetic tests, and the `nso-inspect` report are committed; no supported game build has been committed.
+> Current repository state: C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, MOD0/dynamic/RELA metadata discovery, dynamic symbols and relocations, Capstone-backed AArch64 decoding/CFG analysis, Semantic IR, an IR interpreter, optional LLVM lowering/JIT/object emission, synthetic tests, and inspection tools are committed; no supported game build has been committed.
 
 This document is the primary engineering RFC for TotkRecomp. It describes the intended architecture, the evidence behind the design, the work required to validate it, and the boundaries of what is currently known.
 
@@ -14,14 +14,16 @@ It is deliberately conservative. A proposed component is not evidence that the c
 ### Existing
 
 The repository contains the Milestone 0 bootstrap, Milestone 1 strict NSO0
-header parser, Milestone 2A image materializer, Milestone 2B guest loader, and
-Milestone 3 MOD0/dynamic metadata parser:
+header parser, Milestone 2A image materializer, Milestone 2B guest loader,
+Milestone 3 MOD0/dynamic metadata parser, Milestone 4 decoder/CFG, Milestone 5
+dynamic linking layer, and Milestone 6 minimal lifting pipeline:
 a C++20 source tree, CMake build, common safety utilities, manifest validation,
 tests, CI, strict NSO0 inspection, safe NSO image
-materialization, integrity verification, a checked guest-memory loader, and a
-deterministic `nso-inspect` report. There is still no relocation applier, runtime,
-recompiler, metadata for a supported game version, symbol database, renderer, or
-supported game build to preserve.
+materialization, integrity verification, a checked guest-memory loader, a
+deterministic `nso-inspect` report, dynamic symbol/relocation processing, and
+minimal semantic execution. There is still no complete guest ABI, metadata for a
+supported game version, symbol database, renderer, or supported game build to
+preserve.
 
 ### Proposed
 
@@ -134,10 +136,13 @@ SwitchRecomp should eventually be reusable by another AArch64 Switch binary. It 
 
 - NSO and related module-format parsing.
 - MOD0 and dynamic metadata parsing, with versioned schemas.
-- AArch64 decoding, instruction classification, and semantic lifting.
-- Function discovery and control-flow analysis.
-- Guest address and guest memory abstractions.
-- Module registration, symbol resolution, and relocation application.
+    - AArch64 decoding, instruction classification, and semantic lifting.
+    - Function discovery and control-flow analysis.
+    - Guest address and guest memory abstractions.
+    - Module registration, symbol resolution, and relocation application.
+    - SwitchRecomp Semantic IR, verification, deterministic printing, and interpretation.
+    - Optional LLVM lowering, ORC JIT execution, and native object emission for the
+      supported initial scalar subset.
 - Generic call dispatch for guest function pointers.
 - A minimal runtime for memory, threads, synchronization, TLS, time, handles, and diagnostics.
 - Generic service and graphics interfaces.
@@ -383,6 +388,21 @@ arithmetic, writes little-endian guest values through
 not partially modify the image. REL, lazy binding, symbol versioning,
 multi-module link order, and Horizon resolution remain future layers. See
 [`RELOCATIONS.md`](RELOCATIONS.md).
+
+### 7.5 Semantic IR and minimal lifting — Milestone 6
+
+The first execution pipeline is deliberately staged as AArch64 → SwitchRecomp
+Semantic IR → interpreter or LLVM. The IR owns stable value/block IDs, source
+mapping, guest-address integer semantics, checked guest loads/stores, and explicit
+terminators. `CpuState` centralizes W/X, SP, and ZR behavior. The lifter consumes
+the existing CFG and does not decode bytes a second time.
+
+The implemented subset is scalar `NOP`, `MOV`, `ADD`, `SUB`, `AND`, `ORR`, `EOR`,
+`LDR`, `STR`, `LDUR`, `STUR`, `B`, `CBZ`, `CBNZ`, and standalone `RET`. The IR
+verifier runs before interpretation or LLVM lowering. LLVM is a backend only;
+generated code uses explicit runtime helpers for register and guest-memory access.
+Calls, flags-producing instructions, FP/SIMD, atomics, exceptions, and the full
+guest ABI remain future milestones. See [`SEMANTIC_IR.md`](SEMANTIC_IR.md).
 
 ### 7.4 Multiple modules
 
@@ -1473,30 +1493,30 @@ Examples:
 
 ## 29. Build and generated-artifact strategy
 
-The repository is empty, so no current build-system claim can be made.
+The current build uses CMake with separate format, memory, AArch64, analysis,
+runtime, IR, lift, codegen, target, and tool targets. LLVM is an optional host
+development dependency discovered through `LLVM_DIR`; it is isolated to
+`switchrecomp-codegen`.
 
-### Proposal
+### Build policy
 
 - CMake as the build-system interface.
 - Ninja for reproducible local/CI builds.
-- Clang as the primary compiler for the first implementation.
+- GCC, Clang, and MSVC are supported project compilers under the existing warning policy.
 - C++20 for core/runtime code unless a specific dependency forces another standard.
-- LLVM pinned to a tested release and found through a reproducible mechanism.
+- LLVM 22.1.8 is the preferred pinned release and is found through a reproducible
+  host installation and `find_package(LLVM CONFIG)`.
 - Optional SDL, Vulkan headers/loader, and analysis tools kept behind clear feature flags.
 - CI initially validates formatting, unit tests, analyzer fixtures, strict translation tests, and at least one host build.
 
 The minimum versions must be selected during Milestone 0 and written into the build files. This RFC intentionally does not claim that any of these dependencies are already configured.
 
-Proposed targets:
+Current targets:
 
 ```
-switchrecomp-core
-switchrecomp-analyze
-switchrecomp-lift
-switchrecomp-build
-nso-inspect
-totkrecomp-runtime
-totkrecomp
+switchrecomp-common / format / memory / aarch64 / analysis
+switchrecomp-runtime / ir / lift / codegen / target
+nso-inspect / nso-dynamic-inspect / aarch64-analyze / aarch64-lift
 ```
 
 The names are proposed. Repository naming should be settled once the first build exists.
@@ -1660,8 +1680,9 @@ header and expose it through `nso-inspect` for a legally supplied NSO.
 ranges, compression/hash status, build/module ID, BSS, file and memory overlap
 checks, and contained RoData-relative embedded/DynStr/DynSym ranges.
 
-**Still not implemented:** ZBIC decoding, MOD0, dynamic symbols, and
-relocations.
+**At this milestone:** ZBIC decoding, MOD0, dynamic symbols, and relocations
+were intentionally out of scope; MOD0/dynamic metadata arrived in Milestone 3
+and dynamic linking in Milestone 5.
 
 **Success:**
 
@@ -1707,108 +1728,115 @@ basic blocks, typed edges, direct call candidates, unresolved indirect flow,
 checked target arithmetic, executable-memory validation, range limits, and
 block splitting.
 
-**Success:** Synthetic AArch64 fixtures cover representative scalar, memory,
-FP/SIMD, atomic, system, branch, trap, malformed, and CFG cases without
 silently treating unknown control flow as fallthrough. Semantic lifting,
-relocations, and execution remain separate milestones.
+relocations, and execution are now separate implemented layers.
 
-### Milestone 5 — Minimal lifting
+### Milestone 5 — Dynamic symbols and relocations
 
-**Goal:** Lift simple standalone functions such as add/return, loads/stores, and branches.
+**Implemented:** Bounded dynamic strings/symbols, explicit external resolution,
+and checked transactional AArch64 RELA application.
 
-**Success:** Native results match the AArch64 reference harness.
+### Milestone 6 — Minimal lifting
 
-### Milestone 6 — Differential instruction suite
+**Implemented:** Semantic IR, verifier, deterministic printer, `CpuState`, IR
+interpreter, minimal AArch64 lifter, LLVM lowering/verification, ORC JIT path,
+native object emission, and independent synthetic reference fixtures. LLVM remains
+an optional host installation for the core build.
+
+**Boundary:** Only standalone scalar functions are supported. Calls, complete
+NZCV semantics, FP/SIMD, atomics, exceptions, and the full guest ABI are future work.
+
+### Milestone 7 — Differential instruction suite
 
 **Goal:** Validate integer, memory, flag, branch, and address-formation families.
 
 **Success:** The tested subset passes state, memory, and exception comparisons across generated cases.
 
-### Milestone 7 — Function calls
+### Milestone 8 — Function calls
 
 **Goal:** Support `BL`, `RET`, stack frames, direct calls, and the internal generated ABI.
 
 **Success:** Multi-function AArch64 programs execute correctly after recompilation.
 
-### Milestone 8 — Indirect calls
+### Milestone 9 — Indirect calls
 
 **Goal:** Support `BLR`, guest function maps, vtables, callbacks, and function-pointer identity.
 
 **Success:** Indirect guest targets reach the correct native function with correct state.
 
-### Milestone 9 — FP/SIMD
+### Milestone 10 — FP/SIMD
 
 **Goal:** Add scalar FP, NEON, vector loads/stores, FP status, and required rounding behavior.
 
 **Success:** Representative vector/FP differential tests pass.
 
-### Milestone 10 — Threads and atomics
+### Milestone 11 — Threads and atomics
 
 **Goal:** Add native thread mapping, TLS, synchronization, barriers, exclusive operations, and required memory order.
 
 **Success:** Controlled multi-threaded workloads pass deterministic tests.
 
-### Milestone 11 — Whole-main translation
+### Milestone 12 — Whole-main translation
 
 **Goal:** Analyze and translate the targeted `main` module. Unresolved imports may remain.
 
 **Success:** The whole target module can be statically analyzed, generated, and linked with a complete unresolved-dependency report. It does not need to boot.
 
-### Milestone 12 — Enter game initialization
+### Milestone 13 — Enter game initialization
 
 **Goal:** Execute the recompiled entry path.
 
 **Success:** Execution reaches initialization and stops at a known unsupported dependency, with a useful diagnostic.
 
-### Milestone 13 — Runtime bring-up
+### Milestone 14 — Runtime bring-up
 
 **Goal:** Add required memory, timing, threading, filesystem, handle, and service behavior incrementally.
 
 **Success:** Initialization progresses consistently between runs.
 
-### Milestone 14 — Filesystem and asset loading
+### Milestone 15 — Filesystem and asset loading
 
 **Goal:** Mount user-provided game data and implement the required streaming path.
 
 **Success:** TOTK opens required resources and begins loading without missing-path or handle-semantics failures.
 
-### Milestone 15 — Graphics initialization
+### Milestone 16 — Graphics initialization
 
 **Goal:** Trace and intercept the selected graphics boundary and create logical native resources.
 
 **Success:** Recompiled code creates the required native device/resources through the canonical render interface.
 
-### Milestone 16 — First present
+### Milestone 17 — First present
 
 **Goal:** Produce a window, swapchain, render target, and present path.
 
 **Success:** A frame initiated by recompiled code reaches the display. A cleared framebuffer counts.
 
-### Milestone 17 — First visible game output
+### Milestone 18 — First visible game output
 
 **Goal:** Render actual TOTK graphics, even if incomplete.
 
 **Success:** Game-generated geometry or UI is visible through the native renderer.
 
-### Milestone 18 — Menu boot
+### Milestone 19 — Menu boot
 
 **Goal:** Reach an interactable title screen or early menu.
 
 **Success:** Input works and the menu remains stable across repeated runs.
 
-### Milestone 19 — In-game
+### Milestone 20 — In-game
 
 **Goal:** Reach a playable scene.
 
 **Success:** Gameplay begins with known limitations documented.
 
-### Milestone 20 — Correctness
+### Milestone 21 — Correctness
 
 **Focus:** Crashes, memory, synchronization, graphics, audio, saves, streaming, input, timing, and gameplay behavior.
 
 **Success:** A repeatable validation suite covers representative flows and regressions.
 
-### Milestone 21 — Performance
+### Milestone 22 — Performance
 
 **Focus:** Direct-call lowering, dispatcher locality, LLVM optimization, SSA/register improvements, guest-memory fast paths, allocation, renderer batching, shader/pipeline caches, and asynchronous compilation.
 
@@ -1907,7 +1935,7 @@ These are the first practical engineering tasks. They intentionally stop before 
 
 ### 5. Parse MOD0 and dynamic metadata
 
-**Future Milestone 3.**
+**Completed in Milestone 3.**
 
 - **Goal:** Locate and report module/dynamic metadata using a versioned schema.
 - **Inputs:** Target module and public format research.
@@ -1986,13 +2014,15 @@ These are the first practical engineering tasks. They intentionally stop before 
 - **Success:** Import/export round trips preserve addresses and review annotations.
 - **Dependencies:** Metadata schema.
 
-### 14. Lift one trivial function
+### 14. Lift one trivial function — implemented in Milestone 6
 
 - **Goal:** Prove the semantic IR and LLVM lowering path.
 - **Inputs:** Functions such as `add x0, x0, x1; ret`.
 - **Output:** Generated native object and guest/native address map.
-- **Success:** Native execution matches the reference harness.
-- **Dependencies:** Decoder, IR, runtime context, differential harness.
+- **Success:** The interpreter and the independent raw-opcode reference fixture
+  agree; LLVM verification, JIT, and object emission are available when LLVM is
+  installed.
+- **Dependencies:** Decoder, IR, runtime context, and test-only reference harness.
 
 ### 15. Expand only under differential coverage
 

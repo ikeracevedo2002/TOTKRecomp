@@ -144,6 +144,10 @@ namespace
 
 [[nodiscard]] Register from_capstone_register(arm64_reg value)
 {
+    if (value == ARM64_REG_INVALID)
+    {
+        return Register{};
+    }
     const auto raw = static_cast<int>(value);
     const auto in_range = [raw](arm64_reg first, arm64_reg last) {
         return raw >= static_cast<int>(first) && raw <= static_cast<int>(last);

@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install --yes cmake ninja-build libssl-dev
+        run: sudo apt-get update && sudo apt-get install --yes cmake ninja-build libssl-dev llvm-18-dev
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
       - name: Build
@@ -27,6 +27,25 @@ jobs:
           build/nso-inspect --version
           build/aarch64-analyze --help
           build/aarch64-analyze --version
+          build/aarch64-lift --help
+          build/aarch64-lift --version
+
+  linux-sanitizers:
+    name: Linux / ASan + UBSan
+    runs-on: ubuntu-24.04
+    env:
+      ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
+      LSAN_OPTIONS: detect_leaks=0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes cmake ninja-build libssl-dev
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DSWITCHRECOMP_ENABLE_LLVM=OFF -DTOTKRECOMP_ENABLE_SANITIZERS=ON
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
 
   windows:
     name: Windows / MSVC
@@ -45,3 +64,5 @@ jobs:
           build/Debug/nso-inspect.exe --version
           build/Debug/aarch64-analyze.exe --help
           build/Debug/aarch64-analyze.exe --version
+          build/Debug/aarch64-lift.exe --help
+          build/Debug/aarch64-lift.exe --version
