@@ -125,11 +125,12 @@ Result<ir::ExecutionResult> execute_with_llvm_jit(
             llvm::orc::absoluteSymbols(std::move(runtime_symbols))); !defined)
     {
         return Result<ir::ExecutionResult>::failure(make_error(
-            ErrorCode::JitFailure, "could not register runtime symbols: " + llvm_error(defined.takeError())));
+            ErrorCode::JitFailure, "could not register runtime symbols: " + llvm_error(std::move(defined))));
     }
 
     if (auto added = jit_instance->addIRModule(
-            llvm::orc::ThreadSafeModule(std::move(module), std::move(llvm_context)); !added)
+            llvm::orc::ThreadSafeModule(std::move(module), std::move(llvm_context)));
+        !added)
     {
         return Result<ir::ExecutionResult>::failure(make_error(
             ErrorCode::JitFailure, "could not add module to LLJIT: " + llvm_error(added.takeError())));

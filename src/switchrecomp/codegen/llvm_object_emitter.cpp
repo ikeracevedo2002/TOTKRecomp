@@ -6,18 +6,17 @@
 #include <optional>
 
 #if defined(SWITCHRECOMP_HAS_LLVM)
-#include <llvm/ADT/Triple.h>
 #include <llvm/AsmParser/Parser.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Support/CodeGen.h>
-#include <llvm/Support/Host.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
+#include <llvm/TargetParser/Host.h>
 #endif
 
 namespace switchrecomp::codegen
