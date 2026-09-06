@@ -30,10 +30,11 @@ enum class ExitCode : int
 void print_help(std::ostream& output)
 {
     output << "Usage: nso-inspect [options] file\n\n"
-              "Inspect the supported NSO0 header of a Nintendo Switch NSO input.\n\n"
+              "Inspect and materialize a supported NSO0 Nintendo Switch input.\n\n"
               "Options:\n"
               "  --help       Show this help text.\n"
-              "  --version    Show the project version.\n";
+              "  --version    Show the project version.\n"
+              "  --header-only  Report validated header metadata without materializing sections.\n";
 }
 
 [[nodiscard]] std::string hex_value(std::uint64_t value, std::size_t digits)
@@ -54,30 +55,57 @@ void print_help(std::ostream& output)
     return value ? "yes" : "no";
 }
 
-void print_segment(std::ostream& output, const switchrecomp::format::NsoSegment& segment)
+void print_segment(std::ostream& output, const switchrecomp::format::NsoHeader& header,
+                   const switchrecomp::format::NsoSegment& segment,
+                   const switchrecomp::format::NsoImage* image)
 {
+    const auto compression =
+        !segment.compressed
+            ? switchrecomp::format::NsoCompressionKind::None
+            : (header.use_zbic_compression ? switchrecomp::format::NsoCompressionKind::Zbic
+                                           : switchrecomp::format::NsoCompressionKind::Lz4);
+    const auto materialization = image == nullptr ? "not-requested" : "ok";
+    const auto hash_status = image == nullptr
+                                 ? (segment.hash_required ? "not-verified" : "not-required")
+                                 : std::string_view{};
     output << std::left << std::setw(10)
            << switchrecomp::format::nso_segment_kind_name(segment.kind) << std::right
            << std::setw(13) << hex_value(segment.file_offset, 8U) << std::setw(13)
            << hex_value(segment.stored_size, 8U) << std::setw(15)
            << hex_value(segment.memory_offset, 8U) << std::setw(13)
-           << hex_value(segment.memory_size, 8U) << std::setw(12) << yes_no(segment.compressed)
-           << std::setw(14) << yes_no(segment.hash_required) << '\n';
+           << hex_value(segment.memory_size, 8U) << std::setw(12)
+           << switchrecomp::format::nso_compression_kind_name(compression) << std::setw(17)
+           << materialization << std::setw(16);
+    if (image == nullptr)
+    {
+        output << hash_status;
+    }
+    else
+    {
+        const auto& materialized = image->text.kind == segment.kind
+                                       ? image->text
+                                       : (image->rodata.kind == segment.kind ? image->rodata
+                                                                               : image->data);
+        output << switchrecomp::format::nso_hash_status_name(materialized.hash_status);
+    }
+    output << '\n';
 }
 
-void print_header(std::ostream& output, const switchrecomp::format::NsoHeader& header)
+void print_header(std::ostream& output, const switchrecomp::format::NsoHeader& header,
+                  const switchrecomp::format::NsoImage* image)
 {
     output << "Format: NSO0\n"
            << "Version: " << header.version << '\n'
            << "Flags: " << hex_value(header.flags, 8U) << '\n'
            << "Module ID: " << switchrecomp::format::module_id_hex(header) << "\n\n"
-           << "Segment   FileOffset   StoredSize   MemoryOffset    MemorySize  Compressed  "
-              "HashRequired\n";
-    print_segment(output, header.text);
-    print_segment(output, header.rodata);
-    print_segment(output, header.data);
+           << "Segment   FileOffset   StoredSize   MemoryOffset    MemorySize  Compression  "
+              "Materialization   Hash\n";
+    print_segment(output, header, header.text, image);
+    print_segment(output, header, header.rodata, image);
+    print_segment(output, header, header.data, image);
     output << '\n'
            << "BSS size: " << hex_value(header.bss_size, 8U) << '\n'
+           << "BSS initialization: zero\n"
            << "Module name: offset=" << hex_value(header.module_name_offset, 8U)
            << " size=" << hex_value(header.module_name_size, 8U) << '\n'
            << "Embedded: offset=" << hex_value(header.embedded.offset, 8U)
@@ -88,7 +116,8 @@ void print_header(std::ostream& output, const switchrecomp::format::NsoHeader& h
            << " size=" << hex_value(header.dynsym.size, 8U) << " (relative to rodata)\n"
            << "Execute-only memory: " << yes_no(header.execute_only_memory) << '\n'
            << "ZBIC compression: " << yes_no(header.use_zbic_compression) << '\n'
-           << "Validation: OK\n";
+           << "Validation: " << (image == nullptr ? "header-only OK" : "materialization OK")
+           << '\n';
 }
 
 [[nodiscard]] ExitCode error_exit_code(switchrecomp::ErrorCode code) noexcept
@@ -96,12 +125,16 @@ void print_header(std::ostream& output, const switchrecomp::format::NsoHeader& h
     switch (code)
     {
     case switchrecomp::ErrorCode::Unsupported:
+    case switchrecomp::ErrorCode::UnsupportedCompression:
         return ExitCode::UnsupportedInput;
     case switchrecomp::ErrorCode::InvalidFormat:
     case switchrecomp::ErrorCode::OutOfBounds:
     case switchrecomp::ErrorCode::ArithmeticOverflow:
     case switchrecomp::ErrorCode::ArithmeticUnderflow:
     case switchrecomp::ErrorCode::SizeMismatch:
+    case switchrecomp::ErrorCode::DecompressionFailed:
+    case switchrecomp::ErrorCode::ResourceLimit:
+    case switchrecomp::ErrorCode::HashMismatch:
         return ExitCode::MalformedInput;
     default:
         return ExitCode::GeneralError;
@@ -119,6 +152,7 @@ int main(int argc, char** argv)
     }
 
     std::string_view input_path;
+    bool header_only = false;
     for (int index = 1; index < argc; ++index)
     {
         const std::string_view argument(argv[index]);
@@ -131,6 +165,11 @@ int main(int argc, char** argv)
         {
             std::cout << switchrecomp::version << '\n';
             return static_cast<int>(ExitCode::Success);
+        }
+        if (argument == "--header-only")
+        {
+            header_only = true;
+            continue;
         }
         if (argument.starts_with('-'))
         {
@@ -204,6 +243,22 @@ int main(int argc, char** argv)
         return static_cast<int>(exit_code);
     }
 
-    print_header(std::cout, parsed.value());
+    if (header_only)
+    {
+        print_header(std::cout, parsed.value(), nullptr);
+        return static_cast<int>(ExitCode::Success);
+    }
+
+    const auto image = switchrecomp::format::materialize_nso(bytes, parsed.value());
+    if (!image)
+    {
+        const auto exit_code = error_exit_code(image.error().code);
+        std::cerr << (exit_code == ExitCode::UnsupportedInput ? "unsupported input: "
+                                                               : "malformed input: ")
+                  << image.error().message << '\n';
+        return static_cast<int>(exit_code);
+    }
+
+    print_header(std::cout, parsed.value(), &image.value());
     return static_cast<int>(ExitCode::Success);
 }

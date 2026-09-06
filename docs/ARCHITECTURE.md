@@ -1,9 +1,9 @@
 # TotkRecomp Architecture and Implementation Plan
 
-> Status: Proposed architecture with Milestones 0 and 1 implemented
+> Status: Proposed architecture with Milestones 0, 1, and 2A implemented
 > Repository snapshot: 2026-09-05  
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
-> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, synthetic parser tests, and the `nso-inspect` report are committed; no supported game build has been committed.
+> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, synthetic tests, and the `nso-inspect` report are committed; no supported game build has been committed.
 
 This document is the primary engineering RFC for TotkRecomp. It describes the intended architecture, the evidence behind the design, the work required to validate it, and the boundaries of what is currently known.
 
@@ -15,9 +15,11 @@ It is deliberately conservative. A proposed component is not evidence that the c
 
 The repository contains the Milestone 0 bootstrap and Milestone 1 strict NSO0
 header parser: a C++20 source tree, CMake build, common safety utilities,
-manifest validation, tests, CI, and a deterministic `nso-inspect` report. There
-is still no runtime, recompiler, metadata for a supported game version, symbol
-database, renderer, or supported game build to preserve.
+manifest validation, tests, CI, strict NSO0 inspection, safe NSO image
+materialization, integrity verification, and a deterministic `nso-inspect`
+report. There is still no guest-memory loader, runtime, recompiler, metadata for
+a supported game version, symbol database, renderer, or supported game build to
+preserve.
 
 ### Proposed
 
@@ -260,40 +262,45 @@ NSO
 
 The exact target build may contain additional loader metadata or module-specific structures. **Needs verification.**
 
-### 7.2 Parser responsibilities
+### 7.2 Parser and image-materialization responsibilities
 
-The first parser must:
+The implemented NSO0 stages must:
 
 1. Read little-endian fields with checked bounds and overflow-safe arithmetic.
-2. Validate the magic, supported header version, file ranges, alignments, and non-overlap rules.
-3. Decode compression flags and decompress only into bounded buffers.
-4. Verify hashes when the header requests them.
-5. Record both file offsets and guest memory offsets.
-6. Preserve raw bytes for diagnostics without embedding them in the repository.
-7. Locate and parse MOD0-related metadata only when its location is validated.
-8. Expose unknown flags and fields instead of ignoring them.
-9. Produce a stable module report suitable for diffing in Git.
-10. Reject malformed or ambiguous inputs rather than guessing.
+2. Validate the magic, supported header version, file ranges, and non-overlap rules.
+3. Record both file offsets and guest memory offsets without treating guest values as host pointers.
+4. Decode compression and hash flags while preserving the metadata/header distinction.
+5. Materialize uncompressed sections by exact-size copy and compressed sections through bounded raw LZ4.
+6. Verify requested SHA-256 hashes over the materialized bytes and reject mismatches.
+7. Represent BSS as an owned, explicitly zero-filled buffer with its guest offset.
+8. Enforce configurable per-segment and total materialization limits before allocation.
+9. Expose ZBIC as an explicit unsupported-compression error; it is not a standard zstd stream.
+10. Produce a stable module report suitable for diffing in Git.
 
-A report should contain at least:
+The current report contains at least:
 
 ```
 module name
 NSO header version and flags
 module identifier/build id
 .text/.rodata/.data file and guest ranges
-compressed and decompressed sizes
+compressed and materialized sizes
 BSS range
 hash status
-MOD0 location and parsed fields
-dynamic table location and size
-string/symbol table ranges
-relocation ranges
-entry/init/fini candidates
-warnings and unknown fields
+compression and materialization status
+BSS size and zero-initialization status
 ```
 
-### 7.3 MOD0 and dynamic information
+MOD0, dynamic tables, string/symbol tables, relocations, and entry/init/fini
+candidates remain future Milestone 2B work. The materializer intentionally
+returns an owned host-side `NsoImage`; it does not map guest virtual addresses.
+
+The implementation records the format decisions against public references:
+[Switchbrew's NSO0 description](https://switchbrew.org/wiki/NSO0),
+[hactool's NSO0 implementation](https://github.com/SciresM/hactool/blob/master/nso.c),
+and [upstream LZ4 v1.9.4's block API](https://github.com/lz4/lz4/blob/v1.9.4/lib/lz4.h).
+
+### 7.3 MOD0 and dynamic information — future Milestone 2B
 
 MOD0 is a module metadata structure used by the Switch loader ecosystem and is described in public Switch research as a replacement for a conventional `PT_DYNAMIC` program header. TotkRecomp should treat the MOD0 layout as a versioned parser schema, not as an unchecked collection of fixed offsets.
 
@@ -1579,8 +1586,8 @@ header and expose it through `nso-inspect` for a legally supplied NSO.
 ranges, compression/hash status, build/module ID, BSS, file and memory overlap
 checks, and contained RoData-relative embedded/DynStr/DynSym ranges.
 
-**Still not implemented:** LZ4/ZBIC decompression, section hash verification,
-materialized sections, MOD0, dynamic symbols, and relocations.
+**Still not implemented:** ZBIC decoding, MOD0, dynamic symbols, and
+relocations.
 
 **Success:**
 
@@ -1591,9 +1598,17 @@ nso-inspect <user-provided-main>
 produces a trustworthy, diffable report and rejects malformed input without
 attempting decompression or execution.
 
-### Milestone 2 — Guest memory loader
+### Milestone 2A — NSO image materialization and integrity
 
-**Goal:** Implement guest ranges, segment mapping, protections, BSS, module registration, and the first relocation cases.
+**Implemented:** Materialize `.text`, `.rodata`, and `.data` with exact-size
+copy/decompression checks, verify requested SHA-256 hashes over materialized
+bytes, and expose explicit zero-filled BSS under configurable allocation limits.
+ZBIC is intentionally unsupported.
+
+### Milestone 2B — Guest memory loader
+
+**Goal:** Consume `NsoImage` and implement guest ranges, segment mapping,
+protections, module registration, MOD0, and the first relocation cases.
 
 **Success:** A synthetic module and a target module fixture produce the expected relocated guest memory state.
 
@@ -1787,6 +1802,8 @@ These are the first practical engineering tasks. They intentionally stop before 
 - **Dependencies:** Milestone 0.
 
 ### 4. Implement bounded section decompression and hash checks
+
+**Completed in Milestone 2A.**
 
 - **Goal:** Reconstruct decompressed `.text`, `.rodata`, and `.data` when required.
 - **Inputs:** Compression flags and synthetic compressed fixtures.

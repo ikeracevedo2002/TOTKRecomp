@@ -7,20 +7,19 @@ TOTK-specific target metadata.
 
 ## Current status
 
-The repository bootstrap and Milestone 1 are implemented: C++20/CMake build
-targets, common bounds-checked binary utilities, SHA-256 file validation,
-logging, versioned target-manifest validation, strict fixed-size NSO0 header
-parsing, synthetic parser tests, CI, and the `nso-inspect` header report are
-present.
+Milestones 0, 1, and 2A are implemented: C++20/CMake build targets, common
+bounds-checked binary utilities, SHA-256 validation, logging, versioned
+target-manifest validation, strict fixed-size NSO0 parsing, bounded section
+materialization, synthetic tests, CI, and the deterministic `nso-inspect`
+report are present.
 
 No supported TOTK build is committed. The repository contains no game binaries,
 keys, firmware, SDKs, or extracted game assets. The committed TOTK manifest is an
 explicit `template` and contains no real hashes or Build IDs.
 
-The NSO parser does not decompress sections or verify section hashes. MOD0
-parsing, dynamic tables, relocations, the AArch64 decoder, semantic IR, LLVM
-lowering, runtime, Horizon compatibility layer, renderer, and playable game
-are not implemented.
+MOD0 parsing, dynamic tables, relocations, the AArch64 decoder, semantic IR,
+LLVM lowering, runtime, Horizon compatibility layer, renderer, and playable
+game are not implemented.
 
 ## Build and test
 
@@ -47,12 +46,13 @@ cmake --build build --config Debug
 ctest --test-dir build -C Debug --output-on-failure
 ```
 
-Inspect an NSO0 header:
+Inspect and materialize an NSO0 input:
 
 ```bash
 ./build/nso-inspect --help
 ./build/nso-inspect --version
 ./build/nso-inspect path/to/module.nso
+./build/nso-inspect --header-only path/to/module.nso
 ```
 
 On a multi-config generator, use `build/Debug/nso-inspect`.
@@ -77,14 +77,27 @@ game assets.
 - three segment descriptors, module/build ID, and section hashes;
 - compression, hash-required, execute-only, and ZBIC flag decoding;
 - checked file-range, memory-range, BSS, and RoData-relative metadata validation;
-- deterministic human-readable `nso-inspect` output.
+- bounded raw-LZ4 materialization with exact decompressed-size checks;
+- mandatory SHA-256 verification when requested by the header;
+- explicit zero-filled BSS ownership and configurable allocation limits;
+- deterministic human-readable `nso-inspect` output with materialization status.
 
-Still not implemented are LZ4/ZBIC decompression, section hash verification,
-materialized decompressed sections, MOD0/dynamic-table parsing, relocations,
-AArch64 decoding, IR, LLVM, runtime/HLE, renderer, exact TOTK target metadata,
-and game execution.
+The default materialization limits are 256 MiB per segment and 512 MiB for the
+combined `.text`, `.rodata`, `.data`, and BSS buffers. Library callers can pass
+smaller or larger limits explicitly; limits are checked before allocation.
 
-## Next milestone
+ZBIC decoding, MOD0/dynamic-table parsing, relocations, AArch64 decoding, IR,
+LLVM, runtime/HLE, renderer, exact TOTK target metadata, and game execution
+remain unimplemented. `nso-inspect` accepts `--header-only` when a caller needs
+to inspect a ZBIC-marked header without claiming materialization succeeded.
 
-Milestone 2 is NSO segment materialization and integrity verification, using
-controlled decompression, exact-size checks, and optional SHA-256 verification.
+## Milestones
+
+- Milestone 0 — repository foundation: implemented.
+- Milestone 1 — strict NSO0 inspection: implemented.
+- Milestone 2A — NSO image materialization and integrity: implemented.
+- Milestone 2B — guest memory loader, mappings, MOD0, and initial relocations: future.
+- Milestone 3 — AArch64 decoding: future.
+
+Materialization consumes a legally obtained, already prepared local NSO. The
+repository does not decrypt, extract, or distribute Nintendo content.

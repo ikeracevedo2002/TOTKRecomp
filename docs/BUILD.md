@@ -1,6 +1,8 @@
 # Build instructions
 
-TOTKRecomp uses an out-of-source CMake build and requires C++20.
+TOTKRecomp uses an out-of-source CMake build and requires C++20. A clean
+configure fetches the pinned nlohmann/json, Catch2, and LZ4 sources through
+CMake `FetchContent`; no game files are downloaded.
 
 ## Configure, build, and test
 
