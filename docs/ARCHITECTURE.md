@@ -1,9 +1,9 @@
 # TotkRecomp Architecture and Implementation Plan
 
-> Status: Proposed architecture with Milestone 0 bootstrap implemented  
+> Status: Proposed architecture with Milestones 0 and 1 implemented
 > Repository snapshot: 2026-09-05  
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
-> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, and the `nso-inspect` CLI skeleton are committed; no supported game build has been committed.
+> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, synthetic parser tests, and the `nso-inspect` report are committed; no supported game build has been committed.
 
 This document is the primary engineering RFC for TotkRecomp. It describes the intended architecture, the evidence behind the design, the work required to validate it, and the boundaries of what is currently known.
 
@@ -13,7 +13,11 @@ It is deliberately conservative. A proposed component is not evidence that the c
 
 ### Existing
 
-The repository now contains the initial Milestone 0 bootstrap: a C++20 source tree, CMake build, common safety utilities, manifest validation, tests, and CI. There is still no runtime, recompiler, metadata for a supported game version, symbol database, renderer, or supported game build to preserve.
+The repository contains the Milestone 0 bootstrap and Milestone 1 strict NSO0
+header parser: a C++20 source tree, CMake build, common safety utilities,
+manifest validation, tests, CI, and a deterministic `nso-inspect` report. There
+is still no runtime, recompiler, metadata for a supported game version, symbol
+database, renderer, or supported game build to preserve.
 
 ### Proposed
 
@@ -1566,11 +1570,17 @@ The milestones below are gates. Do not skip a gate because the next one appears 
 
 **Success:** A clean build and deterministic test command on at least one supported development platform.
 
-### Milestone 1 — NSO inspection
+### Milestone 1 — Strict NSO0 header inspection
 
-**Goal:** Implement `nso-inspect` for a legally supplied NSO.
+**Goal:** Implement a bounds-safe parser for the fixed `0x100`-byte NSO0
+header and expose it through `nso-inspect` for a legally supplied NSO.
 
-**Output:** Header, segments, offsets, virtual ranges, compression/hash status, BSS, MOD0/module metadata, dynamic data, symbols, and relocations.
+**Implemented:** Header fields, three segment descriptors, offsets, virtual
+ranges, compression/hash status, build/module ID, BSS, file and memory overlap
+checks, and contained RoData-relative embedded/DynStr/DynSym ranges.
+
+**Still not implemented:** LZ4/ZBIC decompression, section hash verification,
+materialized sections, MOD0, dynamic symbols, and relocations.
 
 **Success:**
 
@@ -1578,7 +1588,8 @@ The milestones below are gates. Do not skip a gate because the next one appears 
 nso-inspect <user-provided-main>
 ```
 
-produces a trustworthy, diffable report and rejects malformed input.
+produces a trustworthy, diffable report and rejects malformed input without
+attempting decompression or execution.
 
 ### Milestone 2 — Guest memory loader
 
