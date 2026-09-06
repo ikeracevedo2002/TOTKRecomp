@@ -272,6 +272,23 @@ namespace
     return ExtensionKind::None;
 }
 
+[[nodiscard]] VectorArrangement from_capstone_arrangement(arm64_vas value) noexcept
+{
+    switch (value)
+    {
+    case ARM64_VAS_8B: return VectorArrangement::B8;
+    case ARM64_VAS_16B: return VectorArrangement::B16;
+    case ARM64_VAS_4H: return VectorArrangement::H4;
+    case ARM64_VAS_8H: return VectorArrangement::H8;
+    case ARM64_VAS_2S: return VectorArrangement::S2;
+    case ARM64_VAS_4S: return VectorArrangement::S4;
+    case ARM64_VAS_1D: return VectorArrangement::D1;
+    case ARM64_VAS_2D: return VectorArrangement::D2;
+    case ARM64_VAS_1Q: return VectorArrangement::Q1;
+    default: return VectorArrangement::Invalid;
+    }
+}
+
 [[nodiscard]] ConditionCode from_capstone_condition(arm64_cc value)
 {
     switch (value)
@@ -578,6 +595,8 @@ namespace
 [[nodiscard]] Operand normalize_operand(const cs_arm64_op& operand, const cs_arm64& detail)
 {
     Operand result;
+    result.arrangement = from_capstone_arrangement(operand.vas);
+    result.vector_index = static_cast<std::int8_t>(operand.vector_index);
     result.shift = static_cast<std::uint8_t>(operand.shift.value);
     switch (operand.shift.type)
     {
@@ -605,6 +624,11 @@ namespace
     case ARM64_OP_REG:
         result.kind = OperandKind::Register;
         result.reg = from_capstone_register(operand.reg);
+        break;
+    case ARM64_OP_FP:
+        result.kind = OperandKind::FloatingImmediate;
+        result.floating_immediate = operand.fp;
+        result.has_floating_immediate = true;
         break;
     case ARM64_OP_IMM:
     case ARM64_OP_CIMM:
@@ -642,6 +666,61 @@ namespace
         break;
     }
     return result;
+}
+
+[[nodiscard]] SimdOperation normalize_simd_operation(const cs_insn& instruction) noexcept
+{
+    switch (instruction.id)
+    {
+    case ARM64_INS_FMOV: return SimdOperation::Fmov;
+    case ARM64_INS_FADD: return SimdOperation::Fadd;
+    case ARM64_INS_FSUB: return SimdOperation::Fsub;
+    case ARM64_INS_FMUL: return SimdOperation::Fmul;
+    case ARM64_INS_FDIV: return SimdOperation::Fdiv;
+    case ARM64_INS_FNEG: return SimdOperation::Fneg;
+    case ARM64_INS_FABS: return SimdOperation::Fabs;
+    case ARM64_INS_FSQRT: return SimdOperation::Fsqrt;
+    case ARM64_INS_FMIN:
+    case ARM64_INS_FMINNM: return SimdOperation::Fmin;
+    case ARM64_INS_FMAX:
+    case ARM64_INS_FMAXNM: return SimdOperation::Fmax;
+    case ARM64_INS_FCMP: return SimdOperation::Fcmp;
+    case ARM64_INS_FCMPE: return SimdOperation::Fcmpe;
+    case ARM64_INS_FCSEL: return SimdOperation::Fcsel;
+    case ARM64_INS_SCVTF: return SimdOperation::Scvtf;
+    case ARM64_INS_UCVTF: return SimdOperation::Ucvtf;
+    case ARM64_INS_FCVTZS: return SimdOperation::Fcvtzs;
+    case ARM64_INS_FCVTZU: return SimdOperation::Fcvtzu;
+    case ARM64_INS_FCVT: return SimdOperation::Fcvt;
+    case ARM64_INS_FRINTN: return SimdOperation::Frintn;
+    case ARM64_INS_FRINTP: return SimdOperation::Frintp;
+    case ARM64_INS_FRINTM: return SimdOperation::Frintm;
+    case ARM64_INS_FRINTZ: return SimdOperation::Frintz;
+    case ARM64_INS_FMADD: return SimdOperation::Fmadd;
+    case ARM64_INS_FMSUB: return SimdOperation::Fmsub;
+    case ARM64_INS_FNMADD: return SimdOperation::Fnmadd;
+    case ARM64_INS_FNMSUB: return SimdOperation::Fnmsub;
+    case ARM64_INS_DUP: return SimdOperation::Dup;
+    case ARM64_INS_INS: return SimdOperation::Ins;
+    case ARM64_INS_UMOV: return SimdOperation::Umov;
+    case ARM64_INS_SMOV: return SimdOperation::Smov;
+    case ARM64_INS_EXT: return SimdOperation::Ext;
+    case ARM64_INS_ZIP1: return SimdOperation::Zip1;
+    case ARM64_INS_ZIP2: return SimdOperation::Zip2;
+    case ARM64_INS_UZP1: return SimdOperation::Uzp1;
+    case ARM64_INS_UZP2: return SimdOperation::Uzp2;
+    case ARM64_INS_TRN1: return SimdOperation::Trn1;
+    case ARM64_INS_TRN2: return SimdOperation::Trn2;
+    case ARM64_INS_FCMEQ: return SimdOperation::Fcmeq;
+    case ARM64_INS_FCMGT: return SimdOperation::Fcmgt;
+    case ARM64_INS_FCMGE: return SimdOperation::Fcmge;
+    case ARM64_INS_CMEQ: return SimdOperation::Cmeq;
+    case ARM64_INS_CMGT: return SimdOperation::Cmgt;
+    case ARM64_INS_CMGE: return SimdOperation::Cmge;
+    case ARM64_INS_CMHI: return SimdOperation::Cmhi;
+    case ARM64_INS_CMHS: return SimdOperation::Cmhs;
+    default: return SimdOperation::None;
+    }
 }
 
 [[nodiscard]] Result<ControlFlowInfo> classify_control_flow(const cs_insn& instruction,
@@ -911,6 +990,7 @@ Result<DecodedInstruction> AArch64Decoder::decode(GuestAddress address,
     }
     result.backend_decoded = true;
     result.normalized = result.id != InstructionId::Unknown;
+    result.simd_operation = normalize_simd_operation(instruction);
     result.disassembly = instruction.mnemonic;
     if (instruction.op_str[0] != '\0')
     {

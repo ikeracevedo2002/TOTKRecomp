@@ -41,6 +41,41 @@ void write_register(CpuState& state, const ir::GuestRegister& reg, std::uint64_t
     }
 }
 
+Vector128 read_vector_register(const CpuState& state, std::uint8_t index) noexcept
+{
+    return index < state.vreg.size() ? state.vreg[index] : Vector128{};
+}
+
+void write_vector_register(CpuState& state, std::uint8_t index, Vector128 value) noexcept
+{
+    if (index < state.vreg.size())
+    {
+        state.vreg[index] = value;
+    }
+}
+
+std::uint64_t read_vector_lane(const CpuState& state, std::uint8_t index,
+                               std::uint8_t element_bits, std::uint8_t lane) noexcept
+{
+    return read_lane_bits(read_vector_register(state, index), element_bits, lane);
+}
+
+void write_vector_lane(CpuState& state, std::uint8_t index, std::uint8_t element_bits,
+                       std::uint8_t lane, std::uint64_t value) noexcept
+{
+    auto vector = read_vector_register(state, index);
+    write_lane_bits(vector, element_bits, lane, value);
+    write_vector_register(state, index, vector);
+}
+
+void write_scalar_vector(CpuState& state, std::uint8_t index, std::uint8_t element_bits,
+                         std::uint64_t value) noexcept
+{
+    Vector128 vector{};
+    write_lane_bits(vector, element_bits, 0U, value);
+    write_vector_register(state, index, vector);
+}
+
 bool read_flag(const CpuState& state, ir::Flag flag) noexcept
 {
     switch (flag)

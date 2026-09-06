@@ -2,6 +2,7 @@
 
 #include "switchrecomp/common/error.hpp"
 #include "switchrecomp/memory/guest_memory.hpp"
+#include "switchrecomp/runtime/fp.hpp"
 
 #include <cstdint>
 
@@ -31,6 +32,10 @@ std::uint32_t switchrecomp_runtime_guest_load(RuntimeContext* runtime, std::uint
                                               std::uint8_t size, std::uint64_t* result) noexcept;
 std::uint32_t switchrecomp_runtime_guest_store(RuntimeContext* runtime, std::uint64_t address,
                                                std::uint8_t size, std::uint64_t value) noexcept;
+std::uint32_t switchrecomp_runtime_guest_load_vector(RuntimeContext* runtime, std::uint64_t address,
+                                                     Vector128* result) noexcept;
+std::uint32_t switchrecomp_runtime_guest_store_vector(RuntimeContext* runtime, std::uint64_t address,
+                                                      const Vector128* value) noexcept;
 std::uint32_t switchrecomp_runtime_guest_address_add(RuntimeContext* runtime,
                                                      std::uint64_t base, std::int64_t offset,
                                                      std::uint64_t* result) noexcept;

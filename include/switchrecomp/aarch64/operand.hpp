@@ -13,10 +13,25 @@ enum class OperandKind : std::uint8_t
 {
     Register,
     Immediate,
+    FloatingImmediate,
     Memory,
     Condition,
     System,
     Other,
+};
+
+enum class VectorArrangement : std::uint8_t
+{
+    Invalid,
+    B8,
+    B16,
+    H4,
+    H8,
+    S2,
+    S4,
+    D1,
+    D2,
+    Q1,
 };
 
 enum class ConditionCode : std::uint8_t
@@ -91,10 +106,17 @@ struct Operand
     ShiftKind shift_kind = ShiftKind::None;
     std::uint8_t shift = 0U;
     ExtensionKind extension = ExtensionKind::None;
+    VectorArrangement arrangement = VectorArrangement::Invalid;
+    std::int8_t vector_index = -1;
+    double floating_immediate = 0.0;
+    bool has_floating_immediate = false;
     std::string text;
 };
 
 [[nodiscard]] std::string_view operand_kind_name(OperandKind kind) noexcept;
 [[nodiscard]] std::string_view condition_code_name(ConditionCode condition) noexcept;
+[[nodiscard]] std::string_view vector_arrangement_name(VectorArrangement arrangement) noexcept;
+[[nodiscard]] std::uint8_t vector_element_bits(VectorArrangement arrangement) noexcept;
+[[nodiscard]] std::uint8_t vector_lane_count(VectorArrangement arrangement) noexcept;
 
 } // namespace switchrecomp::aarch64

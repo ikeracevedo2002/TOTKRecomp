@@ -2,6 +2,7 @@
 
 #include "switchrecomp/common/checked_arithmetic.hpp"
 #include "switchrecomp/ir/verifier.hpp"
+#include "switchrecomp/runtime/fp.hpp"
 
 #include <cstdint>
 #include <limits>
@@ -16,12 +17,14 @@ namespace
 
 [[nodiscard]] std::uint64_t mask_for(ir::Type type) noexcept
 {
+    if (type.bit_width() >= 64U) return std::numeric_limits<std::uint64_t>::max();
     return type.bit_width() == 64U ? std::numeric_limits<std::uint64_t>::max()
                                    : (std::uint64_t{1} << type.bit_width()) - 1U;
 }
 
 [[nodiscard]] std::uint64_t value_for_width(std::uint64_t value, ir::Type type) noexcept
 {
+    if (type.is_vector()) return value;
     return value & mask_for(type);
 }
 
@@ -56,6 +59,17 @@ namespace
     return Result<std::uint64_t>::success(values[id]);
 }
 
+[[nodiscard]] Result<std::uint64_t> get_high_value(const ir::Function& function,
+                                                   const std::vector<std::uint64_t>& values,
+                                                   const std::vector<std::uint64_t>& high_values,
+                                                   ir::ValueId id)
+{
+    if (function.value(id) == nullptr || id >= values.size() || id >= high_values.size())
+        return Result<std::uint64_t>::failure(
+            make_error(ErrorCode::InvalidIrValue, "interpreter encountered an invalid vector value id"));
+    return Result<std::uint64_t>::success(high_values[id]);
+}
+
 [[nodiscard]] Result<runtime::ExecutionResult> runtime_failure(const runtime::RuntimeContext& runtime)
 {
     if (runtime.has_error)
@@ -79,6 +93,7 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
     }
     runtime.clear_error();
     std::vector<std::uint64_t> values(function.values().size(), 0U);
+    std::vector<std::uint64_t> high_values(function.values().size(), 0U);
     auto current = function.entry_block();
     runtime::ExecutionResult result;
 
@@ -101,20 +116,21 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
             }
             ++result.executed_operations;
             const auto read = [&](ir::ValueId id) { return get_value(function, values, id); };
-            const auto store_result = [&](std::uint64_t value) -> Result<void> {
+            const auto store_result = [&](std::uint64_t value, std::uint64_t high = 0U) -> Result<void> {
                 if (instruction.result == ir::invalid_value || instruction.result >= values.size())
                 {
                     return Result<void>::failure(
                         make_error(ErrorCode::InvalidIrValue, "instruction result is invalid"));
                 }
                 values[instruction.result] = value_for_width(value, instruction.result_type);
+                high_values[instruction.result] = high;
                 return Result<void>::success();
             };
 
             switch (instruction.opcode)
             {
             case ir::Opcode::Constant:
-                if (const auto stored = store_result(instruction.constant); !stored)
+                if (const auto stored = store_result(instruction.constant, instruction.constant_high); !stored)
                 {
                     return Result<runtime::ExecutionResult>::failure(stored.error());
                 }
@@ -157,6 +173,49 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
                     return Result<runtime::ExecutionResult>::failure(operand.error());
                 }
                 runtime::write_flag(cpu, instruction.flag, operand.value() != 0U);
+                break;
+            }
+            case ir::Opcode::ReadVectorRegister:
+            {
+                const auto vector = runtime::read_vector_register(cpu, instruction.vector_index);
+                const auto stored = store_result(vector.lo, vector.hi);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::WriteVectorRegister:
+            {
+                const auto low = read(instruction.operands[0]);
+                const auto high = get_high_value(function, values, high_values, instruction.operands[0]);
+                if (!low || !high)
+                    return Result<runtime::ExecutionResult>::failure(!low ? low.error() : high.error());
+                runtime::write_vector_register(cpu, instruction.vector_index,
+                                               runtime::Vector128{low.value(), high.value()});
+                break;
+            }
+            case ir::Opcode::ReadFpControl:
+            {
+                const auto stored = store_result(cpu.fpcr);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::WriteFpControl:
+            {
+                const auto value = read(instruction.operands[0]);
+                if (!value) return Result<runtime::ExecutionResult>::failure(value.error());
+                cpu.fpcr = static_cast<std::uint32_t>(value.value());
+                break;
+            }
+            case ir::Opcode::ReadFpStatus:
+            {
+                const auto stored = store_result(cpu.fpsr);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::WriteFpStatus:
+            {
+                const auto value = read(instruction.operands[0]);
+                if (!value) return Result<runtime::ExecutionResult>::failure(value.error());
+                cpu.fpsr = static_cast<std::uint32_t>(value.value());
                 break;
             }
             case ir::Opcode::Add:
@@ -452,6 +511,173 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
                 {
                     return runtime_failure(runtime);
                 }
+                break;
+            }
+            case ir::Opcode::BitCast:
+            {
+                const auto source = read(instruction.operands[0]);
+                const auto high = get_high_value(function, values, high_values, instruction.operands[0]);
+                if (!source || !high)
+                    return Result<runtime::ExecutionResult>::failure(!source ? source.error() : high.error());
+                const auto stored = store_result(source.value(), instruction.result_type.is_vector() ? high.value() : 0U);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::FpBinary:
+            {
+                const auto left = read(instruction.operands[0]);
+                const auto right = read(instruction.operands[1]);
+                if (!left || !right)
+                    return Result<runtime::ExecutionResult>::failure(!left ? left.error() : right.error());
+                const auto value = runtime::fp_binary(cpu,
+                    static_cast<runtime::FpBinaryOperation>(instruction.fp_binary),
+                    instruction.result_type == ir::f32_type() ? 32U : 64U,
+                    left.value(), right.value());
+                const auto stored = store_result(value);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::FpUnary:
+            {
+                const auto value = read(instruction.operands[0]);
+                if (!value) return Result<runtime::ExecutionResult>::failure(value.error());
+                const auto result_value = runtime::fp_unary(cpu,
+                    static_cast<runtime::FpUnaryOperation>(instruction.fp_unary),
+                    instruction.result_type == ir::f32_type() ? 32U : 64U, value.value());
+                const auto stored = store_result(result_value);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::FpCompare:
+            {
+                const auto left = read(instruction.operands[0]);
+                const auto right = read(instruction.operands[1]);
+                if (!left || !right)
+                    return Result<runtime::ExecutionResult>::failure(!left ? left.error() : right.error());
+                const auto result_value = runtime::fp_compare(cpu,
+                    instruction.result_type == ir::i32_type() && function.value(instruction.operands[0])->type == ir::f32_type() ? 32U : 64U,
+                    left.value(), right.value(), instruction.signaling);
+                const auto stored = store_result(result_value);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::FpConvert:
+            {
+                const auto value = read(instruction.operands[0]);
+                const auto source = function.value(instruction.operands[0]);
+                if (!value || source == nullptr)
+                    return Result<runtime::ExecutionResult>::failure(!value ? value.error() : make_error(ErrorCode::InvalidIrValue, "FP conversion source is invalid"));
+                const auto result_value = runtime::fp_convert(cpu,
+                    static_cast<runtime::FpConversion>(instruction.fp_conversion),
+                    source->type.bit_width(), instruction.result_type.bit_width(), value.value());
+                const auto stored = store_result(result_value);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::FpRound:
+            {
+                const auto value = read(instruction.operands[0]);
+                if (!value) return Result<runtime::ExecutionResult>::failure(value.error());
+                const auto result_value = runtime::fp_round(cpu,
+                    instruction.result_type == ir::f32_type() ? 32U : 64U, value.value(),
+                    static_cast<runtime::FpRoundingMode>(instruction.rounding_mode));
+                const auto stored = store_result(result_value);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::VectorExtractLane:
+            {
+                const auto vector = read(instruction.operands[0]);
+                const auto high = get_high_value(function, values, high_values, instruction.operands[0]);
+                if (!vector || !high)
+                    return Result<runtime::ExecutionResult>::failure(!vector ? vector.error() : high.error());
+                const auto lane = runtime::read_lane_bits(runtime::Vector128{vector.value(), high.value()},
+                                                          static_cast<std::uint8_t>(instruction.result_type.bit_width()),
+                                                          instruction.lane_index);
+                const auto stored = store_result(lane);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::VectorInsertLane:
+            {
+                const auto vector = read(instruction.operands[0]);
+                const auto vector_high = get_high_value(function, values, high_values, instruction.operands[0]);
+                const auto lane = read(instruction.operands[1]);
+                if (!vector || !vector_high || !lane)
+                    return Result<runtime::ExecutionResult>::failure(!vector ? vector.error() : !vector_high ? vector_high.error() : lane.error());
+                auto result_vector = runtime::Vector128{vector.value(), vector_high.value()};
+                runtime::write_lane_bits(result_vector, static_cast<std::uint8_t>(function.value(instruction.operands[1])->type.bit_width()), instruction.lane_index, lane.value());
+                const auto stored = store_result(result_vector.lo, result_vector.hi);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::VectorBroadcast:
+            {
+                const auto lane = read(instruction.operands[0]);
+                if (!lane) return Result<runtime::ExecutionResult>::failure(lane.error());
+                const auto bits = static_cast<std::uint8_t>(instruction.arrangement == ir::VectorArrangement::B8 || instruction.arrangement == ir::VectorArrangement::B16 ? 8U : instruction.arrangement == ir::VectorArrangement::H4 || instruction.arrangement == ir::VectorArrangement::H8 ? 16U : instruction.arrangement == ir::VectorArrangement::S2 || instruction.arrangement == ir::VectorArrangement::S4 ? 32U : 64U);
+                const auto count = static_cast<std::uint8_t>(instruction.arrangement == ir::VectorArrangement::B8 ? 8U : instruction.arrangement == ir::VectorArrangement::B16 ? 16U : instruction.arrangement == ir::VectorArrangement::H4 ? 4U : instruction.arrangement == ir::VectorArrangement::H8 ? 8U : instruction.arrangement == ir::VectorArrangement::S2 ? 2U : instruction.arrangement == ir::VectorArrangement::S4 ? 4U : instruction.arrangement == ir::VectorArrangement::D1 ? 1U : 2U);
+                const auto result_vector = runtime::broadcast_lane(lane.value(), bits, count);
+                const auto stored = store_result(result_vector.lo, result_vector.hi);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::VectorBinary:
+            case ir::Opcode::VectorCompare:
+            {
+                const auto left = read(instruction.operands[0]);
+                const auto left_high = get_high_value(function, values, high_values, instruction.operands[0]);
+                const auto right = read(instruction.operands[1]);
+                const auto right_high = get_high_value(function, values, high_values, instruction.operands[1]);
+                if (!left || !left_high || !right || !right_high)
+                    return Result<runtime::ExecutionResult>::failure(!left ? left.error() : !left_high ? left_high.error() : !right ? right.error() : right_high.error());
+                const auto arrangement = static_cast<std::uint8_t>(instruction.arrangement);
+                const auto result_vector = instruction.opcode == ir::Opcode::VectorBinary
+                    ? runtime::vector_binary(cpu, static_cast<std::uint8_t>(instruction.vector_operation), arrangement,
+                                             runtime::Vector128{left.value(), left_high.value()}, runtime::Vector128{right.value(), right_high.value()})
+                    : runtime::vector_compare(cpu, static_cast<std::uint8_t>(instruction.vector_compare), arrangement,
+                                              runtime::Vector128{left.value(), left_high.value()}, runtime::Vector128{right.value(), right_high.value()});
+                const auto stored = store_result(result_vector.lo, result_vector.hi);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::VectorShuffle:
+            {
+                const auto left = read(instruction.operands[0]);
+                const auto left_high = get_high_value(function, values, high_values, instruction.operands[0]);
+                const auto right = read(instruction.operands[1]);
+                const auto right_high = get_high_value(function, values, high_values, instruction.operands[1]);
+                if (!left || !left_high || !right || !right_high)
+                    return Result<runtime::ExecutionResult>::failure(!left ? left.error() : !left_high ? left_high.error() : !right ? right.error() : right_high.error());
+                const auto result_vector = runtime::vector_shuffle(instruction.vector_index,
+                    static_cast<std::uint8_t>(instruction.arrangement),
+                    runtime::Vector128{left.value(), left_high.value()}, runtime::Vector128{right.value(), right_high.value()},
+                    static_cast<std::uint8_t>(instruction.immediate));
+                const auto stored = store_result(result_vector.lo, result_vector.hi);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::GuestLoadVector:
+            {
+                const auto address = read(instruction.operands[0]);
+                if (!address) return Result<runtime::ExecutionResult>::failure(address.error());
+                runtime::Vector128 vector{};
+                if (runtime::switchrecomp_runtime_guest_load_vector(&runtime, address.value(), &vector) != 0U)
+                    return runtime_failure(runtime);
+                const auto stored = store_result(vector.lo, vector.hi);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::GuestStoreVector:
+            {
+                const auto address = read(instruction.operands[0]);
+                const auto low = read(instruction.operands[1]);
+                const auto high = get_high_value(function, values, high_values, instruction.operands[1]);
+                if (!address || !low || !high)
+                    return Result<runtime::ExecutionResult>::failure(!address ? address.error() : !low ? low.error() : high.error());
+                const runtime::Vector128 vector{low.value(), high.value()};
+                if (runtime::switchrecomp_runtime_guest_store_vector(&runtime, address.value(), &vector) != 0U)
+                    return runtime_failure(runtime);
                 break;
             }
             }

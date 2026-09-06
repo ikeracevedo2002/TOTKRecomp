@@ -230,6 +230,7 @@ totkrecomp_enable_sanitizers(switchrecomp-ir)
 add_library(switchrecomp-runtime-core
     src/switchrecomp/runtime/cpu_state.cpp
     src/switchrecomp/runtime/context.cpp
+    src/switchrecomp/runtime/fp.cpp
 )
 target_include_directories(switchrecomp-runtime-core
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -340,6 +341,7 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/semantic_ir_tests.cpp
         tests/lifter_interpreter_tests.cpp
         tests/milestone7_semantics_tests.cpp
+        tests/milestone8_fp_simd_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE

@@ -36,6 +36,7 @@ void print_help()
                  "  --x1 VALUE          Initial X1 value\n"
                  "  --show-disassembly  Print decoded instructions\n"
                  "  --show-ir           Print Semantic IR\n"
+                 "  --show-vector-state Print V0-V31, FPCR and FPSR after execution\n"
                  "  --show-llvm         Print lowered LLVM IR (LLVM build only)\n"
                  "  --execute-ir        Execute through the Semantic IR interpreter\n"
                  "  --execute-native    Execute through the LLVM native JIT\n"
@@ -125,6 +126,18 @@ void print_error(const Error& error)
     std::cerr << switchrecomp::error_code_name(error.code) << ": " << error.message << '\n';
 }
 
+void print_vector_state(const switchrecomp::runtime::CpuState& cpu)
+{
+    std::cout << "FPCR = 0x" << std::hex << std::setw(8) << std::setfill('0') << cpu.fpcr
+              << ", FPSR = 0x" << std::setw(8) << cpu.fpsr << std::dec << '\n';
+    for (std::size_t index = 0U; index < cpu.vreg.size(); ++index)
+    {
+        const auto& vector = cpu.vreg[index];
+        std::cout << "V" << index << " = 0x" << std::hex << std::setw(16) << std::setfill('0')
+                  << vector.hi << std::setw(16) << vector.lo << std::dec << '\n';
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -135,6 +148,7 @@ int main(int argc, char** argv)
     std::uint64_t x1 = 0U;
     bool show_disassembly = false;
     bool show_ir = false;
+    bool show_vector_state = false;
     bool show_llvm = false;
     bool execute_ir = false;
     bool execute_native = false;
@@ -164,6 +178,7 @@ int main(int argc, char** argv)
         }
         if (argument == "--show-disassembly") show_disassembly = true;
         else if (argument == "--show-ir") show_ir = true;
+        else if (argument == "--show-vector-state") show_vector_state = true;
         else if (argument == "--show-llvm") show_llvm = true;
         else if (argument == "--execute-ir") execute_ir = true;
         else if (argument == "--execute-native") execute_native = true;
@@ -281,6 +296,7 @@ int main(int argc, char** argv)
             std::cout << "Execution (IR): X0 = 0x" << std::hex << cpu.x[0] << std::dec
                       << ", NZCV = " << static_cast<unsigned int>(cpu.n) << static_cast<unsigned int>(cpu.z)
                       << static_cast<unsigned int>(cpu.c) << static_cast<unsigned int>(cpu.v) << '\n';
+            if (show_vector_state) print_vector_state(cpu);
         }
 #ifdef TOTKRECOMP_HAS_LLVM
         if (execute_native)
@@ -300,6 +316,7 @@ int main(int argc, char** argv)
                 return 1;
             }
             std::cout << "Execution (LLVM/native): X0 = 0x" << std::hex << cpu.x[0] << std::dec << '\n';
+            if (show_vector_state) print_vector_state(cpu);
         }
 #else
         if (execute_native || show_llvm)

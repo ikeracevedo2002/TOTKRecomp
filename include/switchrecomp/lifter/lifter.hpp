@@ -26,5 +26,6 @@ struct LiftOptions
 // This is the decoder/lifter support matrix used by local coverage tooling.
 // Operand-form validation still happens in lift_function and returns a structured error.
 [[nodiscard]] bool is_instruction_liftable(aarch64::InstructionId id) noexcept;
+[[nodiscard]] bool is_instruction_liftable(const aarch64::DecodedInstruction& instruction) noexcept;
 
 } // namespace switchrecomp::lifter

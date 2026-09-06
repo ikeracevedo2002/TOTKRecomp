@@ -1,6 +1,6 @@
 # Semantic IR and expanded AArch64 lifting
 
-Milestones 6 and 7 provide an executable recompilation path for synthetic,
+Milestones 6, 7, and 8 provide an executable recompilation path for synthetic,
 standalone AArch64 functions, with expanded integer, memory, and control-flow
 semantics:
 
@@ -23,10 +23,17 @@ optional backend and is not exposed by `switchrecomp-ir`; the interpreter can
 therefore validate semantics without LLVM.
 
 The IR now includes orthogonal integer, bitwise, rotate, extension, flag,
-selection, checked-address and guest-memory primitives. It has integer types `i1`, `i8`, `i16`,
-`i32`, `i64`, stable `ValueId`/`BlockId` identities, typed instructions, explicit
+selection, checked-address, guest-memory, scalar FP, and 128-bit vector
+primitives. It has integer types `i1`, `i8`, `i16`, `i32`, `i64`, floating types
+`f32`/`f64`, and `v128`, plus stable `ValueId`/`BlockId` identities, typed instructions, explicit
 basic-block terminators, and deterministic textual printing. It does not yet
 perform SSA optimization, constant folding, register allocation, or inlining.
+
+FP operations use raw-bit constants and typed `BitCast` instructions. Vector
+operations carry an explicit arrangement and lane index; vector values are
+never represented as host pointers in the IR. The verifier checks arrangement,
+lane width, conversion direction, and operation enum validity before either
+backend runs.
 
 Every lifted operation carries a `SourceLocation` containing the guest PC,
 original opcode, and (when enabled) the decoder's disassembly. The printer
@@ -34,7 +41,9 @@ uses stable vector order and never emits host pointers.
 
 ## CPU state and ABI
 
-`runtime::CpuState` contains X0–X30, SP, PC, and the four NZCV flags. W reads
+`runtime::CpuState` contains X0–X30, SP, PC, the four NZCV flags, FPCR, FPSR,
+and V0–V31 as 128-bit `Vector128` values. S and D are low-bit views of V; Q
+accesses the full value. W reads
 use the low 32 bits; W writes zero the upper half of the corresponding X
 register. XZR/WZR always read as zero and discard writes. SP is represented
 separately and is never treated as the zero register.
@@ -66,7 +75,7 @@ instructions the lifter emits the result, N/Z calculations, and dedicated
 carry/overflow primitives. The same formulas are lowered independently by the
 interpreter and LLVM backend and are covered by boundary tests.
 
-## Milestone 7 instruction coverage
+## Milestone 8 instruction coverage
 
 Only the documented forms are supported. Other forms fail explicitly with an
 unsupported-instruction diagnostic containing the guest PC, opcode, and
@@ -88,7 +97,10 @@ disassembly.
 | LDP/STP | scalar pairs with offset, pre-index, and post-index forms | no | read/write | supported forms |
 | B/B.cond/CBZ/CBNZ/TBZ/TBNZ | internal CFG targets and all normal conditions | reads NZCV where applicable | no | supported |
 | BL/BLR/BR/RET | LR write and explicit PC handoff; no general dispatcher yet | no | no | partial |
-| FP/SIMD, atomics, system instructions | — | — | — | explicit rejection |
+| Scalar FP and required conversions/rounding | FMOV, FADD/FSUB/FMUL/FDIV, FNEG/FABS/FSQRT, FCMP/FCSEL, SCVTF/UCVTF, FCVTZS/FCVTZU/FCVT, FRINTN/P/M/Z, FMIN/FMAX | FPCR/FPSR runtime state | read/write | supported forms |
+| NEON lane/data operations | DUP, INS, UMOV, SMOV, EXT, ZIP/UZP/TRN, logical/integer/FP vector arithmetic and comparisons | no | read/write | supported arrangements |
+| FP/SIMD memory | S/D/Q LDR/STR and LDP/STP | no | read/write | checked guest memory |
+| FP/SIMD fused multiply-add, atomics, system instructions | — | — | — | explicit rejection |
 
 Literal loads remain supported only when their validated guest target is mapped.
 Indirect calls and branches return through the explicit guest `CpuState::pc`
@@ -128,7 +140,7 @@ coverage scanner. The scanner is an instruction-family baseline: operand-form
 validation still happens during lifting and unsupported forms remain structured
 errors.
 
-Explicitly deferred are BL/BLR/BR function-map dispatch, FP/SIMD, exclusive
-atomics and memory ordering, system-call/Horizon behavior, whole-module
+Explicitly deferred are BL/BLR/BR function-map dispatch, exclusive atomics and
+memory ordering, system-call/Horizon behavior, whole-module
 execution, renderer integration, XCI/NSP/NCA extraction, and all TOTK-specific
 metadata or patches.

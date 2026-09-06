@@ -1,6 +1,6 @@
 # TotkRecomp Architecture and Implementation Plan
 
-> Status: Proposed architecture with Milestones 0–7 implemented
+> Status: Proposed architecture with Milestones 0–8 implemented
 > Repository snapshot: 2026-09-06
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
 > Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, MOD0/dynamic/RELA metadata discovery, dynamic symbol/relocation application, expanded AArch64 Semantic IR and lifting, synthetic tests, and deterministic inspection/coverage reports are committed; no supported game build has been committed.
@@ -16,15 +16,17 @@ It is deliberately conservative. A proposed component is not evidence that the c
 The repository contains the Milestone 0 bootstrap, Milestone 1 strict NSO0
 header parser, Milestone 2A image materializer, Milestone 2B guest loader,
 Milestone 3 MOD0/dynamic metadata parser, Milestone 4 decoder/CFG, Milestone 5
-dynamic linking, Milestone 6 Semantic IR/lifting, and Milestone 7 expanded
-AArch64 semantics and coverage:
+dynamic linking, Milestone 6 Semantic IR/lifting, Milestone 7 expanded
+AArch64 semantics and coverage, and Milestone 8 FP/SIMD state and semantics:
 a C++20 source tree, CMake build, common safety utilities, manifest validation,
 tests, CI, strict NSO0 inspection, safe NSO image
 materialization, integrity verification, a checked guest-memory loader, and a
 deterministic `nso-inspect` report, an LLVM-independent typed Semantic IR, a
 verifier, a reference interpreter, and an optional LLVM lowering/JIT backend for
 synthetic standalone functions, normalized scalar memory/control-flow semantics,
-and a local whole-range coverage scanner. There is still no game-specific runtime,
+and a local whole-range coverage scanner. Milestone 8 adds shared V-register
+state, FPCR/FPSR, reference FP/NEON operations, and checked vector memory. There
+is still no game-specific runtime,
 metadata for a supported game version, renderer, or supported game build to
 preserve.
 
@@ -389,9 +391,9 @@ not partially modify the image. REL, lazy binding, symbol versioning,
 multi-module link order, and Horizon resolution remain future layers. See
 [`RELOCATIONS.md`](RELOCATIONS.md).
 
-### 7.5 Semantic IR and expanded AArch64 lifting — Milestones 6–7
+### 7.5 Semantic IR and expanded AArch64 lifting — Milestones 6–8
 
-Milestones 6 and 7 provide the executable recompilation path without making
+Milestones 6, 7, and 8 provide the executable recompilation path without making
 LLVM the architectural contract:
 
 ```
@@ -402,12 +404,13 @@ AArch64 → decoder/CFG → SwitchRecomp Semantic IR
 
 The IR is typed, deterministic, source-mapped, explicitly terminated, and
 independent of LLVM at its public interface. `runtime::CpuState` models X0–X30,
-SP, PC, and NZCV with correct W/X and XZR/WZR semantics. Guest loads/stores go
-through checked `GuestMemory` helpers and never reinterpret a guest address as
-a host pointer. The lifter supports documented integer, NZCV, bitfield,
-conditional-select, scalar-memory, pair-memory, PC-relative, and internal-
-branch forms. It rejects unsupported operand forms, divide instructions,
-FP/SIMD, atomics, and system instructions explicitly. The interpreter and
+SP, PC, NZCV, FPCR, FPSR, and the shared V0–V31 register file with correct W/X,
+S/D/Q, and XZR/WZR semantics. Guest loads/stores go through checked
+`GuestMemory` helpers and never reinterpret a guest address as a host pointer.
+The lifter supports documented integer, NZCV, bitfield, conditional-select,
+scalar-memory, pair-memory, PC-relative, FP, NEON, and internal-branch forms.
+It rejects unsupported operand forms, divide instructions, fused FP multiply-
+add, atomics, and system instructions explicitly. The interpreter and
 optional LLVM backend execute synthetic standalone functions through the same
 ABI, and `aarch64-analyze` provides deterministic whole-range coverage reports;
 this does not execute TOTK.
@@ -594,7 +597,7 @@ struct CpuState {
     uint32_t nzcv;
     uint32_t fpcr;
     uint32_t fpsr;
-    Vector128 v[32];
+    Vector128 vreg[32];
 };
 ```
 
@@ -1781,35 +1784,33 @@ locally supplied executable range.
 the interpreter and optional LLVM backend lower the same typed IR; coverage
 reports are deterministic and never include private input paths or game data.
 
-### Milestone 8 — Function calls
+### Milestone 8 — AArch64 FP/SIMD — implemented
 
-**Goal:** Support `BL`, `RET`, stack frames, direct calls, and the internal generated ABI.
+**Implemented:** A shared V0–V31 `Vector128` register file, FPCR/FPSR state,
+project-owned scalar FP and NEON IR, checked S/D/Q vector memory, reference
+interpreter semantics, and LLVM runtime-helper lowering. The support boundary is
+documented in `docs/MILESTONE_8.md`.
 
-**Success:** Multi-function AArch64 programs execute correctly after recompilation.
+**Success:** Synthetic scalar and vector fixtures agree across the interpreter
+and optional LLVM backend, including raw IEEE edge cases and checked memory.
 
-### Milestone 9 — Indirect calls
+### Milestone 9 — Threads and atomics
 
-**Goal:** Support `BLR`, guest function maps, vtables, callbacks, and function-pointer identity.
+**Goal:** Add native thread mapping, TLS, synchronization, barriers, exclusive
+operations, and the memory ordering required by translated code. Function-map
+dispatch and indirect-call identity remain prerequisites to be designed under
+the same evidence gate.
 
-**Success:** Indirect guest targets reach the correct native function with correct state.
+**Success:** Controlled multi-threaded workloads pass deterministic tests with
+explicit failure behavior for unsupported synchronization patterns.
 
-### Milestone 10 — FP/SIMD
+### Milestone 10 — Whole-main translation
 
-**Goal:** Add scalar FP, NEON, vector loads/stores, FP status, and required rounding behavior.
+**Goal:** Analyze and translate the targeted `main` module after function-map,
+threading, import, and runtime boundaries are validated.
 
-**Success:** Representative vector/FP differential tests pass.
-
-### Milestone 11 — Threads and atomics
-
-**Goal:** Add native thread mapping, TLS, synchronization, barriers, exclusive operations, and required memory order.
-
-**Success:** Controlled multi-threaded workloads pass deterministic tests.
-
-### Milestone 12 — Whole-main translation
-
-**Goal:** Analyze and translate the targeted `main` module. Unresolved imports may remain.
-
-**Success:** The whole target module can be statically analyzed, generated, and linked with a complete unresolved-dependency report. It does not need to boot.
+**Success:** The known synthetic and legally supplied module corpus translates
+with auditable coverage and no silent unsupported instructions.
 
 ### Milestone 13 — Enter game initialization
 
@@ -2050,9 +2051,9 @@ These are the first practical engineering tasks. They intentionally stop before 
 - **Success:** Interpreter and native execution match the reference harness.
 - **Dependencies:** Decoder, IR, and runtime context.
 
-### 15. Expand only under differential coverage — Milestone 7 implemented
+### 15. Expand only under differential coverage — Milestones 7 and 8 implemented
 
-- **Goal:** Add the next gated groups—function-map calls, then FP/SIMD/atomics—only after differential coverage is available.
+- **Goal:** Add each architectural group only after differential coverage is available. FP/SIMD is now implemented in Milestone 8; function-map dispatch, threads, and atomics remain gated future work.
 - **Inputs:** Differential tests and failure corpus.
 - **Output:** Increasingly capable semantic IR/code generator and versioned coverage corpus.
 - **Success:** Each group passes tests before it is enabled for larger analysis.

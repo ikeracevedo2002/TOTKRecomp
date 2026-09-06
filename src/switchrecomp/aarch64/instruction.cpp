@@ -11,6 +11,8 @@ std::string_view operand_kind_name(OperandKind kind) noexcept
         return "register";
     case OperandKind::Immediate:
         return "immediate";
+    case OperandKind::FloatingImmediate:
+        return "floating_immediate";
     case OperandKind::Memory:
         return "memory";
     case OperandKind::Condition:
@@ -21,6 +23,60 @@ std::string_view operand_kind_name(OperandKind kind) noexcept
         return "other";
     }
     return "unknown";
+}
+
+std::string_view vector_arrangement_name(VectorArrangement arrangement) noexcept
+{
+    switch (arrangement)
+    {
+    case VectorArrangement::Invalid: return "invalid";
+    case VectorArrangement::B8: return "8b";
+    case VectorArrangement::B16: return "16b";
+    case VectorArrangement::H4: return "4h";
+    case VectorArrangement::H8: return "8h";
+    case VectorArrangement::S2: return "2s";
+    case VectorArrangement::S4: return "4s";
+    case VectorArrangement::D1: return "1d";
+    case VectorArrangement::D2: return "2d";
+    case VectorArrangement::Q1: return "1q";
+    }
+    return "invalid";
+}
+
+std::uint8_t vector_element_bits(VectorArrangement arrangement) noexcept
+{
+    switch (arrangement)
+    {
+    case VectorArrangement::B8:
+    case VectorArrangement::B16: return 8U;
+    case VectorArrangement::H4:
+    case VectorArrangement::H8: return 16U;
+    case VectorArrangement::S2:
+    case VectorArrangement::S4: return 32U;
+    case VectorArrangement::D1:
+    case VectorArrangement::D2: return 64U;
+    case VectorArrangement::Invalid:
+    case VectorArrangement::Q1: return 0U;
+    }
+    return 0U;
+}
+
+std::uint8_t vector_lane_count(VectorArrangement arrangement) noexcept
+{
+    switch (arrangement)
+    {
+    case VectorArrangement::B8: return 8U;
+    case VectorArrangement::B16: return 16U;
+    case VectorArrangement::H4: return 4U;
+    case VectorArrangement::H8: return 8U;
+    case VectorArrangement::S2: return 2U;
+    case VectorArrangement::S4: return 4U;
+    case VectorArrangement::D1: return 1U;
+    case VectorArrangement::D2: return 2U;
+    case VectorArrangement::Q1: return 1U;
+    case VectorArrangement::Invalid: return 0U;
+    }
+    return 0U;
 }
 
 std::string_view condition_code_name(ConditionCode condition) noexcept
@@ -271,6 +327,60 @@ std::string_view control_flow_kind_name(ControlFlowKind kind) noexcept
         return "exception";
     case ControlFlowKind::Unknown:
         return "unknown";
+    }
+    return "unknown";
+}
+
+std::string_view simd_operation_name(SimdOperation operation) noexcept
+{
+    switch (operation)
+    {
+    case SimdOperation::None: return "none";
+    case SimdOperation::Fmov: return "fmov";
+    case SimdOperation::Fadd: return "fadd";
+    case SimdOperation::Fsub: return "fsub";
+    case SimdOperation::Fmul: return "fmul";
+    case SimdOperation::Fdiv: return "fdiv";
+    case SimdOperation::Fneg: return "fneg";
+    case SimdOperation::Fabs: return "fabs";
+    case SimdOperation::Fsqrt: return "fsqrt";
+    case SimdOperation::Fmin: return "fmin";
+    case SimdOperation::Fmax: return "fmax";
+    case SimdOperation::Fcmp: return "fcmp";
+    case SimdOperation::Fcmpe: return "fcmpe";
+    case SimdOperation::Fcsel: return "fcsel";
+    case SimdOperation::Scvtf: return "scvtf";
+    case SimdOperation::Ucvtf: return "ucvtf";
+    case SimdOperation::Fcvtzs: return "fcvtzs";
+    case SimdOperation::Fcvtzu: return "fcvtzu";
+    case SimdOperation::Fcvt: return "fcvt";
+    case SimdOperation::Frintn: return "frintn";
+    case SimdOperation::Frintp: return "frintp";
+    case SimdOperation::Frintm: return "frintm";
+    case SimdOperation::Frintz: return "frintz";
+    case SimdOperation::Fmadd: return "fmadd";
+    case SimdOperation::Fmsub: return "fmsub";
+    case SimdOperation::Fnmadd: return "fnmadd";
+    case SimdOperation::Fnmsub: return "fnmsub";
+    case SimdOperation::Dup: return "dup";
+    case SimdOperation::Ins: return "ins";
+    case SimdOperation::Umov: return "umov";
+    case SimdOperation::Smov: return "smov";
+    case SimdOperation::Ext: return "ext";
+    case SimdOperation::Zip1: return "zip1";
+    case SimdOperation::Zip2: return "zip2";
+    case SimdOperation::Uzp1: return "uzp1";
+    case SimdOperation::Uzp2: return "uzp2";
+    case SimdOperation::Trn1: return "trn1";
+    case SimdOperation::Trn2: return "trn2";
+    case SimdOperation::Fcmeq: return "fcmeq";
+    case SimdOperation::Fcmgt: return "fcmgt";
+    case SimdOperation::Fcmge: return "fcmge";
+    case SimdOperation::Cmeq: return "cmeq";
+    case SimdOperation::Cmgt: return "cmgt";
+    case SimdOperation::Cmge: return "cmge";
+    case SimdOperation::Cmhi: return "cmhi";
+    case SimdOperation::Cmhs: return "cmhs";
     }
     return "unknown";
 }

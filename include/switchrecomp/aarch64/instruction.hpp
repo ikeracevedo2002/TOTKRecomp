@@ -13,6 +13,14 @@ namespace switchrecomp::aarch64
 
 using GuestAddress = memory::GuestAddress;
 
+enum class SimdOperation : std::uint8_t
+{
+    None, Fmov, Fadd, Fsub, Fmul, Fdiv, Fneg, Fabs, Fsqrt, Fmin, Fmax, Fcmp, Fcmpe,
+    Fcsel, Scvtf, Ucvtf, Fcvtzs, Fcvtzu, Fcvt, Frintn, Frintp, Frintm, Frintz,
+    Fmadd, Fmsub, Fnmadd, Fnmsub, Dup, Ins, Umov, Smov, Ext, Zip1, Zip2, Uzp1, Uzp2,
+    Trn1, Trn2, Fcmeq, Fcmgt, Fcmge, Cmeq, Cmgt, Cmge, Cmhi, Cmhs,
+};
+
 enum class InstructionId : std::uint16_t
 {
     Unknown,
@@ -141,9 +149,11 @@ struct DecodedInstruction
     std::string disassembly;
     bool backend_decoded = false;
     bool normalized = false;
+    SimdOperation simd_operation = SimdOperation::None;
 };
 
 [[nodiscard]] std::string_view instruction_id_name(InstructionId id) noexcept;
 [[nodiscard]] std::string_view control_flow_kind_name(ControlFlowKind kind) noexcept;
+[[nodiscard]] std::string_view simd_operation_name(SimdOperation operation) noexcept;
 
 } // namespace switchrecomp::aarch64

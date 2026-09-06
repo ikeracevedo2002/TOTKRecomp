@@ -27,6 +27,18 @@ struct Instruction
     std::uint8_t memory_size = 0U;
     SourceLocation source;
     bool address_offset_signed = false;
+    std::uint64_t constant_high = 0U;
+    std::uint8_t vector_index = 0U;
+    VectorArrangement arrangement = VectorArrangement::Raw128;
+    std::uint8_t lane_index = 0U;
+    FpBinaryOperation fp_binary = FpBinaryOperation::Add;
+    FpUnaryOperation fp_unary = FpUnaryOperation::Neg;
+    FpConversion fp_conversion = FpConversion::SignedIntToFp;
+    RoundingMode rounding_mode = RoundingMode::NearestEven;
+    VectorOperation vector_operation = VectorOperation::And;
+    VectorCompareOperation vector_compare = VectorCompareOperation::Equal;
+    bool signaling = false;
+    bool signed_operation = false;
 };
 
 enum class TerminatorKind : std::uint8_t
