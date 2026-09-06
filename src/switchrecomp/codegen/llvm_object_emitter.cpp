@@ -95,7 +95,7 @@ Result<void> emit_native_object(const ir::IrFunction& function,
     module->setTargetTriple(triple);
     module->setDataLayout(machine->createDataLayout());
     std::error_code file_error;
-    llvm::raw_fd_ostream output(output_path.string(), file_error, llvm::sys::fs::OF_None);
+    llvm::raw_fd_ostream output(output_path.string(), file_error);
     if (file_error)
     {
         return Result<void>::failure(make_error(

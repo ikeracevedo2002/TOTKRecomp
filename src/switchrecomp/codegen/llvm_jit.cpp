@@ -133,7 +133,7 @@ Result<ir::ExecutionResult> execute_with_llvm_jit(
         !added)
     {
         return Result<ir::ExecutionResult>::failure(make_error(
-            ErrorCode::JitFailure, "could not add module to LLJIT: " + llvm_error(added.takeError())));
+            ErrorCode::JitFailure, "could not add module to LLJIT: " + llvm_error(std::move(added))));
     }
     auto symbol = jit_instance->lookup(lowered.value().function_name);
     if (!symbol)

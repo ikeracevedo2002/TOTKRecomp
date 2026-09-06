@@ -4,6 +4,7 @@
 #include "switchrecomp/ir/verifier.hpp"
 
 #include <iomanip>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -82,13 +83,20 @@ namespace
     return nullptr;
 }
 
+[[nodiscard]] llvm::FunctionType* make_function_type(
+    llvm::Type* result, std::initializer_list<llvm::Type*> parameters)
+{
+    return llvm::FunctionType::get(
+        result, llvm::ArrayRef<llvm::Type*>(parameters.begin(), parameters.size()), false);
+}
+
 class LoweringContext
 {
   public:
     LoweringContext(const ir::IrFunction& source, llvm::LLVMContext& context,
                     llvm::Module& module, llvm::Function& function)
         : source_(source), context_(context), module_(module), function_(function),
-          pointer_type_(llvm::Type::getInt8PtrTy(context))
+          pointer_type_(llvm::PointerType::getUnqual(context))
     {
     }
 
@@ -232,10 +240,8 @@ class LoweringContext
         }
         case ir::IrOpcode::ReadRegister:
         {
-            const auto type = llvm::FunctionType::get(integer64,
-                                                      {pointer_type_, integer8, integer8,
-                                                       integer8, integer8},
-                                                      false);
+            const auto type = make_function_type(
+                integer64, {pointer_type_, integer8, integer8, integer8, integer8});
             const auto callee = runtime_function("switchrecomp_read_register", type);
             const auto width = instruction.reg->width == aarch64::RegisterWidth::W32 ? 32U : 64U;
             auto* value = builder.CreateCall(
@@ -249,10 +255,8 @@ class LoweringContext
         }
         case ir::IrOpcode::WriteRegister:
         {
-            const auto type = llvm::FunctionType::get(integer32,
-                                                      {pointer_type_, integer8, integer8,
-                                                       integer8, integer8, integer64},
-                                                      false);
+            const auto type = make_function_type(
+                integer32, {pointer_type_, integer8, integer8, integer8, integer8, integer64});
             const auto callee = runtime_function("switchrecomp_write_register", type);
             auto* value = coerce(builder, load_value(builder, instruction.operands[0]), integer64);
             if (value == nullptr)
@@ -320,8 +324,8 @@ class LoweringContext
             }
             auto* output = slots_.at(instruction.result);
             const auto output_type = instruction.access_size == 4U ? integer32 : integer64;
-            const auto function_type = llvm::FunctionType::get(
-                integer32, {pointer_type_, integer64, output_type->getPointerTo()}, false);
+            const auto function_type = make_function_type(
+                integer32, {pointer_type_, integer64, output_type->getPointerTo()});
             const auto callee = runtime_function(
                 instruction.access_size == 4U ? "switchrecomp_guest_read_u32"
                                               : "switchrecomp_guest_read_u64",
@@ -340,8 +344,8 @@ class LoweringContext
                     make_error(ErrorCode::InvalidValueId, "guest_store uses an unknown value"));
             }
             const auto output_type = instruction.access_size == 4U ? integer32 : integer64;
-            const auto function_type = llvm::FunctionType::get(
-                integer32, {pointer_type_, integer64, output_type}, false);
+            const auto function_type = make_function_type(
+                integer32, {pointer_type_, integer64, output_type});
             const auto callee = runtime_function(
                 instruction.access_size == 4U ? "switchrecomp_guest_write_u32"
                                               : "switchrecomp_guest_write_u64",
@@ -368,7 +372,7 @@ class LoweringContext
         }
         case ir::IrOpcode::Return:
         {
-            const auto type = llvm::FunctionType::get(integer32, {pointer_type_, integer64}, false);
+            const auto type = make_function_type(integer32, {pointer_type_, integer64});
             const auto callee = runtime_function("switchrecomp_set_guest_pc", type);
             auto* status = builder.CreateCall(callee, {context_argument(),
                                                        llvm::ConstantInt::get(integer64,
@@ -388,7 +392,7 @@ class LoweringContext
     llvm::LLVMContext& context_;
     llvm::Module& module_;
     llvm::Function& function_;
-    llvm::Type* pointer_type_;
+    llvm::PointerType* pointer_type_;
     llvm::BasicBlock* prologue_ = nullptr;
     llvm::BasicBlock* error_ = nullptr;
     llvm::BasicBlock* exit_ = nullptr;
@@ -410,9 +414,8 @@ Result<LlvmModule> lower_to_llvm(const ir::IrFunction& function)
     const auto name = generated_name(function);
     llvm::Module module("switchrecomp_" + name, context);
     module.setTargetTriple(llvm::sys::getDefaultTargetTriple());
-    auto* pointer_type = llvm::Type::getInt8PtrTy(context);
-    auto* function_type = llvm::FunctionType::get(
-        llvm::Type::getInt32Ty(context), {pointer_type}, false);
+    auto* pointer_type = llvm::PointerType::getUnqual(context);
+    auto* function_type = make_function_type(llvm::Type::getInt32Ty(context), {pointer_type});
     auto* generated = llvm::Function::Create(function_type, llvm::Function::ExternalLinkage, name,
                                              module);
     auto* context_argument = generated->getArg(0);
