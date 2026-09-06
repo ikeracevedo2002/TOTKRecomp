@@ -255,6 +255,21 @@ if(SWITCHRECOMP_ENABLE_LLVM)
 endif()
 
 if(LLVM_FOUND)
+    set(SWITCHRECOMP_LLVM_HEADERS_FOUND OFF)
+    foreach(llvm_include_dir IN LISTS LLVM_INCLUDE_DIRS)
+        if(EXISTS "${llvm_include_dir}/llvm/IR/LLVMContext.h" AND
+           EXISTS "${llvm_include_dir}/llvm/ExecutionEngine/Orc/LLJIT.h" AND
+           EXISTS "${llvm_include_dir}/llvm/Target/TargetMachine.h")
+            set(SWITCHRECOMP_LLVM_HEADERS_FOUND ON)
+        endif()
+    endforeach()
+    if(NOT SWITCHRECOMP_LLVM_HEADERS_FOUND)
+        message(WARNING "LLVMConfig.cmake was found but LLVM development headers are missing; disabling the LLVM backend")
+        set(LLVM_FOUND FALSE)
+    endif()
+endif()
+
+if(LLVM_FOUND)
     message(STATUS "SwitchRecomp LLVM backend enabled: LLVM ${LLVM_VERSION_STRING}")
     if(DEFINED LLVM_VERSION_MAJOR AND NOT LLVM_VERSION_MAJOR EQUAL 22)
         message(WARNING "SwitchRecomp prefers LLVM 22.1.8; found LLVM ${LLVM_VERSION_STRING}")
