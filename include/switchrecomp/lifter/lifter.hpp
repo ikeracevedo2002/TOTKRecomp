@@ -20,12 +20,18 @@ struct LiftOptions
     std::size_t max_ir_operations_per_guest_instruction = 64U;
 };
 
+#ifndef SWITCHRECOMP_LEGACY_LIFTER_IMPL
 [[nodiscard]] Result<ir::Function> lift_function(
     const analysis::ControlFlowGraph& cfg, const LiftOptions& options = {});
 
-// This is the decoder/lifter support matrix used by local coverage tooling.
-// Operand-form validation still happens in lift_function and returns a structured error.
 [[nodiscard]] bool is_instruction_liftable(aarch64::InstructionId id) noexcept;
 [[nodiscard]] bool is_instruction_liftable(const aarch64::DecodedInstruction& instruction) noexcept;
+#endif
+
+// Internal Milestone 0-8 implementation. Milestone 9 delegates non-concurrency instructions here.
+[[nodiscard]] Result<ir::Function> lift_function_legacy(
+    const analysis::ControlFlowGraph& cfg, const LiftOptions& options = {});
+[[nodiscard]] bool is_instruction_liftable_legacy(aarch64::InstructionId id) noexcept;
+[[nodiscard]] bool is_instruction_liftable_legacy(const aarch64::DecodedInstruction& instruction) noexcept;
 
 } // namespace switchrecomp::lifter
