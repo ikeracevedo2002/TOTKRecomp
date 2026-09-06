@@ -1,9 +1,9 @@
 # TotkRecomp Architecture and Implementation Plan
 
-> Status: Proposed architecture with Milestones 0, 1, 2A, 2B, 3, and 4 implemented
-> Repository snapshot: 2026-09-05  
+> Status: Proposed architecture with Milestones 0–6 implemented
+> Repository snapshot: 2026-09-06
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
-> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, MOD0/dynamic/RELA metadata discovery, synthetic tests, and the `nso-inspect` report are committed; no supported game build has been committed.
+> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, MOD0/dynamic/RELA metadata discovery, dynamic symbol/relocation application, Semantic IR, synthetic tests, and deterministic inspection reports are committed; no supported game build has been committed.
 
 This document is the primary engineering RFC for TotkRecomp. It describes the intended architecture, the evidence behind the design, the work required to validate it, and the boundaries of what is currently known.
 
@@ -14,14 +14,17 @@ It is deliberately conservative. A proposed component is not evidence that the c
 ### Existing
 
 The repository contains the Milestone 0 bootstrap, Milestone 1 strict NSO0
-header parser, Milestone 2A image materializer, Milestone 2B guest loader, and
-Milestone 3 MOD0/dynamic metadata parser:
+header parser, Milestone 2A image materializer, Milestone 2B guest loader,
+Milestone 3 MOD0/dynamic metadata parser, Milestone 4 decoder/CFG, Milestone 5
+dynamic linking, and Milestone 6 Semantic IR/lifting:
 a C++20 source tree, CMake build, common safety utilities, manifest validation,
 tests, CI, strict NSO0 inspection, safe NSO image
 materialization, integrity verification, a checked guest-memory loader, and a
-deterministic `nso-inspect` report. There is still no relocation applier, runtime,
-recompiler, metadata for a supported game version, symbol database, renderer, or
-supported game build to preserve.
+deterministic `nso-inspect` report, an LLVM-independent typed Semantic IR, a
+verifier, a reference interpreter, and an optional LLVM lowering/JIT backend for
+synthetic standalone functions. There is still no game-specific runtime,
+metadata for a supported game version, renderer, or supported game build to
+preserve.
 
 ### Proposed
 
@@ -384,7 +387,28 @@ not partially modify the image. REL, lazy binding, symbol versioning,
 multi-module link order, and Horizon resolution remain future layers. See
 [`RELOCATIONS.md`](RELOCATIONS.md).
 
-### 7.4 Multiple modules
+### 7.5 Semantic IR and minimal lifting — Milestone 6
+
+Milestone 6 introduces the first executable recompilation path without making
+LLVM the architectural contract:
+
+```
+AArch64 → decoder/CFG → SwitchRecomp Semantic IR
+                              ├── verifier/interpreter
+                              └── LLVM lowering → native JIT
+```
+
+The IR is typed, deterministic, source-mapped, explicitly terminated, and
+independent of LLVM at its public interface. `runtime::CpuState` models X0–X30,
+SP, PC, and NZCV with correct W/X and XZR/WZR semantics. Guest loads/stores go
+through checked `GuestMemory` helpers and never reinterpret a guest address as
+a host pointer. The lifter supports the documented initial scalar subset and
+rejects unsupported operand forms, calls, FP/SIMD, atomics, and system
+instructions explicitly. The interpreter and optional LLVM backend execute
+synthetic standalone functions through the same ABI; this does not execute
+TOTK.
+
+### 7.6 Multiple modules
 
 The architecture supports a module graph such as:
 
@@ -1473,7 +1497,8 @@ Examples:
 
 ## 29. Build and generated-artifact strategy
 
-The repository is empty, so no current build-system claim can be made.
+The current repository uses CMake with pinned FetchContent dependencies for the
+core toolchain. LLVM is an optional host-provided backend dependency.
 
 ### Proposal
 
@@ -1481,22 +1506,31 @@ The repository is empty, so no current build-system claim can be made.
 - Ninja for reproducible local/CI builds.
 - Clang as the primary compiler for the first implementation.
 - C++20 for core/runtime code unless a specific dependency forces another standard.
-- LLVM pinned to a tested release and found through a reproducible mechanism.
+- LLVM 18.1.3 is the tested backend release (Ubuntu Noble package
+  `1:18.1.3-1ubuntu1`) and is found through its pinned CMake package directory;
+  it is not built through FetchContent.
 - Optional SDL, Vulkan headers/loader, and analysis tools kept behind clear feature flags.
 - CI initially validates formatting, unit tests, analyzer fixtures, strict translation tests, and at least one host build.
 
-The minimum versions must be selected during Milestone 0 and written into the build files. This RFC intentionally does not claim that any of these dependencies are already configured.
+The minimum versions are recorded in `docs/DEPENDENCIES.md` and enforced by
+the current CMake configuration where the dependency is host-provided.
 
 Proposed targets:
 
 ```
-switchrecomp-core
-switchrecomp-analyze
-switchrecomp-lift
-switchrecomp-build
+switchrecomp-common
+switchrecomp-format
+switchrecomp-memory
+switchrecomp-aarch64
+switchrecomp-analysis
+switchrecomp-ir
+switchrecomp-lifter
+switchrecomp-runtime-core
+switchrecomp-interpreter
+switchrecomp-codegen-llvm (optional)
 nso-inspect
-totkrecomp-runtime
-totkrecomp
+aarch64-analyze
+aarch64-lift
 ```
 
 The names are proposed. Repository naming should be settled once the first build exists.
@@ -1610,7 +1644,7 @@ Rules:
 | [RecompOne](https://github.com/BlackLabelHQ/RecompOne) | PS1 MIPS | C# | Recompiler and runtime are separate .NET projects | A runtime can replace console services without vendor components |
 | [SymphonyRecomp](https://github.com/BlackLabelHQ/SymphonyRecomp) | PS1 MIPS | RecompOne-based | Project-specific wrapper/config/patch workflow | Recompilation, decompilation, and patching are distinct activities |
 | [skate3recomp](https://github.com/mchughalex/skate3recomp) | Xbox 360 PowerPC | Recompiled code plus extensive native code | Build manifests, title-update metadata, native D3D12/Vulkan rendering | Native renderer work can dominate game-specific engineering |
-| TotkRecomp | AArch64 | Semantic IR lowered to LLVM (proposed) | SwitchRecomp plus on-demand Horizon/runtime services (proposed) | Prefer a verified high-level boundary, Vulkan first |
+| TotkRecomp | AArch64 | Semantic IR lowered to optional LLVM backend (Milestone 6) | SwitchRecomp plus on-demand Horizon/runtime services (future) | Prefer a verified high-level boundary, Vulkan first |
 
 This table records architectural patterns observed in public repository documentation and layouts. It does not claim that their internal implementations are portable to AArch64 or legally reusable.
 
@@ -1660,8 +1694,8 @@ header and expose it through `nso-inspect` for a legally supplied NSO.
 ranges, compression/hash status, build/module ID, BSS, file and memory overlap
 checks, and contained RoData-relative embedded/DynStr/DynSym ranges.
 
-**Still not implemented:** ZBIC decoding, MOD0, dynamic symbols, and
-relocations.
+**Still not implemented at this layer:** ZBIC decoding. MOD0 discovery,
+dynamic symbols, and relocations are implemented by later milestones.
 
 **Success:**
 
@@ -1709,106 +1743,121 @@ block splitting.
 
 **Success:** Synthetic AArch64 fixtures cover representative scalar, memory,
 FP/SIMD, atomic, system, branch, trap, malformed, and CFG cases without
-silently treating unknown control flow as fallthrough. Semantic lifting,
-relocations, and execution remain separate milestones.
+silently treating unknown control flow as fallthrough. Semantic lifting and
+execution remain separate milestones; relocation application is implemented in
+Milestone 5.
 
-### Milestone 5 — Minimal lifting
+### Milestone 5 — Dynamic symbols and relocations
+
+**Implemented:** Bounded dynamic strings/symbols, imports and defined symbols,
+generic symbol resolution, and transactional AArch64 `NONE`, `ABS64`,
+`RELATIVE`, `GLOB_DAT`, and `JUMP_SLOT` relocation application.
+
+**Success:** Loaded synthetic modules can resolve supported symbols and apply
+checked relocations without partially modifying guest memory.
+
+### Milestone 6 — Semantic IR and minimal AArch64 lifting
 
 **Goal:** Lift simple standalone functions such as add/return, loads/stores, and branches.
 
 **Success:** Native results match the AArch64 reference harness.
 
-### Milestone 6 — Differential instruction suite
+**Implemented:** An LLVM-independent typed Semantic IR, deterministic printer,
+structured verifier, explicit CPU state, initial scalar AArch64 lifter,
+reference interpreter, checked guest-memory runtime boundary, and optional LLVM
+lowering/JIT execution for synthetic standalone functions.
+
+### Milestone 7 — Differential instruction suite
 
 **Goal:** Validate integer, memory, flag, branch, and address-formation families.
 
 **Success:** The tested subset passes state, memory, and exception comparisons across generated cases.
 
-### Milestone 7 — Function calls
+### Milestone 8 — Function calls
 
 **Goal:** Support `BL`, `RET`, stack frames, direct calls, and the internal generated ABI.
 
 **Success:** Multi-function AArch64 programs execute correctly after recompilation.
 
-### Milestone 8 — Indirect calls
+### Milestone 9 — Indirect calls
 
 **Goal:** Support `BLR`, guest function maps, vtables, callbacks, and function-pointer identity.
 
 **Success:** Indirect guest targets reach the correct native function with correct state.
 
-### Milestone 9 — FP/SIMD
+### Milestone 10 — FP/SIMD
 
 **Goal:** Add scalar FP, NEON, vector loads/stores, FP status, and required rounding behavior.
 
 **Success:** Representative vector/FP differential tests pass.
 
-### Milestone 10 — Threads and atomics
+### Milestone 11 — Threads and atomics
 
 **Goal:** Add native thread mapping, TLS, synchronization, barriers, exclusive operations, and required memory order.
 
 **Success:** Controlled multi-threaded workloads pass deterministic tests.
 
-### Milestone 11 — Whole-main translation
+### Milestone 12 — Whole-main translation
 
 **Goal:** Analyze and translate the targeted `main` module. Unresolved imports may remain.
 
 **Success:** The whole target module can be statically analyzed, generated, and linked with a complete unresolved-dependency report. It does not need to boot.
 
-### Milestone 12 — Enter game initialization
+### Milestone 13 — Enter game initialization
 
 **Goal:** Execute the recompiled entry path.
 
 **Success:** Execution reaches initialization and stops at a known unsupported dependency, with a useful diagnostic.
 
-### Milestone 13 — Runtime bring-up
+### Milestone 14 — Runtime bring-up
 
 **Goal:** Add required memory, timing, threading, filesystem, handle, and service behavior incrementally.
 
 **Success:** Initialization progresses consistently between runs.
 
-### Milestone 14 — Filesystem and asset loading
+### Milestone 15 — Filesystem and asset loading
 
 **Goal:** Mount user-provided game data and implement the required streaming path.
 
 **Success:** TOTK opens required resources and begins loading without missing-path or handle-semantics failures.
 
-### Milestone 15 — Graphics initialization
+### Milestone 16 — Graphics initialization
 
 **Goal:** Trace and intercept the selected graphics boundary and create logical native resources.
 
 **Success:** Recompiled code creates the required native device/resources through the canonical render interface.
 
-### Milestone 16 — First present
+### Milestone 17 — First present
 
 **Goal:** Produce a window, swapchain, render target, and present path.
 
 **Success:** A frame initiated by recompiled code reaches the display. A cleared framebuffer counts.
 
-### Milestone 17 — First visible game output
+### Milestone 18 — First visible game output
 
 **Goal:** Render actual TOTK graphics, even if incomplete.
 
 **Success:** Game-generated geometry or UI is visible through the native renderer.
 
-### Milestone 18 — Menu boot
+### Milestone 19 — Menu boot
 
 **Goal:** Reach an interactable title screen or early menu.
 
 **Success:** Input works and the menu remains stable across repeated runs.
 
-### Milestone 19 — In-game
+### Milestone 20 — In-game
 
 **Goal:** Reach a playable scene.
 
 **Success:** Gameplay begins with known limitations documented.
 
-### Milestone 20 — Correctness
+### Milestone 21 — Correctness
 
 **Focus:** Crashes, memory, synchronization, graphics, audio, saves, streaming, input, timing, and gameplay behavior.
 
 **Success:** A repeatable validation suite covers representative flows and regressions.
 
-### Milestone 21 — Performance
+### Milestone 22 — Performance
 
 **Focus:** Direct-call lowering, dispatcher locality, LLVM optimization, SSA/register improvements, guest-memory fast paths, allocation, renderer batching, shader/pipeline caches, and asynchronous compilation.
 
@@ -1943,7 +1992,7 @@ These are the first practical engineering tasks. They intentionally stop before 
 
 ### 9. Load a module and apply initial relocations
 
-**Future work after MOD0 discovery.**
+**Implemented in Milestone 5.**
 
 - **Goal:** Reconstruct a test module in guest memory.
 - **Inputs:** Synthetic module and supported relocation records.
@@ -1986,15 +2035,14 @@ These are the first practical engineering tasks. They intentionally stop before 
 - **Success:** Import/export round trips preserve addresses and review annotations.
 - **Dependencies:** Metadata schema.
 
-### 14. Lift one trivial function
+### 14. Lift one trivial function — implemented in Milestone 6
 
-- **Goal:** Prove the semantic IR and LLVM lowering path.
 - **Inputs:** Functions such as `add x0, x0, x1; ret`.
-- **Output:** Generated native object and guest/native address map.
-- **Success:** Native execution matches the reference harness.
-- **Dependencies:** Decoder, IR, runtime context, differential harness.
+- **Output:** Verified Semantic IR and optional native JIT execution.
+- **Success:** Interpreter and native execution match the reference harness.
+- **Dependencies:** Decoder, IR, and runtime context.
 
-### 15. Expand only under differential coverage
+### 15. Expand only under differential coverage — next implementation phase
 
 - **Goal:** Add loads/stores, branches, flags, calls, then FP/SIMD/atomics in gated groups.
 - **Inputs:** Differential tests and failure corpus.
@@ -2002,7 +2050,8 @@ These are the first practical engineering tasks. They intentionally stop before 
 - **Success:** Each group passes tests before it is enabled for larger analysis.
 - **Dependencies:** All prior test infrastructure.
 
-Only after these steps should whole-module TOTK translation be attempted. The first implementation task is therefore **exact-build manifest plus NSO inspection**, not a game boot attempt.
+Only after these steps should whole-module TOTK translation be attempted. The
+repository remains intentionally synthetic and does not claim game execution.
 
 ## 38. Reference sources
 
@@ -2045,6 +2094,6 @@ This RFC is complete when:
 - Existing, proposed, future, and verification-needed items are distinguishable.
 - The architecture explicitly avoids becoming a full Switch emulator.
 - NSO, MOD0, dynamic data, relocations, guest memory, CPU state, function discovery, indirect calls, jump tables, runtime services, files, threads, atomics, exceptions, graphics, shaders, input, audio, timing, testing, debugging, build, licensing, risks, milestones, open questions, and immediate tasks are covered.
-- The first implementation task is obvious and does not involve attempting to boot TOTK.
+- The next implementation task follows the current milestone roadmap and does not involve attempting to boot TOTK.
 - Every target-specific unknown remains marked as **Needs verification**.
 - Any future implementation claiming progress points back to a test, report, or exact-build artifact.

@@ -51,6 +51,8 @@ std::string_view error_code_name(ErrorCode code) noexcept
         return "non_executable_address";
     case ErrorCode::InvalidBranchTarget:
         return "invalid_branch_target";
+    case ErrorCode::InvalidControlFlow:
+        return "invalid_control_flow";
     case ErrorCode::UnsupportedControlFlow:
         return "unsupported_control_flow";
     case ErrorCode::AnalysisInstructionLimitExceeded:
@@ -87,6 +89,32 @@ std::string_view error_code_name(ErrorCode code) noexcept
         return "duplicate_external_symbol";
     case ErrorCode::UnsupportedRelFormat:
         return "unsupported_rel_format";
+    case ErrorCode::IrVerificationFailed:
+        return "ir_verification_failed";
+    case ErrorCode::InvalidIrValue:
+        return "invalid_ir_value";
+    case ErrorCode::InvalidIrBlock:
+        return "invalid_ir_block";
+    case ErrorCode::InvalidIrOperand:
+        return "invalid_ir_operand";
+    case ErrorCode::UnsupportedInstruction:
+        return "unsupported_instruction";
+    case ErrorCode::UnsupportedOperandForm:
+        return "unsupported_operand_form";
+    case ErrorCode::LiftLimitExceeded:
+        return "lift_limit_exceeded";
+    case ErrorCode::InterpreterError:
+        return "interpreter_error";
+    case ErrorCode::ExecutionLimitExceeded:
+        return "execution_limit_exceeded";
+    case ErrorCode::ExecutionTrap:
+        return "execution_trap";
+    case ErrorCode::InvalidRuntimeContext:
+        return "invalid_runtime_context";
+    case ErrorCode::LlvmVerificationFailed:
+        return "llvm_verification_failed";
+    case ErrorCode::JitCompilationFailed:
+        return "jit_compilation_failed";
     }
     return "unknown";
 }

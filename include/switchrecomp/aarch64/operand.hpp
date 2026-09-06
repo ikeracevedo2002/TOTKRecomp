@@ -48,6 +48,14 @@ enum class MemoryAddressingMode : std::uint8_t
     RegisterOffset,
 };
 
+enum class ShiftKind : std::uint8_t
+{
+    None,
+    Lsl,
+    Lsr,
+    Asr,
+};
+
 struct MemoryOperand
 {
     Register base;
@@ -65,6 +73,8 @@ struct Operand
     std::int64_t immediate = 0;
     MemoryOperand memory;
     ConditionCode condition = ConditionCode::Al;
+    ShiftKind shift_kind = ShiftKind::None;
+    std::uint8_t shift = 0U;
     std::string text;
 };
 

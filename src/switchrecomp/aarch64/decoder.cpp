@@ -142,8 +142,22 @@ namespace
     return (opcode & 0xfffffc1fU) == 0xd65f0000U;
 }
 
+[[nodiscard]] bool is_movz(std::uint32_t opcode) noexcept
+{
+    return (opcode & 0x7f800000U) == 0x52800000U;
+}
+
+[[nodiscard]] bool is_movk(std::uint32_t opcode) noexcept
+{
+    return (opcode & 0x7f800000U) == 0x72800000U;
+}
+
 [[nodiscard]] Register from_capstone_register(arm64_reg value)
 {
+    if (value == ARM64_REG_INVALID)
+    {
+        return Register{};
+    }
     const auto raw = static_cast<int>(value);
     const auto in_range = [raw](arm64_reg first, arm64_reg last) {
         return raw >= static_cast<int>(first) && raw <= static_cast<int>(last);
@@ -313,6 +327,14 @@ namespace
     {
         return InstructionId::Ret;
     }
+    if (is_movz(opcode))
+    {
+        return InstructionId::Movz;
+    }
+    if (is_movk(opcode))
+    {
+        return InstructionId::Movk;
+    }
     if (is_cbz(opcode))
     {
         return InstructionId::Cbz;
@@ -419,6 +441,24 @@ namespace
 [[nodiscard]] Operand normalize_operand(const cs_arm64_op& operand, const cs_arm64& detail)
 {
     Operand result;
+    result.shift = static_cast<std::uint8_t>(operand.shift.value);
+    switch (operand.shift.type)
+    {
+    case ARM64_SFT_LSL:
+        result.shift_kind = ShiftKind::Lsl;
+        break;
+    case ARM64_SFT_LSR:
+        result.shift_kind = ShiftKind::Lsr;
+        break;
+    case ARM64_SFT_ASR:
+        result.shift_kind = ShiftKind::Asr;
+        break;
+    case ARM64_SFT_INVALID:
+        break;
+    default:
+        result.shift_kind = ShiftKind::None;
+        break;
+    }
     switch (operand.type)
     {
     case ARM64_OP_REG:
