@@ -663,17 +663,17 @@ Result<runtime::ExecutionResult> LlvmBackend::execute(const ir::Function& functi
     auto& dylib = (*jit)->getMainJITDylib();
     auto define = dylib.define(llvm::orc::absoluteSymbols({
         {(*jit)->mangleAndIntern("switchrecomp_runtime_guest_load"),
-         llvm::orc::JITEvaluatedSymbol(llvm::orc::pointerToJITTargetAddress(&runtime::switchrecomp_runtime_guest_load),
-                                       llvm::JITSymbolFlags::Exported)},
+         llvm::JITEvaluatedSymbol(llvm::pointerToJITTargetAddress(&runtime::switchrecomp_runtime_guest_load),
+                                  llvm::JITSymbolFlags::Exported)},
         {(*jit)->mangleAndIntern("switchrecomp_runtime_guest_store"),
-         llvm::orc::JITEvaluatedSymbol(llvm::orc::pointerToJITTargetAddress(&runtime::switchrecomp_runtime_guest_store),
-                                       llvm::JITSymbolFlags::Exported)},
+         llvm::JITEvaluatedSymbol(llvm::pointerToJITTargetAddress(&runtime::switchrecomp_runtime_guest_store),
+                                  llvm::JITSymbolFlags::Exported)},
         {(*jit)->mangleAndIntern("switchrecomp_runtime_guest_address_add"),
-         llvm::orc::JITEvaluatedSymbol(llvm::orc::pointerToJITTargetAddress(&runtime::switchrecomp_runtime_guest_address_add),
-                                       llvm::JITSymbolFlags::Exported)},
+         llvm::JITEvaluatedSymbol(llvm::pointerToJITTargetAddress(&runtime::switchrecomp_runtime_guest_address_add),
+                                  llvm::JITSymbolFlags::Exported)},
         {(*jit)->mangleAndIntern("switchrecomp_runtime_trap"),
-         llvm::orc::JITEvaluatedSymbol(llvm::orc::pointerToJITTargetAddress(&runtime::switchrecomp_runtime_trap),
-                                       llvm::JITSymbolFlags::Exported)},
+         llvm::JITEvaluatedSymbol(llvm::pointerToJITTargetAddress(&runtime::switchrecomp_runtime_trap),
+                                  llvm::JITSymbolFlags::Exported)},
     }));
     if (define)
     {
@@ -686,7 +686,7 @@ Result<runtime::ExecutionResult> LlvmBackend::execute(const ir::Function& functi
     if (added)
     {
         return Result<runtime::ExecutionResult>::failure(
-            expected_error(ErrorCode::JitCompilationFailed, "failed to add LLVM module: ", added.takeError()));
+            expected_error(ErrorCode::JitCompilationFailed, "failed to add LLVM module: ", std::move(added)));
     }
     auto symbol = (*jit)->lookup(function.name());
     if (!symbol)
@@ -695,7 +695,7 @@ Result<runtime::ExecutionResult> LlvmBackend::execute(const ir::Function& functi
             expected_error(ErrorCode::JitCompilationFailed, "failed to lookup generated function: ", symbol.takeError()));
     }
     using GeneratedFunction = std::uint32_t (*)(runtime::CpuState*, runtime::RuntimeContext*);
-    const auto address = symbol->getAddress();
+    const auto address = symbol->getValue();
     auto generated = reinterpret_cast<GeneratedFunction>(static_cast<std::uintptr_t>(address));
     runtime.clear_error();
     const auto status = generated(&cpu, &runtime);
