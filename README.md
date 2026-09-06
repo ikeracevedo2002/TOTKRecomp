@@ -7,11 +7,11 @@ TOTK-specific target metadata.
 
 ## Current status
 
-Milestones 0, 1, and 2A are implemented: C++20/CMake build targets, common
+Milestones 0, 1, 2A, and 2B are implemented: C++20/CMake build targets, common
 bounds-checked binary utilities, SHA-256 validation, logging, versioned
 target-manifest validation, strict fixed-size NSO0 parsing, bounded section
-materialization, synthetic tests, CI, and the deterministic `nso-inspect`
-report are present.
+materialization, a checked host-backed guest memory map, synthetic tests, CI,
+and the deterministic `nso-inspect` report are present.
 
 No supported TOTK build is committed. The repository contains no game binaries,
 keys, firmware, SDKs, or extracted game assets. The committed TOTK manifest is an
@@ -80,6 +80,8 @@ game assets.
 - bounded raw-LZ4 materialization with exact decompressed-size checks;
 - mandatory SHA-256 verification when requested by the header;
 - explicit zero-filled BSS ownership and configurable allocation limits;
+- logical guest-memory mappings with checked 64-bit addresses, R/W/X permissions,
+  owned backing storage, bounded reads/writes, and an atomic NSO loader;
 - deterministic human-readable `nso-inspect` output with materialization status.
 
 The default materialization limits are 256 MiB per segment and 512 MiB for the
@@ -96,8 +98,9 @@ to inspect a ZBIC-marked header without claiming materialization succeeded.
 - Milestone 0 — repository foundation: implemented.
 - Milestone 1 — strict NSO0 inspection: implemented.
 - Milestone 2A — NSO image materialization and integrity: implemented.
-- Milestone 2B — guest memory loader, mappings, MOD0, and initial relocations: future.
-- Milestone 3 — AArch64 decoding: future.
+- Milestone 2B — checked guest memory mappings and NSO guest loader: implemented.
+- Milestone 3 — MOD0 and dynamic metadata discovery: future.
+- Milestone 4 — AArch64 decoding: future.
 
 Materialization consumes a legally obtained, already prepared local NSO. The
 repository does not decrypt, extract, or distribute Nintendo content.

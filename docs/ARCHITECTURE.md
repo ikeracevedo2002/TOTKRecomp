@@ -1,9 +1,9 @@
 # TotkRecomp Architecture and Implementation Plan
 
-> Status: Proposed architecture with Milestones 0, 1, and 2A implemented
+> Status: Proposed architecture with Milestones 0, 1, 2A, and 2B implemented
 > Repository snapshot: 2026-09-05  
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
-> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, synthetic tests, and the `nso-inspect` report are committed; no supported game build has been committed.
+> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, synthetic tests, and the `nso-inspect` report are committed; no supported game build has been committed.
 
 This document is the primary engineering RFC for TotkRecomp. It describes the intended architecture, the evidence behind the design, the work required to validate it, and the boundaries of what is currently known.
 
@@ -13,13 +13,14 @@ It is deliberately conservative. A proposed component is not evidence that the c
 
 ### Existing
 
-The repository contains the Milestone 0 bootstrap and Milestone 1 strict NSO0
-header parser: a C++20 source tree, CMake build, common safety utilities,
-manifest validation, tests, CI, strict NSO0 inspection, safe NSO image
-materialization, integrity verification, and a deterministic `nso-inspect`
-report. There is still no guest-memory loader, runtime, recompiler, metadata for
-a supported game version, symbol database, renderer, or supported game build to
-preserve.
+The repository contains the Milestone 0 bootstrap, Milestone 1 strict NSO0
+header parser, Milestone 2A image materializer, and Milestone 2B guest loader:
+a C++20 source tree, CMake build, common safety utilities, manifest validation,
+tests, CI, strict NSO0 inspection, safe NSO image
+materialization, integrity verification, a checked guest-memory loader, and a
+deterministic `nso-inspect` report. There is still no MOD0 parser, runtime,
+recompiler, metadata for a supported game version, symbol database, renderer, or
+supported game build to preserve.
 
 ### Proposed
 
@@ -292,15 +293,44 @@ BSS size and zero-initialization status
 ```
 
 MOD0, dynamic tables, string/symbol tables, relocations, and entry/init/fini
-candidates remain future Milestone 2B work. The materializer intentionally
-returns an owned host-side `NsoImage`; it does not map guest virtual addresses.
+candidates remain future work. The materializer intentionally returns an owned
+host-side `NsoImage`; `NsoGuestLoader` consumes that image in the next layer and
+does not make the parser or materializer aware of guest mappings.
 
 The implementation records the format decisions against public references:
 [Switchbrew's NSO0 description](https://switchbrew.org/wiki/NSO0),
 [hactool's NSO0 implementation](https://github.com/SciresM/hactool/blob/master/nso.c),
 and [upstream LZ4 v1.9.4's block API](https://github.com/lz4/lz4/blob/v1.9.4/lib/lz4.h).
 
-### 7.3 MOD0 and dynamic information — future Milestone 2B
+### 7.2.1 Guest memory loader
+
+Milestone 2B adds a portable logical guest memory layer. `GuestMemory` stores
+sorted, non-overlapping half-open ranges in owned host-side byte vectors. A guest
+address is a `uint64_t` value in the guest address domain; it is never converted
+to a host pointer and no fixed host virtual address is reserved.
+
+`load_nso` accepts an explicit module base and maps the materialized image as:
+
+| Region | Guest base | Permissions | Backing |
+| --- | --- | --- | --- |
+| `.text` | module base + NSO text offset | `R-X` | materialized bytes |
+| `.rodata` | module base + NSO rodata offset | `R--` | materialized bytes |
+| `.data` | module base + NSO data offset | `RW-` | materialized bytes |
+| `.bss` | module base + data end | `RW-` | zero-filled bytes |
+
+All base-plus-offset and range calculations use checked 64-bit arithmetic.
+Zero-sized segments are explicit no-ops. Reads and writes must be fully
+contained in one mapping; adjacent mappings are valid but a single operation
+does not cross their boundary. Writes enforce permissions, while executable
+state and mapping metadata are queryable. The loader stages all four mappings
+before committing them, so overlap, limit, and allocation failures leave an
+existing `GuestMemory` unchanged.
+
+The current implementation is intentionally not a page table, MMU, native
+address mirror, or CPU memory subsystem. MOD0 discovery, relocations, and any
+temporary privileged write path for relocation remain future work.
+
+### 7.3 MOD0 and dynamic information — future Milestone 3
 
 MOD0 is a module metadata structure used by the Switch loader ecosystem and is described in public Switch research as a replacement for a conventional `PT_DYNAMIC` program header. TotkRecomp should treat the MOD0 layout as a versioned parser schema, not as an unchecked collection of fixed offsets.
 
@@ -436,6 +466,12 @@ Host ASLR must be treated as normal behavior. A fixed reservation can fail becau
 ### Decision
 
 Start with a page-aware memory manager and a clear translation API. Add a fixed-offset or rebased fast path only after tests prove that guest addresses, protections, and diagnostics remain correct.
+
+Milestone 2B implements the first portable slice of that plan as a logical
+sorted vector of host-backed regions. It validates half-open ranges, owns every
+backing buffer, enforces R/W/X permissions, and deliberately does not expose a
+guest-to-host pointer translation API. Page tables, page protections, sparse
+backing, and native fast paths remain future runtime work.
 
 The memory manager should support:
 
@@ -1607,114 +1643,122 @@ ZBIC is intentionally unsupported.
 
 ### Milestone 2B — Guest memory loader
 
-**Goal:** Consume `NsoImage` and implement guest ranges, segment mapping,
-protections, module registration, MOD0, and the first relocation cases.
+**Implemented:** Consume `NsoImage` using an explicit module base and create
+checked, owned, non-overlapping guest mappings for `.text`, `.rodata`, `.data`,
+and zero-filled BSS with R/W/X permission checks.
 
-**Success:** A synthetic module and a target module fixture produce the expected relocated guest memory state.
+**Success:** Synthetic NSO bytes pass through parsing, materialization, guest
+loading, and checked address-based reads/writes. MOD0 and relocations remain
+outside this milestone.
 
-### Milestone 3 — AArch64 decoding
+### Milestone 3 — MOD0 and dynamic metadata discovery
+
+**Goal:** Locate and report validated MOD0 and dynamic metadata from the guest
+image without applying relocations.
+
+### Milestone 4 — AArch64 decoding
 
 **Goal:** Decode instructions and traverse control flow.
 
 **Success:** Known synthetic AArch64 test binaries analyze without silent unknown control flow; unsupported instructions are reported.
 
-### Milestone 4 — Minimal lifting
+### Milestone 5 — Minimal lifting
 
 **Goal:** Lift simple standalone functions such as add/return, loads/stores, and branches.
 
 **Success:** Native results match the AArch64 reference harness.
 
-### Milestone 5 — Differential instruction suite
+### Milestone 6 — Differential instruction suite
 
 **Goal:** Validate integer, memory, flag, branch, and address-formation families.
 
 **Success:** The tested subset passes state, memory, and exception comparisons across generated cases.
 
-### Milestone 6 — Function calls
+### Milestone 7 — Function calls
 
 **Goal:** Support `BL`, `RET`, stack frames, direct calls, and the internal generated ABI.
 
 **Success:** Multi-function AArch64 programs execute correctly after recompilation.
 
-### Milestone 7 — Indirect calls
+### Milestone 8 — Indirect calls
 
 **Goal:** Support `BLR`, guest function maps, vtables, callbacks, and function-pointer identity.
 
 **Success:** Indirect guest targets reach the correct native function with correct state.
 
-### Milestone 8 — FP/SIMD
+### Milestone 9 — FP/SIMD
 
 **Goal:** Add scalar FP, NEON, vector loads/stores, FP status, and required rounding behavior.
 
 **Success:** Representative vector/FP differential tests pass.
 
-### Milestone 9 — Threads and atomics
+### Milestone 10 — Threads and atomics
 
 **Goal:** Add native thread mapping, TLS, synchronization, barriers, exclusive operations, and required memory order.
 
 **Success:** Controlled multi-threaded workloads pass deterministic tests.
 
-### Milestone 10 — Whole-main translation
+### Milestone 11 — Whole-main translation
 
 **Goal:** Analyze and translate the targeted `main` module. Unresolved imports may remain.
 
 **Success:** The whole target module can be statically analyzed, generated, and linked with a complete unresolved-dependency report. It does not need to boot.
 
-### Milestone 11 — Enter game initialization
+### Milestone 12 — Enter game initialization
 
 **Goal:** Execute the recompiled entry path.
 
 **Success:** Execution reaches initialization and stops at a known unsupported dependency, with a useful diagnostic.
 
-### Milestone 12 — Runtime bring-up
+### Milestone 13 — Runtime bring-up
 
 **Goal:** Add required memory, timing, threading, filesystem, handle, and service behavior incrementally.
 
 **Success:** Initialization progresses consistently between runs.
 
-### Milestone 13 — Filesystem and asset loading
+### Milestone 14 — Filesystem and asset loading
 
 **Goal:** Mount user-provided game data and implement the required streaming path.
 
 **Success:** TOTK opens required resources and begins loading without missing-path or handle-semantics failures.
 
-### Milestone 14 — Graphics initialization
+### Milestone 15 — Graphics initialization
 
 **Goal:** Trace and intercept the selected graphics boundary and create logical native resources.
 
 **Success:** Recompiled code creates the required native device/resources through the canonical render interface.
 
-### Milestone 15 — First present
+### Milestone 16 — First present
 
 **Goal:** Produce a window, swapchain, render target, and present path.
 
 **Success:** A frame initiated by recompiled code reaches the display. A cleared framebuffer counts.
 
-### Milestone 16 — First visible game output
+### Milestone 17 — First visible game output
 
 **Goal:** Render actual TOTK graphics, even if incomplete.
 
 **Success:** Game-generated geometry or UI is visible through the native renderer.
 
-### Milestone 17 — Menu boot
+### Milestone 18 — Menu boot
 
 **Goal:** Reach an interactable title screen or early menu.
 
 **Success:** Input works and the menu remains stable across repeated runs.
 
-### Milestone 18 — In-game
+### Milestone 19 — In-game
 
 **Goal:** Reach a playable scene.
 
 **Success:** Gameplay begins with known limitations documented.
 
-### Milestone 19 — Correctness
+### Milestone 20 — Correctness
 
 **Focus:** Crashes, memory, synchronization, graphics, audio, saves, streaming, input, timing, and gameplay behavior.
 
 **Success:** A repeatable validation suite covers representative flows and regressions.
 
-### Milestone 20 — Performance
+### Milestone 21 — Performance
 
 **Focus:** Direct-call lowering, dispatcher locality, LLVM optimization, SSA/register improvements, guest-memory fast paths, allocation, renderer batching, shader/pipeline caches, and asynchronous compilation.
 
@@ -1813,6 +1857,8 @@ These are the first practical engineering tasks. They intentionally stop before 
 
 ### 5. Parse MOD0 and dynamic metadata
 
+**Future Milestone 3.**
+
 - **Goal:** Locate and report module/dynamic metadata using a versioned schema.
 - **Inputs:** Target module and public format research.
 - **Output:** MOD0/dynamic parser and warnings for unsupported fields.
@@ -1837,13 +1883,17 @@ These are the first practical engineering tasks. They intentionally stop before 
 
 ### 8. Implement guest memory abstraction
 
-- **Goal:** Model guest ranges, protections, BSS, and address translation.
+**Completed in Milestone 2B.**
+
+- **Goal:** Model guest ranges, protections, BSS, and checked address-based access.
 - **Inputs:** Module report and synthetic memory layouts.
 - **Output:** `GuestAddress`, `GuestMemory`, mapping/protection tests.
 - **Success:** Valid reads/writes work; invalid/unmapped/protected accesses fail with guest diagnostics.
 - **Dependencies:** NSO report.
 
 ### 9. Load a module and apply initial relocations
+
+**Future work after MOD0 discovery.**
 
 - **Goal:** Reconstruct a test module in guest memory.
 - **Inputs:** Synthetic module and supported relocation records.

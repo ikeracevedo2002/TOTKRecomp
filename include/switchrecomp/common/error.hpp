@@ -11,6 +11,8 @@ enum class ErrorCode
 {
     InvalidArgument,
     OutOfBounds,
+    UnmappedMemory,
+    PermissionDenied,
     ArithmeticOverflow,
     ArithmeticUnderflow,
     IoError,

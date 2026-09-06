@@ -3,6 +3,7 @@
 #include "switchrecomp/common/result.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <string>
 
@@ -20,6 +21,17 @@ struct CheckedRange
     }
 };
 
+struct CheckedGuestRange
+{
+    std::uint64_t address;
+    std::uint64_t size;
+
+    [[nodiscard]] std::uint64_t end() const noexcept
+    {
+        return address + size;
+    }
+};
+
 [[nodiscard]] inline Result<std::size_t> checked_add(std::size_t left, std::size_t right)
 {
     if (right > std::numeric_limits<std::size_t>::max() - left)
@@ -28,6 +40,28 @@ struct CheckedRange
             make_error(ErrorCode::ArithmeticOverflow, "checked addition overflow"));
     }
     return Result<std::size_t>::success(left + right);
+}
+
+[[nodiscard]] inline Result<std::uint64_t> checked_add_u64(std::uint64_t left,
+                                                           std::uint64_t right)
+{
+    if (right > std::numeric_limits<std::uint64_t>::max() - left)
+    {
+        return Result<std::uint64_t>::failure(
+            make_error(ErrorCode::ArithmeticOverflow, "checked 64-bit addition overflow"));
+    }
+    return Result<std::uint64_t>::success(left + right);
+}
+
+[[nodiscard]] inline Result<CheckedGuestRange> checked_guest_range(std::uint64_t address,
+                                                                  std::uint64_t size)
+{
+    const auto end = checked_add_u64(address, size);
+    if (!end)
+    {
+        return Result<CheckedGuestRange>::failure(end.error());
+    }
+    return Result<CheckedGuestRange>::success(CheckedGuestRange{address, size});
 }
 
 [[nodiscard]] inline Result<std::size_t> checked_sub(std::size_t left, std::size_t right)
