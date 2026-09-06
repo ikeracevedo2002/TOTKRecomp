@@ -7,19 +7,20 @@ TOTK-specific target metadata.
 
 ## Current status
 
-Milestones 0, 1, 2A, and 2B are implemented: C++20/CMake build targets, common
+Milestones 0, 1, 2A, 2B, and 3 are implemented: C++20/CMake build targets, common
 bounds-checked binary utilities, SHA-256 validation, logging, versioned
 target-manifest validation, strict fixed-size NSO0 parsing, bounded section
-materialization, a checked host-backed guest memory map, synthetic tests, CI,
-and the deterministic `nso-inspect` report are present.
+materialization, a checked host-backed guest memory map, MOD0/dynamic/RELA
+metadata parsing, synthetic tests, CI, and the deterministic `nso-inspect` report
+are present.
 
 No supported TOTK build is committed. The repository contains no game binaries,
 keys, firmware, SDKs, or extracted game assets. The committed TOTK manifest is an
 explicit `template` and contains no real hashes or Build IDs.
 
-MOD0 parsing, dynamic tables, relocations, the AArch64 decoder, semantic IR,
-LLVM lowering, runtime, Horizon compatibility layer, renderer, and playable
-game are not implemented.
+Relocation application, symbol resolution, the AArch64 decoder, semantic IR,
+LLVM lowering, runtime, Horizon compatibility layer, renderer, and playable game
+are not implemented.
 
 ## Build and test
 
@@ -60,6 +61,7 @@ On a multi-config generator, use `build/Debug/nso-inspect`.
 ## Documentation
 
 - [Architecture RFC](docs/ARCHITECTURE.md)
+- [Milestone 3 metadata design](docs/MILESTONE_3.md)
 - [Build notes](docs/BUILD.md)
 - [Dependency policy](docs/DEPENDENCIES.md)
 - [Target manifests and local configuration](docs/TARGETS.md)
@@ -82,6 +84,9 @@ game assets.
 - explicit zero-filled BSS ownership and configurable allocation limits;
 - logical guest-memory mappings with checked 64-bit addresses, R/W/X permissions,
   owned backing storage, bounded reads/writes, and an atomic NSO loader;
+- MOD0 discovery from the loaded module-start slot, checked signed relative
+  offsets, ELF64 dynamic metadata, bounded RELA/JMPREL parsing, and immutable
+  module metadata aggregation;
 - deterministic human-readable `nso-inspect` output with materialization status.
 
 The default materialization limits are 256 MiB per segment and 512 MiB for the
@@ -99,7 +104,7 @@ to inspect a ZBIC-marked header without claiming materialization succeeded.
 - Milestone 1 — strict NSO0 inspection: implemented.
 - Milestone 2A — NSO image materialization and integrity: implemented.
 - Milestone 2B — checked guest memory mappings and NSO guest loader: implemented.
-- Milestone 3 — MOD0 and dynamic metadata discovery: future.
+- Milestone 3 — MOD0 and dynamic metadata discovery: implemented.
 - Milestone 4 — AArch64 decoding: future.
 
 Materialization consumes a legally obtained, already prepared local NSO. The

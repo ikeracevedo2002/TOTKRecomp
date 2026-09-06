@@ -1,9 +1,9 @@
 # TotkRecomp Architecture and Implementation Plan
 
-> Status: Proposed architecture with Milestones 0, 1, 2A, and 2B implemented
+> Status: Proposed architecture with Milestones 0, 1, 2A, 2B, and 3 implemented
 > Repository snapshot: 2026-09-05  
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
-> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, synthetic tests, and the `nso-inspect` report are committed; no supported game build has been committed.
+> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, MOD0/dynamic/RELA metadata discovery, synthetic tests, and the `nso-inspect` report are committed; no supported game build has been committed.
 
 This document is the primary engineering RFC for TotkRecomp. It describes the intended architecture, the evidence behind the design, the work required to validate it, and the boundaries of what is currently known.
 
@@ -14,11 +14,12 @@ It is deliberately conservative. A proposed component is not evidence that the c
 ### Existing
 
 The repository contains the Milestone 0 bootstrap, Milestone 1 strict NSO0
-header parser, Milestone 2A image materializer, and Milestone 2B guest loader:
+header parser, Milestone 2A image materializer, Milestone 2B guest loader, and
+Milestone 3 MOD0/dynamic metadata parser:
 a C++20 source tree, CMake build, common safety utilities, manifest validation,
 tests, CI, strict NSO0 inspection, safe NSO image
 materialization, integrity verification, a checked guest-memory loader, and a
-deterministic `nso-inspect` report. There is still no MOD0 parser, runtime,
+deterministic `nso-inspect` report. There is still no relocation applier, runtime,
 recompiler, metadata for a supported game version, symbol database, renderer, or
 supported game build to preserve.
 
@@ -327,12 +328,12 @@ before committing them, so overlap, limit, and allocation failures leave an
 existing `GuestMemory` unchanged.
 
 The current implementation is intentionally not a page table, MMU, native
-address mirror, or CPU memory subsystem. MOD0 discovery, relocations, and any
+address mirror, or CPU memory subsystem. Relocation application and any
 temporary privileged write path for relocation remain future work.
 
-### 7.3 MOD0 and dynamic information — future Milestone 3
+### 7.3 MOD0 and dynamic information — Milestone 3
 
-MOD0 is a module metadata structure used by the Switch loader ecosystem and is described in public Switch research as a replacement for a conventional `PT_DYNAMIC` program header. TotkRecomp should treat the MOD0 layout as a versioned parser schema, not as an unchecked collection of fixed offsets.
+MOD0 is a module metadata structure used by the Switch loader ecosystem and is described in public Switch research as a replacement for a conventional `PT_DYNAMIC` program header. The implementation treats the MOD0 layout as a versioned parser schema, not as an unchecked collection of fixed offsets.
 
 The loader should resolve the chain in this order:
 
@@ -344,7 +345,26 @@ NSO header
   → strings, symbols, relocations, init/fini/TLS metadata
 ```
 
-The actual MOD0 fields, pointer bases, dynamic tags, and loader conventions for the selected TOTK build are **Needs verification**. A module report must state exactly which fields were parsed and which were ignored.
+Milestone 3 implements the normal loaded-image chain. It reads the 8-byte
+module-start slot at the loaded text base, derives the MOD0 address from its
+`magic_offset`, validates the `MOD0` signature, and resolves the base MOD0
+fields relative to the MOD0 header with checked signed arithmetic. The base
+header records dynamic, BSS, exception-info, and runtime module-object
+addresses. Later system-version extension ranges are opt-in because the public
+layout uses the same post-header space for version-dependent data.
+
+Dynamic entries are read explicitly as little-endian ELF64 records. The parser
+requires `DT_NULL` within a configurable limit, preserves every raw entry,
+allows repeated `DT_NEEDED`, rejects duplicate singleton tags, and retains
+unknown tags for forward-compatible inspection. Switch NSO dynamic pointer
+values remain module-relative until resolved into `GuestAddress` values.
+`DT_STRTAB`, `DT_SYMTAB`, RELA, REL, and JMPREL metadata are range-checked
+against `GuestMemory`; `Elf64_Rela` records preserve signed addends and expose
+the ELF64 symbol/type split. No parser in this milestone writes guest memory.
+
+The actual MOD0 fields, pointer bases, dynamic tags, and loader conventions for
+the selected TOTK build remain **Needs verification** where the exact target
+build could differ. A module report states which optional metadata is present.
 
 ### 7.4 Multiple modules
 
@@ -1648,13 +1668,15 @@ checked, owned, non-overlapping guest mappings for `.text`, `.rodata`, `.data`,
 and zero-filled BSS with R/W/X permission checks.
 
 **Success:** Synthetic NSO bytes pass through parsing, materialization, guest
-loading, and checked address-based reads/writes. MOD0 and relocations remain
-outside this milestone.
+loading, MOD0/dynamic discovery, and checked address-based reads/writes. The
+metadata parser does not apply relocations.
 
 ### Milestone 3 — MOD0 and dynamic metadata discovery
 
-**Goal:** Locate and report validated MOD0 and dynamic metadata from the guest
-image without applying relocations.
+**Implemented:** Locate and report validated MOD0 and dynamic metadata from the
+guest image without applying relocations. Synthetic fixtures cover malformed
+headers, signed offsets, bounded dynamic termination, unknown/duplicate tags,
+range validation, RELA decoding, and transactionality.
 
 ### Milestone 4 — AArch64 decoding
 
