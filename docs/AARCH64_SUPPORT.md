@@ -1,6 +1,6 @@
-# Milestone 7 AArch64 support
+# Milestone 8 AArch64 support
 
-Milestone 7 expands the Capstone-to-project-owned-decoder-to-Semantic-IR path
+Milestone 8 expands the Capstone-to-project-owned-decoder-to-Semantic-IR path
 without making Capstone types part of the IR. The interpreter is the reference
 backend; the optional LLVM backend lowers the same IR primitives.
 
@@ -22,11 +22,20 @@ backend; the optional LLVM backend lowers the same IR primitives.
 | B/B.cond/CBZ/CBNZ/TBZ/TBNZ | yes | yes | yes | internal CFG targets and taken/not-taken paths |
 | BL/BLR/BR/RET | yes | partial | partial | LR and direct/indirect guest targets are explicit; no function dispatcher |
 | UDIV/SDIV | yes | no | no | deferred until a shared divide-by-zero model is added |
-| FP/SIMD, atomics, system instructions | yes | no | no | outside this milestone |
+| Scalar FP: FMOV/FADD/FSUB/FMUL/FDIV/FNEG/FABS/FCMP/FCSEL/SCVTF/UCVTF/FCVTZS/FCVTZU/FCVT/FRINT | yes | yes | yes | S/D forms; raw IEEE bit patterns and sticky FPSR state |
+| Scalar FP: FSQRT/FMIN/FMAX | yes | yes | yes | reference runtime semantics, explicit NaN and signed-zero handling |
+| NEON DUP/INS/UMOV/SMOV/EXT and ZIP/UZP/TRN | yes | yes | yes | normalized arrangements and lane indices |
+| NEON logical/integer/FP vector arithmetic and comparisons | yes | yes | yes | B/H/S/D arrangements; FP vector operations use the reference runtime |
+| S/D/Q LDR/STR and LDP/STP | yes | yes | yes | checked guest memory; Q uses 16-byte vector helpers |
+| FP/SIMD fused multiply-add, atomics, system instructions | yes | no | no | explicit unsupported behavior |
 
 ## Architectural state
 
-`runtime::CpuState` stores X0-X30, SP, PC and independent N/Z/C/V fields.
+`runtime::CpuState` stores X0-X30, SP, PC, independent N/Z/C/V fields, FPCR,
+FPSR, and 32 shared 128-bit V registers. S/D views are the low 32/64 bits of
+the corresponding V register; scalar writes clear the unused upper bits under
+the Milestone 8 scalar policy. `Vector128` is two explicitly ordered 64-bit
+words and does not depend on host SIMD types or byte order.
 Reading Wn observes the low 32 bits and writing Wn zero-extends into Xn.
 XZR/WZR are immutable zero aliases. Register 31 is normalized as SP or ZR by
 the decoder operand role rather than globally.

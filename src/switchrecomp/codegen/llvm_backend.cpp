@@ -1,6 +1,7 @@
 #include "switchrecomp/codegen/llvm_backend.hpp"
 
 #include "switchrecomp/ir/verifier.hpp"
+#include "switchrecomp/runtime/fp.hpp"
 
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/IR/BasicBlock.h>
@@ -44,6 +45,9 @@ using namespace llvm;
     case ir::TypeKind::I16: return Type::getInt16Ty(context);
     case ir::TypeKind::I32: return Type::getInt32Ty(context);
     case ir::TypeKind::I64: return Type::getInt64Ty(context);
+    case ir::TypeKind::F32:
+    case ir::TypeKind::F64:
+    case ir::TypeKind::V128:
     case ir::TypeKind::Void: break;
     }
     return nullptr;
@@ -76,7 +80,9 @@ class ModuleLowerer
         cpu_type_ = StructType::create(context_, "switchrecomp.CpuState");
         auto* x_type = ArrayType::get(Type::getInt64Ty(context_), 31U);
         auto* flags_type = ArrayType::get(Type::getInt8Ty(context_), 4U);
-        cpu_type_->setBody({x_type, Type::getInt64Ty(context_), Type::getInt64Ty(context_), flags_type});
+        auto* vector_array = ArrayType::get(vector_type(), 32U);
+        cpu_type_->setBody({x_type, Type::getInt64Ty(context_), Type::getInt64Ty(context_), flags_type,
+                            Type::getInt32Ty(context_), Type::getInt32Ty(context_), vector_array});
     }
 
     [[nodiscard]] Result<std::unique_ptr<Module>> run()
@@ -146,7 +152,18 @@ class ModuleLowerer
         {
             return Type::getVoidTy(context_);
         }
-        return integer_type(context_, type);
+        switch (type.kind())
+        {
+        case ir::TypeKind::F32: return Type::getFloatTy(context_);
+        case ir::TypeKind::F64: return Type::getDoubleTy(context_);
+        case ir::TypeKind::V128: return vector_type();
+        default: return integer_type(context_, type);
+        }
+    }
+
+    [[nodiscard]] StructType* vector_type() const
+    {
+        return StructType::get(context_, {Type::getInt64Ty(context_), Type::getInt64Ty(context_)});
     }
 
     [[nodiscard]] Value* cpu_element(unsigned int index, Value* array_index)
@@ -167,6 +184,12 @@ class ModuleLowerer
     [[nodiscard]] Value* flag_pointer(ir::Flag flag)
     {
         return cpu_element(3U, builder_.getInt32(static_cast<unsigned int>(flag)));
+    }
+
+    [[nodiscard]] Value* vector_pointer(std::uint8_t index)
+    {
+        return builder_.CreateGEP(cpu_type_, cpu_, {builder_.getInt32(0), builder_.getInt32(6U),
+                                                    builder_.getInt32(index)}, "cpu.v");
     }
 
     [[nodiscard]] Result<Value*> require_value(ir::ValueId id)
@@ -243,13 +266,190 @@ class ModuleLowerer
         return module_->getOrInsertFunction("switchrecomp_runtime_trap", type);
     }
 
+    [[nodiscard]] FunctionCallee runtime_vector_load()
+    {
+        auto* type = FunctionType::get(Type::getInt32Ty(context_),
+                                       {runtime_->getType(), Type::getInt64Ty(context_),
+                                        PointerType::getUnqual(vector_type())}, false);
+        return module_->getOrInsertFunction("switchrecomp_runtime_guest_load_vector", type);
+    }
+
+    [[nodiscard]] FunctionCallee runtime_vector_store()
+    {
+        auto* type = FunctionType::get(Type::getInt32Ty(context_),
+                                       {runtime_->getType(), Type::getInt64Ty(context_),
+                                        PointerType::getUnqual(vector_type())}, false);
+        return module_->getOrInsertFunction("switchrecomp_runtime_guest_store_vector", type);
+    }
+
+    [[nodiscard]] FunctionCallee runtime_fp_binary()
+    {
+        auto* type = FunctionType::get(Type::getInt64Ty(context_),
+                                       {PointerType::getUnqual(cpu_type_), Type::getInt8Ty(context_),
+                                        Type::getInt8Ty(context_), Type::getInt64Ty(context_),
+                                        Type::getInt64Ty(context_)}, false);
+        return module_->getOrInsertFunction("switchrecomp_runtime_fp_binary", type);
+    }
+
+    [[nodiscard]] FunctionCallee runtime_fp_unary()
+    {
+        auto* type = FunctionType::get(Type::getInt64Ty(context_),
+                                       {PointerType::getUnqual(cpu_type_), Type::getInt8Ty(context_),
+                                        Type::getInt8Ty(context_), Type::getInt64Ty(context_)}, false);
+        return module_->getOrInsertFunction("switchrecomp_runtime_fp_unary", type);
+    }
+
+    [[nodiscard]] FunctionCallee runtime_fp_compare()
+    {
+        auto* type = FunctionType::get(Type::getInt32Ty(context_),
+                                       {PointerType::getUnqual(cpu_type_), Type::getInt8Ty(context_),
+                                        Type::getInt64Ty(context_), Type::getInt64Ty(context_),
+                                        Type::getInt8Ty(context_)}, false);
+        return module_->getOrInsertFunction("switchrecomp_runtime_fp_compare", type);
+    }
+
+    [[nodiscard]] FunctionCallee runtime_fp_convert()
+    {
+        auto* type = FunctionType::get(Type::getInt64Ty(context_),
+                                       {PointerType::getUnqual(cpu_type_), Type::getInt8Ty(context_),
+                                        Type::getInt8Ty(context_), Type::getInt8Ty(context_),
+                                        Type::getInt64Ty(context_)}, false);
+        return module_->getOrInsertFunction("switchrecomp_runtime_fp_convert", type);
+    }
+
+    [[nodiscard]] FunctionCallee runtime_fp_round()
+    {
+        auto* type = FunctionType::get(Type::getInt64Ty(context_),
+                                       {PointerType::getUnqual(cpu_type_), Type::getInt8Ty(context_),
+                                        Type::getInt64Ty(context_), Type::getInt8Ty(context_)}, false);
+        return module_->getOrInsertFunction("switchrecomp_runtime_fp_round", type);
+    }
+
+    [[nodiscard]] FunctionCallee runtime_vector_extract()
+    {
+        auto* type = FunctionType::get(Type::getInt64Ty(context_),
+                                       {PointerType::getUnqual(vector_type()), Type::getInt8Ty(context_),
+                                        Type::getInt8Ty(context_)}, false);
+        return module_->getOrInsertFunction("switchrecomp_runtime_vector_extract", type);
+    }
+
+    [[nodiscard]] FunctionCallee runtime_vector_insert()
+    {
+        auto* type = FunctionType::get(Type::getVoidTy(context_),
+                                       {PointerType::getUnqual(vector_type()), Type::getInt8Ty(context_),
+                                        Type::getInt8Ty(context_), Type::getInt64Ty(context_),
+                                        PointerType::getUnqual(vector_type())}, false);
+        return module_->getOrInsertFunction("switchrecomp_runtime_vector_insert", type);
+    }
+
+    [[nodiscard]] FunctionCallee runtime_vector_broadcast()
+    {
+        auto* type = FunctionType::get(Type::getVoidTy(context_),
+                                       {Type::getInt64Ty(context_), Type::getInt8Ty(context_),
+                                        Type::getInt8Ty(context_), PointerType::getUnqual(vector_type())}, false);
+        return module_->getOrInsertFunction("switchrecomp_runtime_vector_broadcast", type);
+    }
+
+    [[nodiscard]] FunctionCallee runtime_vector_binary()
+    {
+        auto* type = FunctionType::get(Type::getVoidTy(context_),
+                                       {PointerType::getUnqual(cpu_type_), Type::getInt8Ty(context_),
+                                        Type::getInt8Ty(context_), PointerType::getUnqual(vector_type()),
+                                        PointerType::getUnqual(vector_type()), PointerType::getUnqual(vector_type())}, false);
+        return module_->getOrInsertFunction("switchrecomp_runtime_vector_binary", type);
+    }
+
+    [[nodiscard]] FunctionCallee runtime_vector_compare()
+    {
+        auto* type = FunctionType::get(Type::getVoidTy(context_),
+                                       {PointerType::getUnqual(cpu_type_), Type::getInt8Ty(context_),
+                                        Type::getInt8Ty(context_), PointerType::getUnqual(vector_type()),
+                                        PointerType::getUnqual(vector_type()), PointerType::getUnqual(vector_type())}, false);
+        return module_->getOrInsertFunction("switchrecomp_runtime_vector_compare", type);
+    }
+
+    [[nodiscard]] FunctionCallee runtime_vector_shuffle()
+    {
+        auto* type = FunctionType::get(Type::getVoidTy(context_),
+                                       {Type::getInt8Ty(context_), Type::getInt8Ty(context_),
+                                        PointerType::getUnqual(vector_type()), PointerType::getUnqual(vector_type()),
+                                        Type::getInt8Ty(context_), PointerType::getUnqual(vector_type())}, false);
+        return module_->getOrInsertFunction("switchrecomp_runtime_vector_shuffle", type);
+    }
+
+    [[nodiscard]] Value* fp_bits(Value* value, ir::Type source_type)
+    {
+        const auto width = source_type.bit_width();
+        auto* integer = width == 32U ? Type::getInt32Ty(context_) : Type::getInt64Ty(context_);
+        auto* bits = builder_.CreateBitCast(value, integer, "fp.bits");
+        return width == 32U ? builder_.CreateZExt(bits, Type::getInt64Ty(context_), "fp.bits.wide") : bits;
+    }
+
+    [[nodiscard]] Value* fp_value(Value* bits, ir::Type result_type)
+    {
+        auto* narrowed = result_type.bit_width() == 32U
+                             ? builder_.CreateTrunc(bits, Type::getInt32Ty(context_), "fp.result.narrow")
+                             : bits;
+        return builder_.CreateBitCast(narrowed, type(result_type), "fp.result");
+    }
+
+    [[nodiscard]] unsigned int arrangement_bits(ir::VectorArrangement arrangement) const noexcept
+    {
+        switch (arrangement)
+        {
+        case ir::VectorArrangement::B8:
+        case ir::VectorArrangement::B16: return 8U;
+        case ir::VectorArrangement::H4:
+        case ir::VectorArrangement::H8: return 16U;
+        case ir::VectorArrangement::S2:
+        case ir::VectorArrangement::S4: return 32U;
+        case ir::VectorArrangement::D1:
+        case ir::VectorArrangement::D2: return 64U;
+        case ir::VectorArrangement::Raw128: return 0U;
+        }
+        return 0U;
+    }
+
+    [[nodiscard]] unsigned int arrangement_lanes(ir::VectorArrangement arrangement) const noexcept
+    {
+        switch (arrangement)
+        {
+        case ir::VectorArrangement::B8: return 8U;
+        case ir::VectorArrangement::B16: return 16U;
+        case ir::VectorArrangement::H4: return 4U;
+        case ir::VectorArrangement::H8: return 8U;
+        case ir::VectorArrangement::S2: return 2U;
+        case ir::VectorArrangement::S4: return 4U;
+        case ir::VectorArrangement::D1: return 1U;
+        case ir::VectorArrangement::D2: return 2U;
+        case ir::VectorArrangement::Raw128: return 0U;
+        }
+        return 0U;
+    }
+
     [[nodiscard]] Result<void> lower_instruction(const ir::Instruction& instruction)
     {
         const auto result_type = type(instruction.result_type);
         switch (instruction.opcode)
         {
         case ir::Opcode::Constant:
-            assign(instruction, ConstantInt::get(cast<IntegerType>(result_type), instruction.constant));
+            if (instruction.result_type.is_integer())
+            {
+                assign(instruction, ConstantInt::get(cast<IntegerType>(result_type), instruction.constant));
+            }
+            else if (instruction.result_type == ir::f32_type() || instruction.result_type == ir::f64_type())
+            {
+                auto* integer = instruction.result_type == ir::f32_type()
+                                     ? ConstantInt::get(Type::getInt32Ty(context_), instruction.constant)
+                                     : ConstantInt::get(Type::getInt64Ty(context_), instruction.constant);
+                assign(instruction, builder_.CreateBitCast(integer, result_type, "fp.constant"));
+            }
+            else if (instruction.result_type == ir::v128_type())
+            {
+                assign(instruction, ConstantStruct::get(cast<StructType>(result_type),
+                                                         {ConstantInt::get(Type::getInt64Ty(context_), instruction.constant),
+                                                          ConstantInt::get(Type::getInt64Ty(context_), instruction.constant_high)}));
+            }
             return Result<void>::success();
         case ir::Opcode::Nop:
             return Result<void>::success();
@@ -273,6 +473,34 @@ class ModuleLowerer
             assign(instruction, loaded);
             return Result<void>::success();
         }
+        case ir::Opcode::ReadVectorRegister:
+            assign(instruction, builder_.CreateLoad(vector_type(), vector_pointer(instruction.vector_index), "vector.read"));
+            return Result<void>::success();
+        case ir::Opcode::WriteVectorRegister:
+        {
+            const auto source = require_value(instruction.operands[0]);
+            if (!source) return Result<void>::failure(source.error());
+            builder_.CreateStore(source.value(), vector_pointer(instruction.vector_index));
+            return Result<void>::success();
+        }
+        case ir::Opcode::ReadFpControl:
+            assign(instruction, builder_.CreateLoad(Type::getInt32Ty(context_),
+                                                     builder_.CreateStructGEP(cpu_type_, cpu_, 4U, "cpu.fpcr"), "fpcr.read"));
+            return Result<void>::success();
+        case ir::Opcode::WriteFpControl:
+        case ir::Opcode::WriteFpStatus:
+        {
+            const auto source = require_value(instruction.operands[0]);
+            if (!source) return Result<void>::failure(source.error());
+            builder_.CreateStore(source.value(), builder_.CreateStructGEP(cpu_type_, cpu_,
+                                                                            instruction.opcode == ir::Opcode::WriteFpControl ? 4U : 5U,
+                                                                            instruction.opcode == ir::Opcode::WriteFpControl ? "cpu.fpcr" : "cpu.fpsr"));
+            return Result<void>::success();
+        }
+        case ir::Opcode::ReadFpStatus:
+            assign(instruction, builder_.CreateLoad(Type::getInt32Ty(context_),
+                                                     builder_.CreateStructGEP(cpu_type_, cpu_, 5U, "cpu.fpsr"), "fpsr.read"));
+            return Result<void>::success();
         case ir::Opcode::WriteRegister:
         {
             const auto source = require_value(instruction.operands[0]);
@@ -418,6 +646,167 @@ class ModuleLowerer
             assign(instruction, builder_.CreateSelect(condition.value(), when_true.value(), when_false.value(), "select"));
             return Result<void>::success();
         }
+        case ir::Opcode::FpBinary:
+        {
+            const auto left = require_value(instruction.operands[0]);
+            const auto right = require_value(instruction.operands[1]);
+            if (!left || !right) return Result<void>::failure(!left ? left.error() : right.error());
+            const auto bits = builder_.CreateCall(runtime_fp_binary(),
+                                                  {cpu_, builder_.getInt8(static_cast<unsigned int>(instruction.fp_binary)),
+                                                   builder_.getInt8(instruction.result_type.bit_width()),
+                                                   fp_bits(left.value(), instruction.result_type),
+                                                   fp_bits(right.value(), instruction.result_type)}, "fp.binary.bits");
+            assign(instruction, fp_value(bits, instruction.result_type));
+            return Result<void>::success();
+        }
+        case ir::Opcode::FpUnary:
+        {
+            const auto source = require_value(instruction.operands[0]);
+            if (!source) return Result<void>::failure(source.error());
+            const auto bits = builder_.CreateCall(runtime_fp_unary(),
+                                                  {cpu_, builder_.getInt8(static_cast<unsigned int>(instruction.fp_unary)),
+                                                   builder_.getInt8(instruction.result_type.bit_width()),
+                                                   fp_bits(source.value(), instruction.result_type)}, "fp.unary.bits");
+            assign(instruction, fp_value(bits, instruction.result_type));
+            return Result<void>::success();
+        }
+        case ir::Opcode::FpCompare:
+        {
+            const auto left = require_value(instruction.operands[0]);
+            const auto right = require_value(instruction.operands[1]);
+            const auto* left_definition = function_.value(instruction.operands[0]);
+            const auto* right_definition = function_.value(instruction.operands[1]);
+            if (!left || !right || left_definition == nullptr || right_definition == nullptr)
+                return Result<void>::failure(!left ? left.error() : !right ? right.error()
+                                                                            : make_error(ErrorCode::InvalidIrValue, "FP compare source is missing"));
+            const auto bits = builder_.CreateCall(runtime_fp_compare(),
+                                                  {cpu_, builder_.getInt8(left_definition->type.bit_width()),
+                                                   fp_bits(left.value(), left_definition->type),
+                                                   fp_bits(right.value(), right_definition->type),
+                                                   builder_.getInt8(instruction.signaling ? 1U : 0U)}, "fp.compare");
+            assign(instruction, bits);
+            return Result<void>::success();
+        }
+        case ir::Opcode::FpConvert:
+        {
+            const auto source = require_value(instruction.operands[0]);
+            const auto* source_definition = function_.value(instruction.operands[0]);
+            if (!source || source_definition == nullptr) return Result<void>::failure(!source ? source.error() : make_error(ErrorCode::InvalidIrValue, "FP conversion source is missing"));
+            const auto source_type = source_definition->type;
+            Value* source_bits = source_type.is_floating() ? fp_bits(source.value(), source_type) : source.value();
+            if (source_bits->getType()->getIntegerBitWidth() != 64U)
+                source_bits = builder_.CreateZExt(source_bits, Type::getInt64Ty(context_), "fp.convert.wide");
+            const auto bits = builder_.CreateCall(runtime_fp_convert(),
+                                                  {cpu_, builder_.getInt8(static_cast<unsigned int>(instruction.fp_conversion)),
+                                                   builder_.getInt8(source_type.bit_width()),
+                                                   builder_.getInt8(instruction.result_type.bit_width()), source_bits}, "fp.convert.bits");
+            assign(instruction, instruction.result_type.is_floating()
+                                  ? fp_value(bits, instruction.result_type)
+                                  : instruction.result_type == ir::i64_type() ? static_cast<Value*>(bits)
+                                                                              : builder_.CreateTrunc(bits, type(instruction.result_type), "fp.convert.int"));
+            return Result<void>::success();
+        }
+        case ir::Opcode::FpRound:
+        {
+            const auto source = require_value(instruction.operands[0]);
+            if (!source) return Result<void>::failure(source.error());
+            const auto bits = builder_.CreateCall(runtime_fp_round(),
+                                                  {cpu_, builder_.getInt8(instruction.result_type.bit_width()),
+                                                   fp_bits(source.value(), instruction.result_type),
+                                                   builder_.getInt8(static_cast<unsigned int>(instruction.rounding_mode))}, "fp.round.bits");
+            assign(instruction, fp_value(bits, instruction.result_type));
+            return Result<void>::success();
+        }
+        case ir::Opcode::VectorExtractLane:
+        {
+            const auto source = require_value(instruction.operands[0]);
+            if (!source) return Result<void>::failure(source.error());
+            auto* storage = builder_.CreateAlloca(vector_type(), nullptr, "vector.extract.source");
+            builder_.CreateStore(source.value(), storage);
+            auto* bits = builder_.CreateCall(runtime_vector_extract(),
+                                             {storage, builder_.getInt8(arrangement_bits(instruction.arrangement)),
+                                              builder_.getInt8(instruction.lane_index)}, "vector.extract.bits");
+            assign(instruction, instruction.result_type == ir::i64_type()
+                                  ? static_cast<Value*>(bits)
+                                  : builder_.CreateTrunc(bits, result_type, "vector.extract.narrow"));
+            return Result<void>::success();
+        }
+        case ir::Opcode::VectorInsertLane:
+        {
+            const auto source = require_value(instruction.operands[0]);
+            const auto lane = require_value(instruction.operands[1]);
+            if (!source || !lane) return Result<void>::failure(!source ? source.error() : lane.error());
+            auto* input = builder_.CreateAlloca(vector_type(), nullptr, "vector.insert.source");
+            auto* output = builder_.CreateAlloca(vector_type(), nullptr, "vector.insert.result");
+            builder_.CreateStore(source.value(), input);
+            auto* lane_value = lane.value();
+            if (lane_value->getType()->getIntegerBitWidth() != 64U)
+                lane_value = builder_.CreateZExt(lane_value, Type::getInt64Ty(context_), "vector.insert.wide");
+            builder_.CreateCall(runtime_vector_insert(),
+                                {input, builder_.getInt8(arrangement_bits(instruction.arrangement)),
+                                 builder_.getInt8(instruction.lane_index), lane_value, output});
+            assign(instruction, builder_.CreateLoad(vector_type(), output, "vector.insert.value"));
+            return Result<void>::success();
+        }
+        case ir::Opcode::VectorBroadcast:
+        {
+            const auto lane = require_value(instruction.operands[0]);
+            if (!lane) return Result<void>::failure(lane.error());
+            auto* lane_value = lane.value();
+            if (lane_value->getType()->getIntegerBitWidth() != 64U)
+                lane_value = builder_.CreateZExt(lane_value, Type::getInt64Ty(context_), "vector.broadcast.wide");
+            auto* output = builder_.CreateAlloca(vector_type(), nullptr, "vector.broadcast.result");
+            builder_.CreateCall(runtime_vector_broadcast(),
+                                {lane_value, builder_.getInt8(arrangement_bits(instruction.arrangement)),
+                                 builder_.getInt8(arrangement_lanes(instruction.arrangement)), output});
+            assign(instruction, builder_.CreateLoad(vector_type(), output, "vector.broadcast.value"));
+            return Result<void>::success();
+        }
+        case ir::Opcode::VectorBinary:
+        case ir::Opcode::VectorCompare:
+        {
+            const auto left = require_value(instruction.operands[0]);
+            const auto right = require_value(instruction.operands[1]);
+            if (!left || !right) return Result<void>::failure(!left ? left.error() : right.error());
+            auto* left_storage = builder_.CreateAlloca(vector_type(), nullptr, "vector.left");
+            auto* right_storage = builder_.CreateAlloca(vector_type(), nullptr, "vector.right");
+            auto* output = builder_.CreateAlloca(vector_type(), nullptr, "vector.result");
+            builder_.CreateStore(left.value(), left_storage);
+            builder_.CreateStore(right.value(), right_storage);
+            if (instruction.opcode == ir::Opcode::VectorBinary)
+            {
+                builder_.CreateCall(runtime_vector_binary(),
+                                    {cpu_, builder_.getInt8(static_cast<unsigned int>(instruction.vector_operation)),
+                                     builder_.getInt8(static_cast<unsigned int>(instruction.arrangement)),
+                                     left_storage, right_storage, output});
+            }
+            else
+            {
+                builder_.CreateCall(runtime_vector_compare(),
+                                    {cpu_, builder_.getInt8(static_cast<unsigned int>(instruction.vector_compare)),
+                                     builder_.getInt8(static_cast<unsigned int>(instruction.arrangement)),
+                                     left_storage, right_storage, output});
+            }
+            assign(instruction, builder_.CreateLoad(vector_type(), output, "vector.value"));
+            return Result<void>::success();
+        }
+        case ir::Opcode::VectorShuffle:
+        {
+            const auto left = require_value(instruction.operands[0]);
+            const auto right = require_value(instruction.operands[1]);
+            if (!left || !right) return Result<void>::failure(!left ? left.error() : right.error());
+            auto* left_storage = builder_.CreateAlloca(vector_type(), nullptr, "shuffle.left");
+            auto* right_storage = builder_.CreateAlloca(vector_type(), nullptr, "shuffle.right");
+            auto* output = builder_.CreateAlloca(vector_type(), nullptr, "shuffle.result");
+            builder_.CreateStore(left.value(), left_storage);
+            builder_.CreateStore(right.value(), right_storage);
+            builder_.CreateCall(runtime_vector_shuffle(),
+                                {builder_.getInt8(instruction.vector_index),
+                                 builder_.getInt8(static_cast<unsigned int>(instruction.arrangement)),
+                                 left_storage, right_storage, builder_.getInt8(instruction.immediate), output});
+            assign(instruction, builder_.CreateLoad(vector_type(), output, "shuffle.value"));
+            return Result<void>::success();
+        }
         case ir::Opcode::AddCarry:
         case ir::Opcode::SubCarry:
         case ir::Opcode::AddOverflow:
@@ -559,6 +948,17 @@ class ModuleLowerer
             assign(instruction, loaded);
             return Result<void>::success();
         }
+        case ir::Opcode::GuestLoadVector:
+        {
+            const auto address = require_value(instruction.operands[0]);
+            if (!address) return Result<void>::failure(address.error());
+            auto* output = builder_.CreateAlloca(vector_type(), nullptr, "guest.load.vector");
+            const auto checked = checked_runtime_call(builder_.CreateCall(
+                runtime_vector_load(), {runtime_, address.value(), output}));
+            if (!checked) return checked;
+            assign(instruction, builder_.CreateLoad(vector_type(), output, "guest.load.vector.value"));
+            return Result<void>::success();
+        }
         case ir::Opcode::GuestStore:
         {
             const auto address = require_value(instruction.operands[0]);
@@ -575,6 +975,17 @@ class ModuleLowerer
             const auto checked = checked_runtime_call(builder_.CreateCall(
                 runtime_store(), {runtime_, address.value(), builder_.getInt8(instruction.memory_size), value}));
             return checked;
+        }
+        case ir::Opcode::GuestStoreVector:
+        {
+            const auto address = require_value(instruction.operands[0]);
+            const auto stored_value = require_value(instruction.operands[1]);
+            if (!address || !stored_value)
+                return Result<void>::failure(!address ? address.error() : stored_value.error());
+            auto* storage = builder_.CreateAlloca(vector_type(), nullptr, "guest.store.vector");
+            builder_.CreateStore(stored_value.value(), storage);
+            return checked_runtime_call(builder_.CreateCall(runtime_vector_store(),
+                                                             {runtime_, address.value(), storage}));
         }
         }
         return Result<void>::failure(make_error(ErrorCode::InvalidIrValue, "unknown IR opcode"));
@@ -751,6 +1162,14 @@ Result<runtime::ExecutionResult> LlvmBackend::execute(const ir::Function& functi
          llvm::orc::ExecutorSymbolDef(
              llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_guest_store),
              llvm::JITSymbolFlags::Exported)},
+        {(*jit)->mangleAndIntern("switchrecomp_runtime_guest_load_vector"),
+         llvm::orc::ExecutorSymbolDef(
+             llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_guest_load_vector),
+             llvm::JITSymbolFlags::Exported)},
+        {(*jit)->mangleAndIntern("switchrecomp_runtime_guest_store_vector"),
+         llvm::orc::ExecutorSymbolDef(
+             llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_guest_store_vector),
+             llvm::JITSymbolFlags::Exported)},
         {(*jit)->mangleAndIntern("switchrecomp_runtime_guest_address_add"),
          llvm::orc::ExecutorSymbolDef(
              llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_guest_address_add),
@@ -762,6 +1181,50 @@ Result<runtime::ExecutionResult> LlvmBackend::execute(const ir::Function& functi
         {(*jit)->mangleAndIntern("switchrecomp_runtime_trap"),
          llvm::orc::ExecutorSymbolDef(
              llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_trap),
+             llvm::JITSymbolFlags::Exported)},
+        {(*jit)->mangleAndIntern("switchrecomp_runtime_fp_binary"),
+         llvm::orc::ExecutorSymbolDef(
+             llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_fp_binary),
+             llvm::JITSymbolFlags::Exported)},
+        {(*jit)->mangleAndIntern("switchrecomp_runtime_fp_unary"),
+         llvm::orc::ExecutorSymbolDef(
+             llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_fp_unary),
+             llvm::JITSymbolFlags::Exported)},
+        {(*jit)->mangleAndIntern("switchrecomp_runtime_fp_compare"),
+         llvm::orc::ExecutorSymbolDef(
+             llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_fp_compare),
+             llvm::JITSymbolFlags::Exported)},
+        {(*jit)->mangleAndIntern("switchrecomp_runtime_fp_convert"),
+         llvm::orc::ExecutorSymbolDef(
+             llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_fp_convert),
+             llvm::JITSymbolFlags::Exported)},
+        {(*jit)->mangleAndIntern("switchrecomp_runtime_fp_round"),
+         llvm::orc::ExecutorSymbolDef(
+             llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_fp_round),
+             llvm::JITSymbolFlags::Exported)},
+        {(*jit)->mangleAndIntern("switchrecomp_runtime_vector_extract"),
+         llvm::orc::ExecutorSymbolDef(
+             llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_vector_extract),
+             llvm::JITSymbolFlags::Exported)},
+        {(*jit)->mangleAndIntern("switchrecomp_runtime_vector_insert"),
+         llvm::orc::ExecutorSymbolDef(
+             llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_vector_insert),
+             llvm::JITSymbolFlags::Exported)},
+        {(*jit)->mangleAndIntern("switchrecomp_runtime_vector_broadcast"),
+         llvm::orc::ExecutorSymbolDef(
+             llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_vector_broadcast),
+             llvm::JITSymbolFlags::Exported)},
+        {(*jit)->mangleAndIntern("switchrecomp_runtime_vector_binary"),
+         llvm::orc::ExecutorSymbolDef(
+             llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_vector_binary),
+             llvm::JITSymbolFlags::Exported)},
+        {(*jit)->mangleAndIntern("switchrecomp_runtime_vector_compare"),
+         llvm::orc::ExecutorSymbolDef(
+             llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_vector_compare),
+             llvm::JITSymbolFlags::Exported)},
+        {(*jit)->mangleAndIntern("switchrecomp_runtime_vector_shuffle"),
+         llvm::orc::ExecutorSymbolDef(
+             llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_vector_shuffle),
              llvm::JITSymbolFlags::Exported)},
     }));
     if (define)

@@ -42,6 +42,26 @@ std::string_view opcode_name(Opcode opcode) noexcept
     case Opcode::GuestAddressAddValue: return "guest_address_add_value";
     case Opcode::GuestLoad: return "guest_load";
     case Opcode::GuestStore: return "guest_store";
+    case Opcode::BitCast: return "bitcast";
+    case Opcode::ReadVectorRegister: return "read_vector_register";
+    case Opcode::WriteVectorRegister: return "write_vector_register";
+    case Opcode::ReadFpControl: return "read_fpcr";
+    case Opcode::WriteFpControl: return "write_fpcr";
+    case Opcode::ReadFpStatus: return "read_fpsr";
+    case Opcode::WriteFpStatus: return "write_fpsr";
+    case Opcode::FpBinary: return "fp_binary";
+    case Opcode::FpUnary: return "fp_unary";
+    case Opcode::FpCompare: return "fp_compare";
+    case Opcode::FpConvert: return "fp_convert";
+    case Opcode::FpRound: return "fp_round";
+    case Opcode::VectorExtractLane: return "vector_extract_lane";
+    case Opcode::VectorInsertLane: return "vector_insert_lane";
+    case Opcode::VectorBroadcast: return "vector_broadcast";
+    case Opcode::VectorBinary: return "vector_binary";
+    case Opcode::VectorCompare: return "vector_compare";
+    case Opcode::VectorShuffle: return "vector_shuffle";
+    case Opcode::GuestLoadVector: return "guest_load_vector";
+    case Opcode::GuestStoreVector: return "guest_store_vector";
     }
     return "unknown";
 }
@@ -80,6 +100,23 @@ std::string_view condition_code_name(ConditionCode condition) noexcept
     case ConditionCode::Nv: return "nv";
     }
     return "unknown";
+}
+
+std::string_view vector_arrangement_name(VectorArrangement arrangement) noexcept
+{
+    switch (arrangement)
+    {
+    case VectorArrangement::Raw128: return "raw128";
+    case VectorArrangement::B8: return "8b";
+    case VectorArrangement::B16: return "16b";
+    case VectorArrangement::H4: return "4h";
+    case VectorArrangement::H8: return "8h";
+    case VectorArrangement::S2: return "2s";
+    case VectorArrangement::S4: return "4s";
+    case VectorArrangement::D1: return "1d";
+    case VectorArrangement::D2: return "2d";
+    }
+    return "invalid";
 }
 
 } // namespace switchrecomp::ir

@@ -53,77 +53,58 @@ namespace
     switch (id)
     {
     case aarch64::InstructionId::Nop:
-    case aarch64::InstructionId::Add:
-    case aarch64::InstructionId::Adds:
-    case aarch64::InstructionId::Sub:
-    case aarch64::InstructionId::Subs:
-    case aarch64::InstructionId::And:
-    case aarch64::InstructionId::Ands:
-    case aarch64::InstructionId::Orr:
-    case aarch64::InstructionId::Orn:
-    case aarch64::InstructionId::Eor:
-    case aarch64::InstructionId::Eon:
-    case aarch64::InstructionId::Bic:
-    case aarch64::InstructionId::Bics:
-    case aarch64::InstructionId::Mov:
-    case aarch64::InstructionId::Mvn:
-    case aarch64::InstructionId::Cmp:
-    case aarch64::InstructionId::Cmn:
-    case aarch64::InstructionId::Tst:
-    case aarch64::InstructionId::Neg:
-    case aarch64::InstructionId::Negs:
-    case aarch64::InstructionId::Csel:
-    case aarch64::InstructionId::Csinc:
-    case aarch64::InstructionId::Csinv:
-    case aarch64::InstructionId::Csneg:
-    case aarch64::InstructionId::Cset:
-    case aarch64::InstructionId::Csetm:
-    case aarch64::InstructionId::Cinc:
-    case aarch64::InstructionId::Cinv:
-    case aarch64::InstructionId::Cneg:
-    case aarch64::InstructionId::Movz:
-    case aarch64::InstructionId::Movk:
-    case aarch64::InstructionId::Movn:
-    case aarch64::InstructionId::Lsl:
-    case aarch64::InstructionId::Lsr:
-    case aarch64::InstructionId::Asr:
-    case aarch64::InstructionId::Ror:
-    case aarch64::InstructionId::Ubfm:
-    case aarch64::InstructionId::Sbfm:
-    case aarch64::InstructionId::Bfm:
-    case aarch64::InstructionId::Mul:
-    case aarch64::InstructionId::Madd:
-    case aarch64::InstructionId::Msub:
-    case aarch64::InstructionId::Mneg:
-    case aarch64::InstructionId::Adr:
-    case aarch64::InstructionId::Adrp:
-    case aarch64::InstructionId::Ldr:
-    case aarch64::InstructionId::Ldrb:
-    case aarch64::InstructionId::Ldrh:
-    case aarch64::InstructionId::Ldrsb:
-    case aarch64::InstructionId::Ldrsh:
-    case aarch64::InstructionId::Ldrsw:
-    case aarch64::InstructionId::Str:
-    case aarch64::InstructionId::Strb:
-    case aarch64::InstructionId::Strh:
-    case aarch64::InstructionId::Ldp:
-    case aarch64::InstructionId::Stp:
-    case aarch64::InstructionId::Ldur:
-    case aarch64::InstructionId::Stur:
-    case aarch64::InstructionId::LdrLiteral:
-    case aarch64::InstructionId::B:
-    case aarch64::InstructionId::Bl:
-    case aarch64::InstructionId::BCond:
-    case aarch64::InstructionId::Br:
-    case aarch64::InstructionId::Blr:
-    case aarch64::InstructionId::Ret:
-    case aarch64::InstructionId::Cbz:
-    case aarch64::InstructionId::Cbnz:
-    case aarch64::InstructionId::Tbz:
-    case aarch64::InstructionId::Tbnz:
+    case aarch64::InstructionId::Add: case aarch64::InstructionId::Adds:
+    case aarch64::InstructionId::Sub: case aarch64::InstructionId::Subs:
+    case aarch64::InstructionId::And: case aarch64::InstructionId::Ands:
+    case aarch64::InstructionId::Orr: case aarch64::InstructionId::Orn:
+    case aarch64::InstructionId::Eor: case aarch64::InstructionId::Eon:
+    case aarch64::InstructionId::Bic: case aarch64::InstructionId::Bics:
+    case aarch64::InstructionId::Mov: case aarch64::InstructionId::Mvn:
+    case aarch64::InstructionId::Cmp: case aarch64::InstructionId::Cmn:
+    case aarch64::InstructionId::Tst: case aarch64::InstructionId::Neg:
+    case aarch64::InstructionId::Negs: case aarch64::InstructionId::Csel:
+    case aarch64::InstructionId::Csinc: case aarch64::InstructionId::Csinv:
+    case aarch64::InstructionId::Csneg: case aarch64::InstructionId::Cset:
+    case aarch64::InstructionId::Csetm: case aarch64::InstructionId::Cinc:
+    case aarch64::InstructionId::Cinv: case aarch64::InstructionId::Cneg:
+    case aarch64::InstructionId::Movz: case aarch64::InstructionId::Movk:
+    case aarch64::InstructionId::Movn: case aarch64::InstructionId::Lsl:
+    case aarch64::InstructionId::Lsr: case aarch64::InstructionId::Asr:
+    case aarch64::InstructionId::Ror: case aarch64::InstructionId::Ubfm:
+    case aarch64::InstructionId::Sbfm: case aarch64::InstructionId::Bfm:
+    case aarch64::InstructionId::Mul: case aarch64::InstructionId::Madd:
+    case aarch64::InstructionId::Msub: case aarch64::InstructionId::Mneg:
+    case aarch64::InstructionId::Adr: case aarch64::InstructionId::Adrp:
+    case aarch64::InstructionId::Ldr: case aarch64::InstructionId::Ldrb:
+    case aarch64::InstructionId::Ldrh: case aarch64::InstructionId::Ldrsb:
+    case aarch64::InstructionId::Ldrsh: case aarch64::InstructionId::Ldrsw:
+    case aarch64::InstructionId::Str: case aarch64::InstructionId::Strb:
+    case aarch64::InstructionId::Strh: case aarch64::InstructionId::Ldp:
+    case aarch64::InstructionId::Stp: case aarch64::InstructionId::Ldur:
+    case aarch64::InstructionId::Stur: case aarch64::InstructionId::LdrLiteral:
+    case aarch64::InstructionId::B: case aarch64::InstructionId::Bl:
+    case aarch64::InstructionId::BCond: case aarch64::InstructionId::Br:
+    case aarch64::InstructionId::Blr: case aarch64::InstructionId::Ret:
+    case aarch64::InstructionId::Cbz: case aarch64::InstructionId::Cbnz:
+    case aarch64::InstructionId::Tbz: case aarch64::InstructionId::Tbnz:
         return true;
     default:
         return false;
+    }
+}
+
+[[nodiscard]] bool fp_simd_liftable(aarch64::SimdOperation operation) noexcept
+{
+    switch (operation)
+    {
+    case aarch64::SimdOperation::None:
+    case aarch64::SimdOperation::Fmadd:
+    case aarch64::SimdOperation::Fmsub:
+    case aarch64::SimdOperation::Fnmadd:
+    case aarch64::SimdOperation::Fnmsub:
+        return false;
+    default:
+        return true;
     }
 }
 
@@ -184,7 +165,10 @@ Result<CoverageReport> scan_coverage(const memory::GuestMemory& memory, memory::
         ++report.decoded;
         const auto name = std::string(aarch64::instruction_id_name(decoded.value().id));
         ++instruction_counts[name];
-        if (decoded.value().normalized && common_liftable(decoded.value().id))
+        const bool liftable = decoded.value().id == aarch64::InstructionId::FpSimd
+                                  ? fp_simd_liftable(decoded.value().simd_operation)
+                                  : decoded.value().normalized && common_liftable(decoded.value().id);
+        if (liftable)
         {
             ++report.liftable;
         }

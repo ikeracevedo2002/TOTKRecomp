@@ -18,10 +18,11 @@ BlockId Function::add_block(GuestAddress guest_start, std::string label)
 }
 
 ValueId Function::add_value(ValueKind kind, Type type, BlockId defining_block,
-                            std::uint32_t instruction_index, std::uint64_t constant)
+                            std::uint32_t instruction_index, std::uint64_t constant,
+                            std::uint64_t constant_high)
 {
     const auto id = static_cast<ValueId>(values_.size());
-    values_.push_back(ValueDefinition{id, kind, type, constant, defining_block,
+    values_.push_back(ValueDefinition{id, kind, type, constant, constant_high, defining_block,
                                       instruction_index});
     return id;
 }

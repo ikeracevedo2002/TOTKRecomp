@@ -66,6 +66,10 @@ namespace
 
 [[nodiscard]] bool constant_fits(Type type, std::uint64_t value) noexcept
 {
+    if (type == f32_type() || type == f64_type() || type == v128_type())
+    {
+        return type == v128_type() || type.bit_width() == 32U || type.bit_width() == 64U;
+    }
     if (!valid_integer_type(type))
     {
         return false;
@@ -75,6 +79,143 @@ namespace
         return true;
     }
     return value < (std::uint64_t{1} << type.bit_width());
+}
+
+[[nodiscard]] bool valid_rounding(RoundingMode mode) noexcept
+{
+    switch (mode)
+    {
+    case RoundingMode::NearestEven:
+    case RoundingMode::PlusInfinity:
+    case RoundingMode::MinusInfinity:
+    case RoundingMode::TowardZero: return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool valid_fp_binary(FpBinaryOperation operation) noexcept
+{
+    switch (operation)
+    {
+    case FpBinaryOperation::Add:
+    case FpBinaryOperation::Sub:
+    case FpBinaryOperation::Mul:
+    case FpBinaryOperation::Div:
+    case FpBinaryOperation::Min:
+    case FpBinaryOperation::Max: return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool valid_fp_unary(FpUnaryOperation operation) noexcept
+{
+    switch (operation)
+    {
+    case FpUnaryOperation::Neg:
+    case FpUnaryOperation::Abs:
+    case FpUnaryOperation::Sqrt: return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool valid_fp_conversion(FpConversion conversion) noexcept
+{
+    switch (conversion)
+    {
+    case FpConversion::SignedIntToFp:
+    case FpConversion::UnsignedIntToFp:
+    case FpConversion::FpToSignedIntTowardZero:
+    case FpConversion::FpToUnsignedIntTowardZero:
+    case FpConversion::Fp32ToFp64:
+    case FpConversion::Fp64ToFp32: return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool valid_vector_operation(VectorOperation operation) noexcept
+{
+    switch (operation)
+    {
+    case VectorOperation::And:
+    case VectorOperation::Or:
+    case VectorOperation::Xor:
+    case VectorOperation::Bic:
+    case VectorOperation::Add:
+    case VectorOperation::Sub:
+    case VectorOperation::Mul:
+    case VectorOperation::FpAdd:
+    case VectorOperation::FpSub:
+    case VectorOperation::FpMul:
+    case VectorOperation::FpDiv: return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool valid_vector_compare(VectorCompareOperation operation) noexcept
+{
+    switch (operation)
+    {
+    case VectorCompareOperation::Equal:
+    case VectorCompareOperation::SignedGreaterThan:
+    case VectorCompareOperation::SignedGreaterEqual:
+    case VectorCompareOperation::UnsignedHigher:
+    case VectorCompareOperation::UnsignedHigherEqual:
+    case VectorCompareOperation::FpEqual:
+    case VectorCompareOperation::FpGreaterThan:
+    case VectorCompareOperation::FpGreaterEqual: return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool valid_arrangement(VectorArrangement arrangement) noexcept
+{
+    switch (arrangement)
+    {
+    case VectorArrangement::B8:
+    case VectorArrangement::B16:
+    case VectorArrangement::H4:
+    case VectorArrangement::H8:
+    case VectorArrangement::S2:
+    case VectorArrangement::S4:
+    case VectorArrangement::D1:
+    case VectorArrangement::D2:
+    case VectorArrangement::Raw128: return true;
+    }
+    return false;
+}
+
+[[nodiscard]] std::uint8_t arrangement_bits(VectorArrangement arrangement) noexcept
+{
+    switch (arrangement)
+    {
+    case VectorArrangement::B8:
+    case VectorArrangement::B16: return 8U;
+    case VectorArrangement::H4:
+    case VectorArrangement::H8: return 16U;
+    case VectorArrangement::S2:
+    case VectorArrangement::S4: return 32U;
+    case VectorArrangement::D1:
+    case VectorArrangement::D2: return 64U;
+    case VectorArrangement::Raw128: return 0U;
+    }
+    return 0U;
+}
+
+[[nodiscard]] std::uint8_t arrangement_lanes(VectorArrangement arrangement) noexcept
+{
+    switch (arrangement)
+    {
+    case VectorArrangement::B8: return 8U;
+    case VectorArrangement::B16: return 16U;
+    case VectorArrangement::H4: return 4U;
+    case VectorArrangement::H8: return 8U;
+    case VectorArrangement::S2: return 2U;
+    case VectorArrangement::S4: return 4U;
+    case VectorArrangement::D1: return 1U;
+    case VectorArrangement::D2: return 2U;
+    case VectorArrangement::Raw128: return 1U;
+    }
+    return 0U;
 }
 
 [[nodiscard]] Result<Type> operand_type(const Function& function, ValueId id,
@@ -462,6 +603,216 @@ Result<void> verify(const Function& function)
                     {
                         checked = require_void();
                     }
+                }
+                break;
+            case Opcode::BitCast:
+            {
+                checked = require_arity(instruction, 1U);
+                if (checked)
+                {
+                    const auto source = operand_type(function, instruction.operands[0], "bitcast");
+                    if (!source || source.value().is_void() || source.value().bit_width() !=
+                                             instruction.result_type.bit_width())
+                        checked = invalid("bitcast requires equal, non-void widths");
+                }
+                break;
+            }
+            case Opcode::ReadVectorRegister:
+                checked = require_arity(instruction, 0U);
+                if (checked && (instruction.vector_index >= 32U || instruction.result_type != v128_type()))
+                    checked = invalid("read_vector_register has an invalid register or result type");
+                break;
+            case Opcode::WriteVectorRegister:
+                checked = require_arity(instruction, 1U);
+                if (checked)
+                {
+                    const auto source = operand_type(function, instruction.operands[0], "write_vector_register");
+                    if (instruction.vector_index >= 32U || !source || source.value() != v128_type())
+                        checked = invalid("write_vector_register has an invalid register or operand");
+                    else checked = require_void();
+                }
+                break;
+            case Opcode::ReadFpControl:
+            case Opcode::ReadFpStatus:
+                checked = require_arity(instruction, 0U);
+                if (checked) checked = require_result(i32_type());
+                break;
+            case Opcode::WriteFpControl:
+            case Opcode::WriteFpStatus:
+                checked = require_arity(instruction, 1U);
+                if (checked)
+                {
+                    const auto source = operand_type(function, instruction.operands[0], "fp state");
+                    if (!source || source.value() != i32_type()) checked = invalid("FP state write requires i32");
+                    else checked = require_void();
+                }
+                break;
+            case Opcode::FpBinary:
+                checked = require_arity(instruction, 2U);
+                if (checked)
+                {
+                    const auto left = operand_type(function, instruction.operands[0], "fp binary");
+                    const auto right = operand_type(function, instruction.operands[1], "fp binary");
+                    if (!left || !right || !valid_fp_binary(instruction.fp_binary) ||
+                        !left.value().is_floating() || left.value() != right.value() ||
+                        instruction.result_type != left.value())
+                        checked = invalid("FP binary operands must have matching f32/f64 types");
+                }
+                break;
+            case Opcode::FpUnary:
+                checked = require_arity(instruction, 1U);
+                if (checked)
+                {
+                    const auto source = operand_type(function, instruction.operands[0], "fp unary");
+                    if (!source || !valid_fp_unary(instruction.fp_unary) || !source.value().is_floating() ||
+                        instruction.result_type != source.value())
+                        checked = invalid("FP unary operand must match f32/f64 result");
+                }
+                break;
+            case Opcode::FpCompare:
+                checked = require_arity(instruction, 2U);
+                if (checked)
+                {
+                    const auto left = operand_type(function, instruction.operands[0], "fp compare");
+                    const auto right = operand_type(function, instruction.operands[1], "fp compare");
+                    if (!left || !right || !left.value().is_floating() || left.value() != right.value() ||
+                        instruction.result_type != i32_type())
+                        checked = invalid("FP compare requires matching f32/f64 operands and i32 flags");
+                }
+                break;
+            case Opcode::FpConvert:
+                checked = require_arity(instruction, 1U);
+                if (checked)
+                {
+                    const auto source = operand_type(function, instruction.operands[0], "fp convert");
+                    const bool signed_int_to_fp = instruction.fp_conversion == FpConversion::SignedIntToFp ||
+                                                  instruction.fp_conversion == FpConversion::UnsignedIntToFp;
+                    const bool fp_to_int = instruction.fp_conversion == FpConversion::FpToSignedIntTowardZero ||
+                                           instruction.fp_conversion == FpConversion::FpToUnsignedIntTowardZero;
+                    const bool fp_width_change = instruction.fp_conversion == FpConversion::Fp32ToFp64 ||
+                                                 instruction.fp_conversion == FpConversion::Fp64ToFp32;
+                    const bool valid_shape = signed_int_to_fp
+                                                 ? source && source.value().is_integer() && instruction.result_type.is_floating()
+                                                 : fp_to_int
+                                                       ? source && source.value().is_floating() && instruction.result_type.is_integer()
+                                                       : fp_width_change
+                                                             ? source && instruction.result_type.is_floating()
+                                                             : false;
+                    if (!source || !valid_fp_conversion(instruction.fp_conversion) ||
+                        source.value().is_void() || instruction.result_type.is_void() || !valid_shape ||
+                        (instruction.fp_conversion == FpConversion::Fp32ToFp64 &&
+                         (source.value() != f32_type() || instruction.result_type != f64_type())) ||
+                        (instruction.fp_conversion == FpConversion::Fp64ToFp32 &&
+                         (source.value() != f64_type() || instruction.result_type != f32_type())) ||
+                        !valid_rounding(instruction.rounding_mode))
+                        checked = invalid("FP conversion has invalid source, result, or rounding mode");
+                }
+                break;
+            case Opcode::FpRound:
+                checked = require_arity(instruction, 1U);
+                if (checked)
+                {
+                    const auto source = operand_type(function, instruction.operands[0], "fp round");
+                    if (!source || !source.value().is_floating() || source.value() != instruction.result_type ||
+                        !valid_rounding(instruction.rounding_mode))
+                        checked = invalid("FP round requires matching f32/f64 and valid rounding mode");
+                }
+                break;
+            case Opcode::VectorExtractLane:
+                checked = require_arity(instruction, 1U);
+                if (checked)
+                {
+                    const auto source = operand_type(function, instruction.operands[0], "vector extract");
+                    const auto bits = arrangement_bits(instruction.arrangement);
+                    const auto lanes = arrangement_lanes(instruction.arrangement);
+                    if (!source || source.value() != v128_type() || !valid_arrangement(instruction.arrangement) ||
+                        bits == 0U || instruction.lane_index >= lanes || !instruction.result_type.is_integer() ||
+                        instruction.result_type.bit_width() != bits)
+                        checked = invalid("vector extract has invalid arrangement, lane, or result type");
+                }
+                break;
+            case Opcode::VectorInsertLane:
+                checked = require_arity(instruction, 2U);
+                if (checked)
+                {
+                    const auto vector = operand_type(function, instruction.operands[0], "vector insert");
+                    const auto lane = operand_type(function, instruction.operands[1], "vector insert");
+                    const auto bits = arrangement_bits(instruction.arrangement);
+                    if (!vector || !lane || vector.value() != v128_type() || !lane.value().is_integer() ||
+                        !valid_arrangement(instruction.arrangement) || bits == 0U ||
+                        instruction.lane_index >= arrangement_lanes(instruction.arrangement) ||
+                        lane.value().bit_width() != bits || instruction.result_type != v128_type())
+                        checked = invalid("vector insert has invalid arrangement, lane, or operand type");
+                }
+                break;
+            case Opcode::VectorBroadcast:
+                checked = require_arity(instruction, 1U);
+                if (checked)
+                {
+                    const auto lane = operand_type(function, instruction.operands[0], "vector broadcast");
+                    const auto bits = arrangement_bits(instruction.arrangement);
+                    if (!lane || !lane.value().is_integer() || !valid_arrangement(instruction.arrangement) ||
+                        bits == 0U || lane.value().bit_width() != bits || instruction.result_type != v128_type())
+                        checked = invalid("vector broadcast has invalid arrangement or operand type");
+                }
+                break;
+            case Opcode::VectorBinary:
+                checked = require_arity(instruction, 2U);
+                if (checked)
+                {
+                    const auto left = operand_type(function, instruction.operands[0], "vector binary");
+                    const auto right = operand_type(function, instruction.operands[1], "vector binary");
+                    if (!left || !right || !valid_vector_operation(instruction.vector_operation) ||
+                        left.value() != v128_type() || right.value() != v128_type() ||
+                        instruction.result_type != v128_type() || !valid_arrangement(instruction.arrangement) ||
+                        arrangement_bits(instruction.arrangement) == 0U)
+                        checked = invalid("vector binary requires V128 operands and a full arrangement");
+                }
+                break;
+            case Opcode::VectorCompare:
+                checked = require_arity(instruction, 2U);
+                if (checked)
+                {
+                    const auto left = operand_type(function, instruction.operands[0], "vector compare");
+                    const auto right = operand_type(function, instruction.operands[1], "vector compare");
+                    if (!left || !right || !valid_vector_compare(instruction.vector_compare) ||
+                        left.value() != v128_type() || right.value() != v128_type() ||
+                        instruction.result_type != v128_type() || !valid_arrangement(instruction.arrangement) ||
+                        arrangement_bits(instruction.arrangement) == 0U)
+                        checked = invalid("vector compare requires V128 operands and a full arrangement");
+                }
+                break;
+            case Opcode::VectorShuffle:
+                checked = require_arity(instruction, 2U);
+                if (checked)
+                {
+                    const auto left = operand_type(function, instruction.operands[0], "vector shuffle");
+                    const auto right = operand_type(function, instruction.operands[1], "vector shuffle");
+                    if (!left || !right || left.value() != v128_type() || right.value() != v128_type() ||
+                        instruction.result_type != v128_type() || !valid_arrangement(instruction.arrangement))
+                        checked = invalid("vector shuffle requires V128 operands and a valid arrangement");
+                }
+                break;
+            case Opcode::GuestLoadVector:
+                checked = require_arity(instruction, 1U);
+                if (checked)
+                {
+                    const auto address = operand_type(function, instruction.operands[0], "vector guest load");
+                    if (!address || address.value() != i64_type() || instruction.memory_size != 16U ||
+                        instruction.result_type != v128_type())
+                        checked = invalid("vector guest load requires i64 address and 16-byte V128 result");
+                }
+                break;
+            case Opcode::GuestStoreVector:
+                checked = require_arity(instruction, 2U);
+                if (checked)
+                {
+                    const auto address = operand_type(function, instruction.operands[0], "vector guest store");
+                    const auto value = operand_type(function, instruction.operands[1], "vector guest store");
+                    if (!address || !value || address.value() != i64_type() || value.value() != v128_type() ||
+                        instruction.memory_size != 16U)
+                        checked = invalid("vector guest store requires i64 address and V128 value");
+                    else checked = require_void();
                 }
                 break;
             default:

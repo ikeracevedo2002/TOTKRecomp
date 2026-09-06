@@ -182,7 +182,7 @@ TEST_CASE("AArch64 decoder handles memory, SIMD, atomics and system instructions
     REQUIRE(load.value().operands[1].memory.base.index == 1U);
     REQUIRE(load.value().operands[1].memory.displacement == 8);
 
-    // fadd s0, s1, s2
+    // fmul s0, s1, s2
     const auto fp = decoder.value()->decode(0x1000U, 0x1e220820U);
     REQUIRE(fp);
     REQUIRE(fp.value().backend_decoded);

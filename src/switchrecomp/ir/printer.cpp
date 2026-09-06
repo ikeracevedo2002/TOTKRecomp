@@ -49,6 +49,10 @@ std::string print(const Function& function)
             if (instruction.opcode == Opcode::Constant)
             {
                 output << " 0x" << std::hex << instruction.constant << std::dec;
+                if (instruction.result_type == v128_type())
+                {
+                    output << ":0x" << std::hex << instruction.constant_high << std::dec;
+                }
             }
             else if (instruction.opcode == Opcode::ReadRegister ||
                      instruction.opcode == Opcode::WriteRegister)
@@ -91,6 +95,51 @@ std::string print(const Function& function)
                 output << ' ';
                 print_operands(output, instruction);
                 output << " (" << static_cast<unsigned int>(instruction.memory_size) << " bytes)";
+            }
+            else if (instruction.opcode == Opcode::ReadVectorRegister ||
+                     instruction.opcode == Opcode::WriteVectorRegister)
+            {
+                output << " v" << static_cast<unsigned int>(instruction.vector_index);
+                if (!instruction.operands.empty())
+                {
+                    output << ", ";
+                    print_operands(output, instruction);
+                }
+            }
+            else if (instruction.opcode == Opcode::VectorExtractLane ||
+                     instruction.opcode == Opcode::VectorInsertLane ||
+                     instruction.opcode == Opcode::VectorBroadcast ||
+                     instruction.opcode == Opcode::VectorBinary ||
+                     instruction.opcode == Opcode::VectorCompare ||
+                     instruction.opcode == Opcode::VectorShuffle)
+            {
+                output << " arrangement=" << vector_arrangement_name(instruction.arrangement);
+                if (instruction.opcode == Opcode::VectorExtractLane ||
+                    instruction.opcode == Opcode::VectorInsertLane)
+                    output << " lane=" << static_cast<unsigned int>(instruction.lane_index);
+                if (!instruction.operands.empty())
+                {
+                    output << " ";
+                    print_operands(output, instruction);
+                }
+            }
+            else if (instruction.opcode == Opcode::FpBinary || instruction.opcode == Opcode::FpUnary ||
+                     instruction.opcode == Opcode::FpCompare || instruction.opcode == Opcode::FpConvert ||
+                     instruction.opcode == Opcode::FpRound)
+            {
+                output << " rm=" << static_cast<unsigned int>(instruction.rounding_mode);
+                if (!instruction.operands.empty())
+                {
+                    output << " ";
+                    print_operands(output, instruction);
+                }
+            }
+            else if (instruction.opcode == Opcode::GuestLoadVector ||
+                     instruction.opcode == Opcode::GuestStoreVector)
+            {
+                output << " ";
+                print_operands(output, instruction);
+                output << " (16 bytes)";
             }
             else if (!instruction.operands.empty())
             {

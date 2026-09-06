@@ -23,6 +23,7 @@ struct ValueDefinition
     ValueKind kind = ValueKind::Instruction;
     Type type = void_type();
     std::uint64_t constant = 0U;
+    std::uint64_t constant_high = 0U;
     BlockId defining_block = invalid_block;
     std::uint32_t instruction_index = 0U;
 };
@@ -45,7 +46,8 @@ class Function
 
     [[nodiscard]] BlockId add_block(GuestAddress guest_start, std::string label);
     [[nodiscard]] ValueId add_value(ValueKind kind, Type type, BlockId defining_block,
-                                     std::uint32_t instruction_index, std::uint64_t constant = 0U);
+                                     std::uint32_t instruction_index, std::uint64_t constant = 0U,
+                                     std::uint64_t constant_high = 0U);
 
     [[nodiscard]] const BasicBlock* block(BlockId id) const noexcept;
     [[nodiscard]] BasicBlock* block(BlockId id) noexcept;

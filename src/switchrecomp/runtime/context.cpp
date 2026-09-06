@@ -123,6 +123,40 @@ extern "C" std::uint32_t switchrecomp_runtime_guest_store(RuntimeContext* runtim
     return 0U;
 }
 
+extern "C" std::uint32_t switchrecomp_runtime_guest_load_vector(RuntimeContext* runtime,
+                                                                  std::uint64_t address,
+                                                                  Vector128* result) noexcept
+{
+    if (runtime == nullptr || runtime->memory == nullptr || result == nullptr)
+    {
+        return failure(runtime, make_error(ErrorCode::InvalidRuntimeContext,
+                                            "vector guest load requires memory, result, and context"));
+    }
+    std::array<std::byte, 16> bytes{};
+    const auto read = runtime->memory->read(address, bytes);
+    if (!read) return failure(runtime, read.error());
+    result->lo = load_little_endian(std::span<const std::byte>(bytes).first(8U));
+    result->hi = load_little_endian(std::span<const std::byte>(bytes).subspan(8U));
+    return 0U;
+}
+
+extern "C" std::uint32_t switchrecomp_runtime_guest_store_vector(RuntimeContext* runtime,
+                                                                   std::uint64_t address,
+                                                                   const Vector128* value) noexcept
+{
+    if (runtime == nullptr || runtime->memory == nullptr || value == nullptr)
+    {
+        return failure(runtime, make_error(ErrorCode::InvalidRuntimeContext,
+                                            "vector guest store requires memory, value, and context"));
+    }
+    std::array<std::byte, 16> bytes{};
+    store_little_endian(std::span<std::byte>(bytes).first(8U), value->lo);
+    store_little_endian(std::span<std::byte>(bytes).subspan(8U), value->hi);
+    const auto write = runtime->memory->write(address, bytes);
+    if (!write) return failure(runtime, write.error());
+    return 0U;
+}
+
 extern "C" std::uint32_t switchrecomp_runtime_guest_address_add(RuntimeContext* runtime,
                                                                   std::uint64_t base,
                                                                   std::int64_t offset,

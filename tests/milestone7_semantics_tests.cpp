@@ -428,7 +428,7 @@ TEST_CASE("canonical function prologue, conditional body and epilogue execute")
     REQUIRE(zero.pc == 0x72000000U);
 }
 
-TEST_CASE("coverage reports are deterministic and identify unsupported families")
+TEST_CASE("coverage reports are deterministic and include normalized FP families")
 {
     constexpr memory::GuestAddress base = 0x400000U;
     const auto bytes = words({0xd503201fU, 0x8b010000U, 0x1e220820U, 0xd65f03c0U});
@@ -442,10 +442,9 @@ TEST_CASE("coverage reports are deterministic and identify unsupported families"
     REQUIRE(first);
     REQUIRE(second);
     REQUIRE(first.value().decoded == 4U);
-    REQUIRE(first.value().liftable == 3U);
-    REQUIRE(first.value().unsupported == 1U);
-    REQUIRE(first.value().unsupported_frequency.size() == 1U);
-    REQUIRE(first.value().unsupported_frequency[0].opcode == "fp_simd");
+    REQUIRE(first.value().liftable == 4U);
+    REQUIRE(first.value().unsupported == 0U);
+    REQUIRE(first.value().unsupported_frequency.empty());
     REQUIRE(analysis::render_coverage(first.value()) == analysis::render_coverage(second.value()));
     REQUIRE(analysis::render_coverage_json(first.value()) ==
             analysis::render_coverage_json(second.value()));

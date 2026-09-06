@@ -17,6 +17,8 @@ class Builder
     [[nodiscard]] Result<ValueId> emit(Instruction instruction);
     [[nodiscard]] Result<ValueId> constant(Type type, std::uint64_t value,
                                             SourceLocation source = {});
+    [[nodiscard]] Result<ValueId> constant128(std::uint64_t low, std::uint64_t high,
+                                               SourceLocation source = {});
     [[nodiscard]] Result<void> emit_void(Instruction instruction);
     [[nodiscard]] Result<void> set_terminator(Terminator terminator);
 

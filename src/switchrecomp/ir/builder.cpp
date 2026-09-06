@@ -45,7 +45,7 @@ Result<ValueId> Builder::emit(Instruction instruction)
             result = function_.add_value(kind, instruction.result_type,
                                          kind == ValueKind::Constant ? invalid_block : insert_block_,
                                          kind == ValueKind::Constant ? 0U : index,
-                                         instruction.constant);
+                                         instruction.constant, instruction.constant_high);
             instruction.result = result;
         }
         else if (instruction.result != invalid_value)
@@ -69,6 +69,17 @@ Result<ValueId> Builder::constant(Type type, std::uint64_t value, SourceLocation
     instruction.opcode = Opcode::Constant;
     instruction.result_type = type;
     instruction.constant = value;
+    instruction.source = std::move(source);
+    return emit(std::move(instruction));
+}
+
+Result<ValueId> Builder::constant128(std::uint64_t low, std::uint64_t high, SourceLocation source)
+{
+    Instruction instruction;
+    instruction.opcode = Opcode::Constant;
+    instruction.result_type = v128_type();
+    instruction.constant = low;
+    instruction.constant_high = high;
     instruction.source = std::move(source);
     return emit(std::move(instruction));
 }
