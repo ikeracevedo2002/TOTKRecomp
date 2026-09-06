@@ -1818,61 +1818,63 @@ threading, import, and runtime boundaries are validated.
 **Success:** The known synthetic and legally supplied module corpus translates
 with auditable coverage and no silent unsupported instructions.
 
-### Milestone 13 — Enter game initialization
+**Roadmap numbering correction:** The future roadmap previously contained a numbering gap after Milestone 10. The affected future milestones have been renumbered to restore the intended continuous sequence from Milestone 11 through Milestone 20. No milestone scope was inserted or removed by this documentation correction.
+
+### Milestone 11 — Enter game initialization
 
 **Goal:** Execute the recompiled entry path.
 
 **Success:** Execution reaches initialization and stops at a known unsupported dependency, with a useful diagnostic.
 
-### Milestone 14 — Runtime bring-up
+### Milestone 12 — Runtime bring-up
 
 **Goal:** Add required memory, timing, threading, filesystem, handle, and service behavior incrementally.
 
 **Success:** Initialization progresses consistently between runs.
 
-### Milestone 15 — Filesystem and asset loading
+### Milestone 13 — Filesystem and asset loading
 
 **Goal:** Mount user-provided game data and implement the required streaming path.
 
 **Success:** TOTK opens required resources and begins loading without missing-path or handle-semantics failures.
 
-### Milestone 16 — Graphics initialization
+### Milestone 14 — Graphics initialization
 
 **Goal:** Trace and intercept the selected graphics boundary and create logical native resources.
 
 **Success:** Recompiled code creates the required native device/resources through the canonical render interface.
 
-### Milestone 17 — First present
+### Milestone 15 — First present
 
 **Goal:** Produce a window, swapchain, render target, and present path.
 
 **Success:** A frame initiated by recompiled code reaches the display. A cleared framebuffer counts.
 
-### Milestone 18 — First visible game output
+### Milestone 16 — First visible game output
 
 **Goal:** Render actual TOTK graphics, even if incomplete.
 
 **Success:** Game-generated geometry or UI is visible through the native renderer.
 
-### Milestone 19 — Menu boot
+### Milestone 17 — Menu boot
 
 **Goal:** Reach an interactable title screen or early menu.
 
 **Success:** Input works and the menu remains stable across repeated runs.
 
-### Milestone 20 — In-game
+### Milestone 18 — In-game
 
 **Goal:** Reach a playable scene.
 
 **Success:** Gameplay begins with known limitations documented.
 
-### Milestone 21 — Correctness
+### Milestone 19 — Correctness
 
 **Focus:** Crashes, memory, synchronization, graphics, audio, saves, streaming, input, timing, and gameplay behavior.
 
 **Success:** A repeatable validation suite covers representative flows and regressions.
 
-### Milestone 22 — Performance
+### Milestone 20 — Performance
 
 **Focus:** Direct-call lowering, dispatcher locality, LLVM optimization, SSA/register improvements, guest-memory fast paths, allocation, renderer batching, shader/pipeline caches, and asynchronous compilation.
 
