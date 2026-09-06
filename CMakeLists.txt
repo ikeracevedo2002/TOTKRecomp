@@ -97,6 +97,7 @@ totkrecomp_enable_project_warnings(switchrecomp-target)
 totkrecomp_enable_sanitizers(switchrecomp-target)
 
 add_library(switchrecomp-format
+    src/switchrecomp/format/nso.cpp
     src/switchrecomp/format/nso_magic.cpp
 )
 target_include_directories(switchrecomp-format
@@ -116,6 +117,7 @@ if(TOTKRECOMP_BUILD_TESTS)
     add_executable(switchrecomp-tests
         tests/common_tests.cpp
         tests/format_tests.cpp
+        tests/nso_tests.cpp
         tests/target_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
