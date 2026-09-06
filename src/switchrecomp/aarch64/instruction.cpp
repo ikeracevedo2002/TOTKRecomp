@@ -81,28 +81,110 @@ std::string_view instruction_id_name(InstructionId id) noexcept
         return "subs";
     case InstructionId::And:
         return "and";
+    case InstructionId::Ands:
+        return "ands";
     case InstructionId::Orr:
         return "orr";
+    case InstructionId::Orn:
+        return "orn";
     case InstructionId::Eor:
         return "eor";
+    case InstructionId::Eon:
+        return "eon";
+    case InstructionId::Bic:
+        return "bic";
+    case InstructionId::Bics:
+        return "bics";
     case InstructionId::Mov:
         return "mov";
+    case InstructionId::Mvn:
+        return "mvn";
     case InstructionId::Cmp:
         return "cmp";
+    case InstructionId::Cmn:
+        return "cmn";
+    case InstructionId::Ccmp:
+        return "ccmp";
+    case InstructionId::Ccmn:
+        return "ccmn";
+    case InstructionId::Tst:
+        return "tst";
+    case InstructionId::Neg:
+        return "neg";
+    case InstructionId::Negs:
+        return "negs";
     case InstructionId::Csel:
         return "csel";
+    case InstructionId::Csinc:
+        return "csinc";
+    case InstructionId::Csinv:
+        return "csinv";
+    case InstructionId::Csneg:
+        return "csneg";
+    case InstructionId::Cset:
+        return "cset";
+    case InstructionId::Csetm:
+        return "csetm";
+    case InstructionId::Cinc:
+        return "cinc";
+    case InstructionId::Cinv:
+        return "cinv";
+    case InstructionId::Cneg:
+        return "cneg";
     case InstructionId::Movz:
         return "movz";
     case InstructionId::Movk:
         return "movk";
+    case InstructionId::Movn:
+        return "movn";
+    case InstructionId::Lsl:
+        return "lsl";
+    case InstructionId::Lsr:
+        return "lsr";
+    case InstructionId::Asr:
+        return "asr";
+    case InstructionId::Ror:
+        return "ror";
+    case InstructionId::Ubfm:
+        return "ubfm";
+    case InstructionId::Sbfm:
+        return "sbfm";
+    case InstructionId::Bfm:
+        return "bfm";
+    case InstructionId::Mul:
+        return "mul";
+    case InstructionId::Madd:
+        return "madd";
+    case InstructionId::Msub:
+        return "msub";
+    case InstructionId::Mneg:
+        return "mneg";
+    case InstructionId::Udiv:
+        return "udiv";
+    case InstructionId::Sdiv:
+        return "sdiv";
     case InstructionId::Adr:
         return "adr";
     case InstructionId::Adrp:
         return "adrp";
     case InstructionId::Ldr:
         return "ldr";
+    case InstructionId::Ldrb:
+        return "ldrb";
+    case InstructionId::Ldrh:
+        return "ldrh";
+    case InstructionId::Ldrsb:
+        return "ldrsb";
+    case InstructionId::Ldrsh:
+        return "ldrsh";
+    case InstructionId::Ldrsw:
+        return "ldrsw";
     case InstructionId::Str:
         return "str";
+    case InstructionId::Strb:
+        return "strb";
+    case InstructionId::Strh:
+        return "strh";
     case InstructionId::Ldp:
         return "ldp";
     case InstructionId::Stp:

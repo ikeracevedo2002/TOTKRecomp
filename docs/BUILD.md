@@ -40,5 +40,34 @@ cmake -S . -B build -G Ninja \
   -DTOTKRECOMP_ENABLE_SANITIZERS=ON
 ```
 
+## Semantic IR and LLVM backend
+
+The core build does not require LLVM:
+
+```bash
+cmake -S . -B build -G Ninja -DTOTKRECOMP_ENABLE_LLVM=OFF
+cmake --build build
+ctest --test-dir build --output-on-failure
+build/aarch64-lift --hex 0000018bc0035fd6 --show-disassembly --show-ir --execute-ir
+```
+
+For the tested LLVM 18.1.3 integration, install the host LLVM development
+package and point CMake at its package directory:
+
+```bash
+cmake -S . -B build -G Ninja \
+  -DTOTKRECOMP_ENABLE_LLVM=ON \
+  -DLLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm
+cmake --build build
+ctest --test-dir build --output-on-failure
+build/aarch64-lift --hex 0000018bc0035fd6 \
+  --show-disassembly --show-ir --show-llvm --execute-ir --execute-native
+```
+
+`aarch64-lift` accepts little-endian AArch64 bytes as hexadecimal pairs. It
+does not load or extract XCI/NSP/NCA content. LLVM lowering is isolated in
+`switchrecomp-codegen-llvm` and uses ORC `LLJIT`; the generated ABI is
+`uint32_t (CpuState*, RuntimeContext*)`.
+
 The normal build never accesses game files and never requires Nintendo keys or
 other proprietary content.

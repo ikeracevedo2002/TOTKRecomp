@@ -31,6 +31,7 @@ enum class ErrorCode
     MisalignedInstructionAddress,
     NonExecutableAddress,
     InvalidBranchTarget,
+    InvalidControlFlow,
     UnsupportedControlFlow,
     AnalysisInstructionLimitExceeded,
     AnalysisBlockLimitExceeded,
@@ -49,6 +50,19 @@ enum class ErrorCode
     UndefinedStrongSymbol,
     DuplicateExternalSymbol,
     UnsupportedRelFormat,
+    IrVerificationFailed,
+    InvalidIrValue,
+    InvalidIrBlock,
+    InvalidIrOperand,
+    UnsupportedInstruction,
+    UnsupportedOperandForm,
+    LiftLimitExceeded,
+    InterpreterError,
+    ExecutionLimitExceeded,
+    ExecutionTrap,
+    InvalidRuntimeContext,
+    LlvmVerificationFailed,
+    JitCompilationFailed,
 };
 
 [[nodiscard]] std::string_view error_code_name(ErrorCode code) noexcept;

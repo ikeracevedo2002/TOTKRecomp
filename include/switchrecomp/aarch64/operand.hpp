@@ -48,12 +48,35 @@ enum class MemoryAddressingMode : std::uint8_t
     RegisterOffset,
 };
 
+enum class ShiftKind : std::uint8_t
+{
+    None,
+    Lsl,
+    Lsr,
+    Asr,
+    Ror,
+};
+
+enum class ExtensionKind : std::uint8_t
+{
+    None,
+    Uxtb,
+    Uxth,
+    Uxtw,
+    Uxtx,
+    Sxtb,
+    Sxth,
+    Sxtw,
+    Sxtx,
+};
+
 struct MemoryOperand
 {
     Register base;
     Register index;
     std::int64_t displacement = 0;
     std::uint8_t shift = 0U;
+    ExtensionKind extension = ExtensionKind::None;
     MemoryAddressingMode addressing = MemoryAddressingMode::Base;
     bool writeback = false;
 };
@@ -65,6 +88,9 @@ struct Operand
     std::int64_t immediate = 0;
     MemoryOperand memory;
     ConditionCode condition = ConditionCode::Al;
+    ShiftKind shift_kind = ShiftKind::None;
+    std::uint8_t shift = 0U;
+    ExtensionKind extension = ExtensionKind::None;
     std::string text;
 };
 

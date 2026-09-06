@@ -85,6 +85,22 @@ struct CheckedGuestRange
     return Result<std::uint64_t>::success(base - magnitude);
 }
 
+// Interpret a sign-extended two's-complement bit pattern without relying on a
+// target compiler's implementation-defined unsigned-to-signed conversion.
+[[nodiscard]] inline std::int64_t signed_value_from_u64(std::uint64_t value) noexcept
+{
+    if ((value & (std::uint64_t{1} << 63U)) == 0U)
+    {
+        return static_cast<std::int64_t>(value);
+    }
+    const auto magnitude = std::uint64_t{0} - value;
+    if (magnitude == (std::uint64_t{1} << 63U))
+    {
+        return std::numeric_limits<std::int64_t>::min();
+    }
+    return -static_cast<std::int64_t>(magnitude);
+}
+
 [[nodiscard]] inline Result<CheckedGuestRange> checked_guest_range(std::uint64_t address,
                                                                   std::uint64_t size)
 {

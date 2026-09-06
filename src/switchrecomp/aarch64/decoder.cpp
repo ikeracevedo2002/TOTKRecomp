@@ -142,8 +142,22 @@ namespace
     return (opcode & 0xfffffc1fU) == 0xd65f0000U;
 }
 
+[[nodiscard]] bool is_movz(std::uint32_t opcode) noexcept
+{
+    return (opcode & 0x7f800000U) == 0x52800000U;
+}
+
+[[nodiscard]] bool is_movk(std::uint32_t opcode) noexcept
+{
+    return (opcode & 0x7f800000U) == 0x72800000U;
+}
+
 [[nodiscard]] Register from_capstone_register(arm64_reg value)
 {
+    if (value == ARM64_REG_INVALID)
+    {
+        return Register{};
+    }
     const auto raw = static_cast<int>(value);
     const auto in_range = [raw](arm64_reg first, arm64_reg last) {
         return raw >= static_cast<int>(first) && raw <= static_cast<int>(last);
@@ -241,6 +255,23 @@ namespace
     return Register{RegisterKind::System, RegisterWidth::None, 0U, false, false};
 }
 
+[[nodiscard]] ExtensionKind from_capstone_extension(arm64_extender value) noexcept
+{
+    switch (value)
+    {
+    case ARM64_EXT_UXTB: return ExtensionKind::Uxtb;
+    case ARM64_EXT_UXTH: return ExtensionKind::Uxth;
+    case ARM64_EXT_UXTW: return ExtensionKind::Uxtw;
+    case ARM64_EXT_UXTX: return ExtensionKind::Uxtx;
+    case ARM64_EXT_SXTB: return ExtensionKind::Sxtb;
+    case ARM64_EXT_SXTH: return ExtensionKind::Sxth;
+    case ARM64_EXT_SXTW: return ExtensionKind::Sxtw;
+    case ARM64_EXT_SXTX: return ExtensionKind::Sxtx;
+    case ARM64_EXT_INVALID: break;
+    }
+    return ExtensionKind::None;
+}
+
 [[nodiscard]] ConditionCode from_capstone_condition(arm64_cc value)
 {
     switch (value)
@@ -313,6 +344,23 @@ namespace
     {
         return InstructionId::Ret;
     }
+    if (is_movz(opcode))
+    {
+        return InstructionId::Movz;
+    }
+    if (is_movk(opcode))
+    {
+        return InstructionId::Movk;
+    }
+    if ((opcode & 0x7f800000U) == 0x12800000U)
+    {
+        return InstructionId::Movn;
+    }
+    if ((opcode & 0x3b000000U) == 0x18000000U)
+    {
+        const auto literal_kind = (opcode >> 30U) & 0x3U;
+        return literal_kind == 3U ? InstructionId::Unknown : InstructionId::LdrLiteral;
+    }
     if (is_cbz(opcode))
     {
         return InstructionId::Cbz;
@@ -344,20 +392,103 @@ namespace
         return InstructionId::Subs;
     case ARM64_INS_AND:
         return InstructionId::And;
+    case ARM64_INS_ANDS:
+        return InstructionId::Ands;
     case ARM64_INS_ORR:
         return InstructionId::Orr;
+    case ARM64_INS_ORN:
+        return InstructionId::Orn;
     case ARM64_INS_EOR:
         return InstructionId::Eor;
+    case ARM64_INS_EON:
+        return InstructionId::Eon;
+    case ARM64_INS_BIC:
+        return InstructionId::Bic;
+    case ARM64_INS_BICS:
+        return InstructionId::Bics;
     case ARM64_INS_MOV:
         return InstructionId::Mov;
+    case ARM64_INS_MVN:
+        return InstructionId::Mvn;
     case ARM64_INS_CMP:
         return InstructionId::Cmp;
+    case ARM64_INS_CMN:
+        return InstructionId::Cmn;
+    case ARM64_INS_CCMP:
+        return InstructionId::Ccmp;
+    case ARM64_INS_CCMN:
+        return InstructionId::Ccmn;
+    case ARM64_INS_TST:
+        return InstructionId::Tst;
+    case ARM64_INS_NEG:
+        return InstructionId::Neg;
+    case ARM64_INS_NEGS:
+        return InstructionId::Negs;
     case ARM64_INS_CSEL:
         return InstructionId::Csel;
+    case ARM64_INS_CSINC:
+        return InstructionId::Csinc;
+    case ARM64_INS_CSINV:
+        return InstructionId::Csinv;
+    case ARM64_INS_CSNEG:
+        return InstructionId::Csneg;
+    case ARM64_INS_CSET:
+        return InstructionId::Cset;
+    case ARM64_INS_CSETM:
+        return InstructionId::Csetm;
+    case ARM64_INS_CINC:
+        return InstructionId::Cinc;
+    case ARM64_INS_CINV:
+        return InstructionId::Cinv;
+    case ARM64_INS_CNEG:
+        return InstructionId::Cneg;
     case ARM64_INS_MOVZ:
         return InstructionId::Movz;
     case ARM64_INS_MOVK:
         return InstructionId::Movk;
+    case ARM64_INS_MOVN:
+        return InstructionId::Movn;
+    case ARM64_INS_LSL:
+        return InstructionId::Lsl;
+    case ARM64_INS_LSR:
+        return InstructionId::Lsr;
+    case ARM64_INS_ASR:
+        return InstructionId::Asr;
+    case ARM64_INS_ROR:
+        return InstructionId::Ror;
+    case ARM64_INS_UBFM:
+        return InstructionId::Ubfm;
+    case ARM64_INS_SBFM:
+        return InstructionId::Sbfm;
+    case ARM64_INS_BFM:
+        return InstructionId::Bfm;
+    case ARM64_INS_SBFIZ:
+    case ARM64_INS_SBFX:
+    case ARM64_INS_SXTB:
+    case ARM64_INS_SXTH:
+    case ARM64_INS_SXTW:
+        return InstructionId::Sbfm;
+    case ARM64_INS_UBFIZ:
+    case ARM64_INS_UBFX:
+    case ARM64_INS_UXTB:
+    case ARM64_INS_UXTH:
+    case ARM64_INS_UXTW:
+        return InstructionId::Ubfm;
+    case ARM64_INS_BFI:
+    case ARM64_INS_BFXIL:
+        return InstructionId::Bfm;
+    case ARM64_INS_MUL:
+        return InstructionId::Mul;
+    case ARM64_INS_MADD:
+        return InstructionId::Madd;
+    case ARM64_INS_MSUB:
+        return InstructionId::Msub;
+    case ARM64_INS_MNEG:
+        return InstructionId::Mneg;
+    case ARM64_INS_UDIV:
+        return InstructionId::Udiv;
+    case ARM64_INS_SDIV:
+        return InstructionId::Sdiv;
     case ARM64_INS_ADR:
         return InstructionId::Adr;
     case ARM64_INS_ADRP:
@@ -365,16 +496,44 @@ namespace
     case ARM64_INS_LDR:
         return (opcode & 0x3b000000U) == 0x18000000U ? InstructionId::LdrLiteral
                                                      : InstructionId::Ldr;
+    case ARM64_INS_LDRB:
+        return InstructionId::Ldrb;
+    case ARM64_INS_LDRH:
+        return InstructionId::Ldrh;
+    case ARM64_INS_LDRSB:
+        return InstructionId::Ldrsb;
+    case ARM64_INS_LDRSH:
+        return InstructionId::Ldrsh;
+    case ARM64_INS_LDRSW:
+        return InstructionId::Ldrsw;
     case ARM64_INS_STR:
         return InstructionId::Str;
+    case ARM64_INS_STRB:
+        return InstructionId::Strb;
+    case ARM64_INS_STRH:
+        return InstructionId::Strh;
     case ARM64_INS_LDP:
         return InstructionId::Ldp;
     case ARM64_INS_STP:
         return InstructionId::Stp;
     case ARM64_INS_LDUR:
         return InstructionId::Ldur;
+    case ARM64_INS_LDURB:
+        return InstructionId::Ldrb;
+    case ARM64_INS_LDURH:
+        return InstructionId::Ldrh;
+    case ARM64_INS_LDURSB:
+        return InstructionId::Ldrsb;
+    case ARM64_INS_LDURSH:
+        return InstructionId::Ldrsh;
+    case ARM64_INS_LDURSW:
+        return InstructionId::Ldrsw;
     case ARM64_INS_STUR:
         return InstructionId::Stur;
+    case ARM64_INS_STURB:
+        return InstructionId::Strb;
+    case ARM64_INS_STURH:
+        return InstructionId::Strh;
     case ARM64_INS_LDXR:
         return InstructionId::Ldxr;
     case ARM64_INS_STXR:
@@ -419,6 +578,28 @@ namespace
 [[nodiscard]] Operand normalize_operand(const cs_arm64_op& operand, const cs_arm64& detail)
 {
     Operand result;
+    result.shift = static_cast<std::uint8_t>(operand.shift.value);
+    switch (operand.shift.type)
+    {
+    case ARM64_SFT_LSL:
+        result.shift_kind = ShiftKind::Lsl;
+        break;
+    case ARM64_SFT_LSR:
+        result.shift_kind = ShiftKind::Lsr;
+        break;
+    case ARM64_SFT_ASR:
+        result.shift_kind = ShiftKind::Asr;
+        break;
+    case ARM64_SFT_ROR:
+        result.shift_kind = ShiftKind::Ror;
+        break;
+    case ARM64_SFT_INVALID:
+        break;
+    default:
+        result.shift_kind = ShiftKind::None;
+        break;
+    }
+    result.extension = from_capstone_extension(operand.ext);
     switch (operand.type)
     {
     case ARM64_OP_REG:
@@ -436,6 +617,7 @@ namespace
         result.memory.index = from_capstone_register(operand.mem.index);
         result.memory.displacement = operand.mem.disp;
         result.memory.shift = static_cast<std::uint8_t>(operand.shift.value);
+        result.memory.extension = from_capstone_extension(operand.ext);
         result.memory.writeback = detail.writeback;
         result.memory.addressing = detail.writeback
                                        ? (detail.post_index ? MemoryAddressingMode::PostIndex
@@ -736,10 +918,27 @@ Result<DecodedInstruction> AArch64Decoder::decode(GuestAddress address,
         result.disassembly += instruction.op_str;
     }
     const auto& detail = instruction.detail->arm64;
+    if (detail.cc != ARM64_CC_INVALID)
+    {
+        result.condition = from_capstone_condition(detail.cc);
+    }
     result.operands.reserve(detail.op_count);
     for (std::uint8_t index = 0U; index < detail.op_count; ++index)
     {
         result.operands.push_back(normalize_operand(detail.operands[index], detail));
+    }
+    for (std::size_t index = 0U; index < result.operands.size(); ++index)
+    {
+        if (result.operands[index].kind == OperandKind::Memory &&
+            result.operands[index].memory.addressing == MemoryAddressingMode::PostIndex &&
+            index + 1U < result.operands.size() &&
+            result.operands.back().kind == OperandKind::Immediate)
+        {
+            result.operands[index].memory.displacement = result.operands.back().immediate;
+            result.operands.erase(result.operands.begin() +
+                                  static_cast<std::ptrdiff_t>(result.operands.size() - 1U));
+            break;
+        }
     }
     const auto control_flow =
         classify_control_flow(instruction, result.id, address, opcode, impl_->handle);
