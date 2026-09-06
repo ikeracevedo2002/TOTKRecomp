@@ -386,7 +386,12 @@ class M9Lowerer
         }
         case ir::TerminatorKind::Return:
             if (terminator.target_value != ir::invalid_value && value(terminator.target_value) != nullptr)
-                builder_.CreateStore(widen_to_i64(value(terminator.target_value)), pc_pointer());
+            {
+                auto* current_pc = builder_.CreateLoad(Type::getInt64Ty(context_), pc_pointer(), "cpu.pc.current");
+                auto* target = widen_to_i64(value(terminator.target_value));
+                auto* nonzero = builder_.CreateICmpNE(target, builder_.getInt64(0), "ret.target.valid");
+                builder_.CreateStore(builder_.CreateSelect(nonzero, target, current_pc, "ret.target"), pc_pointer());
+            }
             builder_.CreateRet(builder_.getInt32(0)); return Result<void>::success();
         case ir::TerminatorKind::DirectCall:
         case ir::TerminatorKind::IndirectBranch:
