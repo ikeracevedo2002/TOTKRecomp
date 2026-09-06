@@ -9,7 +9,7 @@
 
 #if defined(SWITCHRECOMP_HAS_LLVM)
 #include <llvm/AsmParser/Parser.h>
-#include <llvm/ExecutionEngine/Orc/AbsoluteSymbols.h>
+#include <llvm/ExecutionEngine/Orc/Core.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/IR/LLVMContext.h>
@@ -99,20 +99,28 @@ Result<ir::ExecutionResult> execute_with_llvm_jit(
 
     auto& execution_session = jit_instance->getExecutionSession();
     llvm::orc::SymbolMap runtime_symbols;
+    const auto exported = llvm::JITSymbolFlags(llvm::JITSymbolFlags::Exported);
     runtime_symbols[execution_session.intern("switchrecomp_read_register")] =
-        llvm::orc::ExecutorSymbolDef::fromPtr(&switchrecomp_read_register);
+        llvm::orc::ExecutorSymbolDef{llvm::orc::ExecutorAddr::fromPtr(&switchrecomp_read_register),
+                                     exported};
     runtime_symbols[execution_session.intern("switchrecomp_write_register")] =
-        llvm::orc::ExecutorSymbolDef::fromPtr(&switchrecomp_write_register);
+        llvm::orc::ExecutorSymbolDef{llvm::orc::ExecutorAddr::fromPtr(&switchrecomp_write_register),
+                                     exported};
     runtime_symbols[execution_session.intern("switchrecomp_guest_read_u32")] =
-        llvm::orc::ExecutorSymbolDef::fromPtr(&switchrecomp_guest_read_u32);
+        llvm::orc::ExecutorSymbolDef{llvm::orc::ExecutorAddr::fromPtr(&switchrecomp_guest_read_u32),
+                                     exported};
     runtime_symbols[execution_session.intern("switchrecomp_guest_read_u64")] =
-        llvm::orc::ExecutorSymbolDef::fromPtr(&switchrecomp_guest_read_u64);
+        llvm::orc::ExecutorSymbolDef{llvm::orc::ExecutorAddr::fromPtr(&switchrecomp_guest_read_u64),
+                                     exported};
     runtime_symbols[execution_session.intern("switchrecomp_guest_write_u32")] =
-        llvm::orc::ExecutorSymbolDef::fromPtr(&switchrecomp_guest_write_u32);
+        llvm::orc::ExecutorSymbolDef{llvm::orc::ExecutorAddr::fromPtr(&switchrecomp_guest_write_u32),
+                                     exported};
     runtime_symbols[execution_session.intern("switchrecomp_guest_write_u64")] =
-        llvm::orc::ExecutorSymbolDef::fromPtr(&switchrecomp_guest_write_u64);
+        llvm::orc::ExecutorSymbolDef{llvm::orc::ExecutorAddr::fromPtr(&switchrecomp_guest_write_u64),
+                                     exported};
     runtime_symbols[execution_session.intern("switchrecomp_set_guest_pc")] =
-        llvm::orc::ExecutorSymbolDef::fromPtr(&switchrecomp_set_guest_pc);
+        llvm::orc::ExecutorSymbolDef{llvm::orc::ExecutorAddr::fromPtr(&switchrecomp_set_guest_pc),
+                                     exported};
     if (auto defined = jit_instance->getMainJITDylib().define(
             llvm::orc::absoluteSymbols(std::move(runtime_symbols))); !defined)
     {
@@ -133,7 +141,7 @@ Result<ir::ExecutionResult> execute_with_llvm_jit(
             ErrorCode::JitFailure,
             "could not find generated function: " + llvm_error(symbol.takeError())));
     }
-    const auto address = static_cast<std::uintptr_t>(symbol->getAddress().getValue());
+    const auto address = static_cast<std::uintptr_t>(symbol->getValue());
     using GeneratedFunction = int (*)(runtime::RuntimeExecutionContext*);
     const auto generated = reinterpret_cast<GeneratedFunction>(address);
     const int status = generated(&context);
