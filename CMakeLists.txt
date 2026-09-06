@@ -20,6 +20,23 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
+set(LZ4_BUILD_CLI OFF CACHE BOOL "Disable the LZ4 command-line tool" FORCE)
+set(LZ4_BUILD_LEGACY_LZ4C OFF CACHE BOOL "Disable the legacy LZ4 command-line tool" FORCE)
+set(LZ4_BUNDLED_MODE ON CACHE BOOL "Build LZ4 as a bundled dependency" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build bundled dependencies as static libraries" FORCE)
+set(BUILD_STATIC_LIBS ON CACHE BOOL "Build the bundled LZ4 static library" FORCE)
+FetchContent_Declare(
+    lz4
+    GIT_REPOSITORY https://github.com/lz4/lz4.git
+    GIT_TAG 5ff839680134437dbf4678f3d0c7b371d84f4964
+    GIT_SHALLOW FALSE
+)
+FetchContent_MakeAvailable(lz4)
+if(NOT TARGET lz4_static)
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+    add_subdirectory(${lz4_SOURCE_DIR}/build/cmake ${lz4_BINARY_DIR} EXCLUDE_FROM_ALL)
+endif()
+
 if(TOTKRECOMP_BUILD_TESTS)
     enable_testing()
     FetchContent_Declare(
@@ -97,12 +114,16 @@ totkrecomp_enable_project_warnings(switchrecomp-target)
 totkrecomp_enable_sanitizers(switchrecomp-target)
 
 add_library(switchrecomp-format
+    src/switchrecomp/format/nso.cpp
     src/switchrecomp/format/nso_magic.cpp
 )
 target_include_directories(switchrecomp-format
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-target_link_libraries(switchrecomp-format PUBLIC switchrecomp-common)
+target_link_libraries(switchrecomp-format
+    PUBLIC switchrecomp-common
+    PRIVATE lz4_static
+)
 totkrecomp_enable_project_warnings(switchrecomp-format)
 totkrecomp_enable_sanitizers(switchrecomp-format)
 
@@ -116,6 +137,8 @@ if(TOTKRECOMP_BUILD_TESTS)
     add_executable(switchrecomp-tests
         tests/common_tests.cpp
         tests/format_tests.cpp
+        tests/nso_tests.cpp
+        tests/nso_materialization_tests.cpp
         tests/target_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
@@ -123,6 +146,7 @@ if(TOTKRECOMP_BUILD_TESTS)
             switchrecomp-common
             switchrecomp-format
             switchrecomp-target
+            lz4_static
             Catch2::Catch2WithMain
     )
     totkrecomp_enable_project_warnings(switchrecomp-tests)

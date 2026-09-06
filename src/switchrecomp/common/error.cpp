@@ -23,6 +23,12 @@ std::string_view error_code_name(ErrorCode code) noexcept
         return "invalid_manifest";
     case ErrorCode::Unsupported:
         return "unsupported";
+    case ErrorCode::UnsupportedCompression:
+        return "unsupported_compression";
+    case ErrorCode::DecompressionFailed:
+        return "decompression_failed";
+    case ErrorCode::ResourceLimit:
+        return "resource_limit";
     case ErrorCode::MissingFile:
         return "missing_file";
     case ErrorCode::SizeMismatch:
