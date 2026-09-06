@@ -41,6 +41,26 @@ std::string_view error_code_name(ErrorCode code) noexcept
         return "hash_mismatch";
     case ErrorCode::PlaceholderManifest:
         return "placeholder_manifest";
+    case ErrorCode::DecodeFailed:
+        return "decode_failed";
+    case ErrorCode::InstructionFetchFailed:
+        return "instruction_fetch_failed";
+    case ErrorCode::MisalignedInstructionAddress:
+        return "misaligned_instruction_address";
+    case ErrorCode::NonExecutableAddress:
+        return "non_executable_address";
+    case ErrorCode::InvalidBranchTarget:
+        return "invalid_branch_target";
+    case ErrorCode::UnsupportedControlFlow:
+        return "unsupported_control_flow";
+    case ErrorCode::AnalysisInstructionLimitExceeded:
+        return "analysis_instruction_limit_exceeded";
+    case ErrorCode::AnalysisBlockLimitExceeded:
+        return "analysis_block_limit_exceeded";
+    case ErrorCode::AnalysisWorklistLimitExceeded:
+        return "analysis_worklist_limit_exceeded";
+    case ErrorCode::AnalysisScopeViolation:
+        return "analysis_scope_violation";
     }
     return "unknown";
 }

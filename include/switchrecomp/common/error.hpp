@@ -26,6 +26,16 @@ enum class ErrorCode
     SizeMismatch,
     HashMismatch,
     PlaceholderManifest,
+    DecodeFailed,
+    InstructionFetchFailed,
+    MisalignedInstructionAddress,
+    NonExecutableAddress,
+    InvalidBranchTarget,
+    UnsupportedControlFlow,
+    AnalysisInstructionLimitExceeded,
+    AnalysisBlockLimitExceeded,
+    AnalysisWorklistLimitExceeded,
+    AnalysisScopeViolation,
 };
 
 [[nodiscard]] std::string_view error_code_name(ErrorCode code) noexcept;
