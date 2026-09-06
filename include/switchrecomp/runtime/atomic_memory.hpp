@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <mutex>
+#include <span>
 #include <unordered_map>
 
 namespace switchrecomp::runtime
@@ -33,6 +34,12 @@ struct SharedRuntimeState
     std::unordered_map<std::uint64_t, std::uint64_t> reservation_generations;
 };
 
+[[nodiscard]] Result<void> synchronized_read_bytes(SharedRuntimeState& shared,
+                                                   std::uint64_t address,
+                                                   std::span<std::byte> destination);
+[[nodiscard]] Result<void> synchronized_write_bytes(SharedRuntimeState& shared,
+                                                    std::uint64_t address,
+                                                    std::span<const std::byte> source);
 [[nodiscard]] Result<std::uint64_t> synchronized_load(SharedRuntimeState& shared,
                                                       std::uint64_t address,
                                                       std::uint8_t size,
