@@ -2,13 +2,17 @@
 
 #include "switchrecomp/common/binary_reader.hpp"
 #include "switchrecomp/common/checked_arithmetic.hpp"
+#include "switchrecomp/common/sha256.hpp"
 
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <lz4.h>
+#include <new>
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace switchrecomp::format
 {
@@ -213,6 +217,285 @@ struct MemoryInterval
                 hex_value(range.size, 8U) + " exceeds rodata size " + hex_value(rodata_size, 8U)));
     }
     return Result<void>::success();
+}
+
+template <typename T>
+[[nodiscard]] Result<T> materialization_failure(NsoSegmentKind kind, ErrorCode code,
+                                                 std::string message)
+{
+    return Result<T>::failure(make_error(
+        code, "failed to materialize ." + std::string(nso_segment_kind_name(kind)) + ": " +
+                  std::move(message)));
+}
+
+[[nodiscard]] Result<std::span<const std::byte>> stored_segment_bytes(
+    std::span<const std::byte> file_bytes, const NsoSegment& segment)
+{
+    const auto maximum = static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max());
+    if (static_cast<std::uint64_t>(segment.file_offset) > maximum ||
+        static_cast<std::uint64_t>(segment.stored_size) > maximum)
+    {
+        return Result<std::span<const std::byte>>::failure(make_error(
+            ErrorCode::ArithmeticOverflow,
+            "stored source range offset + size overflows the host size type"));
+    }
+
+    const auto end = checked_add(static_cast<std::size_t>(segment.file_offset),
+                                 static_cast<std::size_t>(segment.stored_size));
+    if (!end)
+    {
+        return Result<std::span<const std::byte>>::failure(make_error(
+            ErrorCode::ArithmeticOverflow, "stored source range offset + size overflows"));
+    }
+    if (end.value() > file_bytes.size())
+    {
+        return Result<std::span<const std::byte>>::failure(make_error(
+            ErrorCode::OutOfBounds, "stored source range [" + hex_value(segment.file_offset, 8U) +
+                                        ", " + hex_value(end.value(), 8U) +
+                                        ") exceeds the input file size " +
+                                        hex_value(file_bytes.size(), 8U)));
+    }
+    return Result<std::span<const std::byte>>::success(
+        file_bytes.subspan(static_cast<std::size_t>(segment.file_offset),
+                           static_cast<std::size_t>(segment.stored_size)));
+}
+
+[[nodiscard]] Result<std::vector<std::byte>> allocate_bytes(std::size_t size,
+                                                              NsoSegmentKind kind,
+                                                              std::string_view purpose)
+{
+    try
+    {
+        return Result<std::vector<std::byte>>::success(std::vector<std::byte>(size));
+    }
+    catch (const std::bad_alloc&)
+    {
+        return materialization_failure<std::vector<std::byte>>(
+            kind, ErrorCode::ResourceLimit,
+            "could not allocate " + std::string(purpose) + " buffer of " +
+                hex_value(size, 1U));
+    }
+}
+
+[[nodiscard]] Result<std::vector<std::byte>> copy_uncompressed_segment(
+    std::span<const std::byte> source, const NsoSegment& segment)
+{
+    if (segment.stored_size != segment.memory_size)
+    {
+        return materialization_failure<std::vector<std::byte>>(
+            segment.kind, ErrorCode::SizeMismatch,
+            "uncompressed stored size " + hex_value(segment.stored_size, 8U) +
+                " differs from memory size " + hex_value(segment.memory_size, 8U));
+    }
+
+    auto output = allocate_bytes(static_cast<std::size_t>(segment.memory_size), segment.kind,
+                                  "materialized");
+    if (!output)
+    {
+        return output;
+    }
+    auto result = std::move(output).value();
+    std::copy(source.begin(), source.end(), result.begin());
+    return Result<std::vector<std::byte>>::success(std::move(result));
+}
+
+[[nodiscard]] Result<std::vector<std::byte>> decompress_lz4_segment(
+    std::span<const std::byte> source, const NsoSegment& segment)
+{
+    const auto maximum_lz4_integer = static_cast<std::size_t>(std::numeric_limits<int>::max());
+    if (source.size() > maximum_lz4_integer ||
+        static_cast<std::size_t>(segment.memory_size) > maximum_lz4_integer)
+    {
+        return materialization_failure<std::vector<std::byte>>(
+            segment.kind, ErrorCode::DecompressionFailed,
+            "stored or materialized size cannot be represented by the LZ4 API's int parameters");
+    }
+
+    if (segment.memory_size == 0U)
+    {
+        if (!source.empty())
+        {
+            return materialization_failure<std::vector<std::byte>>(
+                segment.kind, ErrorCode::DecompressionFailed,
+                "compressed input is non-empty but the declared decompressed size is zero");
+        }
+        return Result<std::vector<std::byte>>::success(std::vector<std::byte>{});
+    }
+    if (source.empty())
+    {
+        return materialization_failure<std::vector<std::byte>>(
+            segment.kind, ErrorCode::DecompressionFailed,
+            "compressed source is empty for a non-empty segment");
+    }
+
+    auto output = allocate_bytes(static_cast<std::size_t>(segment.memory_size), segment.kind,
+                                 "decompressed");
+    if (!output)
+    {
+        return output;
+    }
+    auto result = std::move(output).value();
+    const auto decoded = LZ4_decompress_safe(
+        reinterpret_cast<const char*>(source.data()), reinterpret_cast<char*>(result.data()),
+        static_cast<int>(source.size()), static_cast<int>(result.size()));
+    if (decoded < 0)
+    {
+        return materialization_failure<std::vector<std::byte>>(
+            segment.kind, ErrorCode::DecompressionFailed,
+            "LZ4 decompressor returned malformed input or output exceeded the destination");
+    }
+    if (static_cast<std::size_t>(decoded) != result.size())
+    {
+        return materialization_failure<std::vector<std::byte>>(
+            segment.kind, ErrorCode::SizeMismatch,
+            "expected " + hex_value(result.size(), 1U) + " decompressed bytes, got " +
+                hex_value(static_cast<std::size_t>(decoded), 1U));
+    }
+    return Result<std::vector<std::byte>>::success(std::move(result));
+}
+
+[[nodiscard]] Result<void> verify_segment_hash(std::span<const std::byte> materialized,
+                                               const NsoSegment& segment)
+{
+    if (!segment.hash_required)
+    {
+        return Result<void>::success();
+    }
+
+    const auto actual = sha256_bytes(materialized);
+    if (!actual)
+    {
+        return Result<void>::failure(make_error(
+            actual.error().code,
+            "failed to verify ." + std::string(nso_segment_kind_name(segment.kind)) +
+                ": SHA-256 calculation failed: " + actual.error().message));
+    }
+
+    if (actual.value().bytes != segment.hash)
+    {
+        const Sha256Digest expected{segment.hash};
+        return Result<void>::failure(make_error(
+            ErrorCode::HashMismatch,
+            "failed to verify ." + std::string(nso_segment_kind_name(segment.kind)) +
+                ": SHA-256 mismatch (expected " + sha256_to_hex(expected) + ", actual " +
+                sha256_to_hex(actual.value()) + ")"));
+    }
+    return Result<void>::success();
+}
+
+[[nodiscard]] Result<std::size_t> host_size(std::uint32_t value, std::string_view name)
+{
+    if (static_cast<std::uint64_t>(value) >
+        static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+    {
+        return Result<std::size_t>::failure(make_error(
+            ErrorCode::ArithmeticOverflow,
+            std::string(name) + " does not fit in the host size type"));
+    }
+    return Result<std::size_t>::success(static_cast<std::size_t>(value));
+}
+
+[[nodiscard]] Result<void> validate_materialization_limits(
+    const NsoHeader& header, const NsoMaterializationLimits& limits)
+{
+    const std::array<std::pair<std::uint32_t, std::string_view>, 4> sizes{
+        std::pair{header.text.memory_size, ".text"},
+        std::pair{header.rodata.memory_size, ".rodata"},
+        std::pair{header.data.memory_size, ".data"},
+        std::pair{header.bss_size, "BSS"},
+    };
+
+    std::array<std::size_t, sizes.size()> host_sizes{};
+    for (std::size_t index = 0U; index < sizes.size(); ++index)
+    {
+        const auto converted = host_size(sizes[index].first, sizes[index].second);
+        if (!converted)
+        {
+            return Result<void>::failure(converted.error());
+        }
+        host_sizes[index] = converted.value();
+        if (host_sizes[index] > limits.max_segment_size)
+        {
+            return Result<void>::failure(make_error(
+                ErrorCode::ResourceLimit,
+                std::string("requested ") + std::string(sizes[index].second) +
+                    " materialized size " + hex_value(host_sizes[index], 1U) +
+                    " exceeds the configured per-segment limit " +
+                    hex_value(limits.max_segment_size, 1U)));
+        }
+    }
+
+    std::size_t total = 0U;
+    for (const auto size : host_sizes)
+    {
+        const auto next = checked_add(total, size);
+        if (!next)
+        {
+            return Result<void>::failure(make_error(
+                ErrorCode::ArithmeticOverflow,
+                "total materialized NSO image size overflows the host size type"));
+        }
+        total = next.value();
+    }
+    if (total > limits.max_total_image_size)
+    {
+        return Result<void>::failure(make_error(
+            ErrorCode::ResourceLimit,
+            "requested total materialized NSO image size " + hex_value(total, 1U) +
+                " exceeds the configured limit " + hex_value(limits.max_total_image_size, 1U)));
+    }
+    return Result<void>::success();
+}
+
+[[nodiscard]] NsoCompressionKind compression_kind(const NsoHeader& header,
+                                                  const NsoSegment& segment) noexcept
+{
+    if (!segment.compressed)
+    {
+        return NsoCompressionKind::None;
+    }
+    return header.use_zbic_compression ? NsoCompressionKind::Zbic : NsoCompressionKind::Lz4;
+}
+
+[[nodiscard]] Result<MaterializedNsoSegment> materialize_segment(
+    std::span<const std::byte> file_bytes, const NsoHeader& header, const NsoSegment& segment)
+{
+    const auto source = stored_segment_bytes(file_bytes, segment);
+    if (!source)
+    {
+        return materialization_failure<MaterializedNsoSegment>(
+            segment.kind, source.error().code, source.error().message);
+    }
+
+    const auto compression = compression_kind(header, segment);
+    if (compression == NsoCompressionKind::Zbic)
+    {
+        return materialization_failure<MaterializedNsoSegment>(
+            segment.kind, ErrorCode::UnsupportedCompression,
+            "ZBIC compression was requested by the NSO header; this implementation intentionally "
+            "does not support ZBIC yet");
+    }
+
+    auto bytes = segment.compressed ? decompress_lz4_segment(source.value(), segment)
+                                    : copy_uncompressed_segment(source.value(), segment);
+    if (!bytes)
+    {
+        return Result<MaterializedNsoSegment>::failure(bytes.error());
+    }
+
+    const auto hash = verify_segment_hash(bytes.value(), segment);
+    if (!hash)
+    {
+        return Result<MaterializedNsoSegment>::failure(hash.error());
+    }
+
+    return Result<MaterializedNsoSegment>::success(
+        MaterializedNsoSegment{segment.kind,
+                               segment.memory_offset,
+                               std::move(bytes).value(),
+                               compression,
+                               segment.hash_required ? NsoHashStatus::Verified
+                                                      : NsoHashStatus::NotRequired});
 }
 
 } // namespace
@@ -512,6 +795,91 @@ std::string module_id_hex(const NsoHeader& header)
         result.push_back(digits_table[value & 0x0fU]);
     }
     return result;
+}
+
+std::string_view nso_compression_kind_name(NsoCompressionKind kind) noexcept
+{
+    switch (kind)
+    {
+    case NsoCompressionKind::None:
+        return "none";
+    case NsoCompressionKind::Lz4:
+        return "lz4";
+    case NsoCompressionKind::Zbic:
+        return "zbic";
+    }
+    return "unknown";
+}
+
+std::string_view nso_hash_status_name(NsoHashStatus status) noexcept
+{
+    switch (status)
+    {
+    case NsoHashStatus::NotRequired:
+        return "not-required";
+    case NsoHashStatus::Verified:
+        return "verified";
+    }
+    return "unknown";
+}
+
+Result<NsoImage> materialize_nso(std::span<const std::byte> file_bytes, const NsoHeader& header,
+                                 const NsoMaterializationLimits& limits)
+{
+    const auto limit_check = validate_materialization_limits(header, limits);
+    if (!limit_check)
+    {
+        return Result<NsoImage>::failure(limit_check.error());
+    }
+
+    auto text = materialize_segment(file_bytes, header, header.text);
+    if (!text)
+    {
+        return Result<NsoImage>::failure(text.error());
+    }
+    auto rodata = materialize_segment(file_bytes, header, header.rodata);
+    if (!rodata)
+    {
+        return Result<NsoImage>::failure(rodata.error());
+    }
+    auto data = materialize_segment(file_bytes, header, header.data);
+    if (!data)
+    {
+        return Result<NsoImage>::failure(data.error());
+    }
+
+    const auto bss_offset = checked_add(static_cast<std::size_t>(header.data.memory_offset),
+                                        static_cast<std::size_t>(header.data.memory_size));
+    if (!bss_offset || static_cast<std::uint64_t>(bss_offset.value()) > kAddressSpaceEnd)
+    {
+        return Result<NsoImage>::failure(make_error(
+            ErrorCode::ArithmeticOverflow,
+            "failed to materialize BSS: data memory range overflows the address space"));
+    }
+    const auto bss_end = checked_add(bss_offset.value(), static_cast<std::size_t>(header.bss_size));
+    if (!bss_end || static_cast<std::uint64_t>(bss_end.value()) > kAddressSpaceEnd)
+    {
+        return Result<NsoImage>::failure(make_error(
+            ErrorCode::ArithmeticOverflow,
+            "failed to materialize BSS: data memory range plus BSS size overflows the address space"));
+    }
+
+    auto bss = allocate_bytes(static_cast<std::size_t>(header.bss_size), NsoSegmentKind::Data,
+                              "BSS");
+    if (!bss)
+    {
+        return Result<NsoImage>::failure(bss.error());
+    }
+    auto zero_filled_bss = std::move(bss).value();
+    std::fill(zero_filled_bss.begin(), zero_filled_bss.end(), std::byte{0});
+
+    return Result<NsoImage>::success(
+        NsoImage{header,
+                 std::move(text).value(),
+                 std::move(rodata).value(),
+                 std::move(data).value(),
+                 static_cast<std::uint64_t>(bss_offset.value()),
+                 std::move(zero_filled_bss)});
 }
 
 } // namespace switchrecomp::format

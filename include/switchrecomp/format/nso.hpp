@@ -8,6 +8,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace switchrecomp::format
 {
@@ -84,5 +85,57 @@ struct NsoHeader
 [[nodiscard]] Result<NsoHeader> parse_nso_header(std::span<const std::byte> file_bytes);
 
 [[nodiscard]] std::string module_id_hex(const NsoHeader& header);
+
+enum class NsoCompressionKind
+{
+    None,
+    Lz4,
+    Zbic,
+};
+
+[[nodiscard]] std::string_view nso_compression_kind_name(NsoCompressionKind kind) noexcept;
+
+enum class NsoHashStatus
+{
+    NotRequired,
+    Verified,
+};
+
+[[nodiscard]] std::string_view nso_hash_status_name(NsoHashStatus status) noexcept;
+
+struct MaterializedNsoSegment
+{
+    NsoSegmentKind kind;
+    std::uint32_t memory_offset;
+    std::vector<std::byte> bytes;
+    NsoCompressionKind compression;
+    NsoHashStatus hash_status;
+};
+
+struct NsoImage
+{
+    NsoHeader header;
+    MaterializedNsoSegment text;
+    MaterializedNsoSegment rodata;
+    MaterializedNsoSegment data;
+    std::uint64_t bss_memory_offset;
+    std::vector<std::byte> bss;
+};
+
+inline constexpr std::size_t nso_default_max_segment_size =
+    std::size_t{256U} * std::size_t{1024U} * std::size_t{1024U};
+inline constexpr std::size_t nso_default_max_total_image_size =
+    std::size_t{512U} * std::size_t{1024U} * std::size_t{1024U};
+
+struct NsoMaterializationLimits
+{
+    std::size_t max_segment_size = nso_default_max_segment_size;
+    std::size_t max_total_image_size = nso_default_max_total_image_size;
+};
+
+[[nodiscard]] Result<NsoImage> materialize_nso(
+    std::span<const std::byte> file_bytes,
+    const NsoHeader& header,
+    const NsoMaterializationLimits& limits = {});
 
 } // namespace switchrecomp::format
