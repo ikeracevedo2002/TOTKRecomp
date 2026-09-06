@@ -87,6 +87,42 @@ std::string_view error_code_name(ErrorCode code) noexcept
         return "duplicate_external_symbol";
     case ErrorCode::UnsupportedRelFormat:
         return "unsupported_rel_format";
+    case ErrorCode::UnsupportedInstruction:
+        return "unsupported_instruction";
+    case ErrorCode::UnsupportedOperandForm:
+        return "unsupported_operand_form";
+    case ErrorCode::UnsupportedAddressingMode:
+        return "unsupported_addressing_mode";
+    case ErrorCode::InvalidOperandCount:
+        return "invalid_operand_count";
+    case ErrorCode::InvalidRegisterWidth:
+        return "invalid_register_width";
+    case ErrorCode::InvalidCfg:
+        return "invalid_cfg";
+    case ErrorCode::IrVerificationFailed:
+        return "ir_verification_failed";
+    case ErrorCode::InvalidValueId:
+        return "invalid_value_id";
+    case ErrorCode::InvalidBlockId:
+        return "invalid_block_id";
+    case ErrorCode::UseBeforeDefinition:
+        return "use_before_definition";
+    case ErrorCode::InvalidIrType:
+        return "invalid_ir_type";
+    case ErrorCode::ExecutionMemoryFault:
+        return "execution_memory_fault";
+    case ErrorCode::ExecutionInvalidBlock:
+        return "execution_invalid_block";
+    case ErrorCode::ExecutionStepLimitExceeded:
+        return "execution_step_limit_exceeded";
+    case ErrorCode::LLVMVerificationFailed:
+        return "llvm_verification_failed";
+    case ErrorCode::LLVMUnavailable:
+        return "llvm_unavailable";
+    case ErrorCode::JitFailure:
+        return "jit_failure";
+    case ErrorCode::ObjectEmissionFailed:
+        return "object_emission_failed";
     }
     return "unknown";
 }
