@@ -289,7 +289,7 @@ TEST_CASE("LLVM lowering verifies the same minimal function and JIT agrees when 
     const auto jit = switchrecomp::codegen::execute_with_llvm_jit(function.value(), context);
     if (!jit)
     {
-        INFO("LLVM JIT error: " << jit.error().message);
+        FAIL("LLVM JIT error: " << jit.error().message);
     }
     REQUIRE(jit);
     REQUIRE(state.x[0] == 42U);
