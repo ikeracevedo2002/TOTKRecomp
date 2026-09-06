@@ -329,6 +329,48 @@ Result<void> GuestMemory::write(GuestAddress address, std::span<const std::byte>
     return Result<void>::success();
 }
 
+Result<void> GuestMemory::validate_loader_write(GuestAddress address, GuestSize size) const
+{
+    if (size == 0U)
+    {
+        return Result<void>::success();
+    }
+    const auto range = checked_guest_range(address, size);
+    if (!range)
+    {
+        return Result<void>::failure(access_error(
+            ErrorCode::ArithmeticOverflow, "loader write", address, size,
+            "address range overflows the 64-bit address space"));
+    }
+    const auto* region = find_region(address);
+    if (region == nullptr || range.value().end() > region->info.end())
+    {
+        return Result<void>::failure(access_error(
+            ErrorCode::RelocationTargetNotWritableDuringLoad, "loader write", address, size,
+            "range is not fully contained in one mapped guest region"));
+    }
+    return Result<void>::success();
+}
+
+Result<void> GuestMemory::loader_write(GuestAddress address,
+                                       std::span<const std::byte> source)
+{
+    if (source.empty())
+    {
+        return Result<void>::success();
+    }
+    const auto valid = validate_loader_write(address, static_cast<GuestSize>(source.size()));
+    if (!valid)
+    {
+        return valid;
+    }
+    auto* region = find_region(address);
+    const auto offset = static_cast<std::size_t>(address - region->info.base);
+    std::copy(source.begin(), source.end(),
+              region->bytes.begin() + static_cast<std::ptrdiff_t>(offset));
+    return Result<void>::success();
+}
+
 Result<GuestMemoryPermissions> GuestMemory::permissions_at(GuestAddress address,
                                                            GuestSize size) const
 {

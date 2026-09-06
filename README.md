@@ -7,19 +7,21 @@ TOTK-specific target metadata.
 
 ## Current status
 
-Milestones 0, 1, 2A, 2B, 3, and 4 are implemented: C++20/CMake build targets, common
+Milestones 0, 1, 2A, 2B, 3, 4, and 5 are implemented: C++20/CMake build targets, common
 bounds-checked binary utilities, SHA-256 validation, logging, versioned
 target-manifest validation, strict fixed-size NSO0 parsing, bounded section
 materialization, a checked host-backed guest memory map, MOD0/dynamic/RELA
 metadata parsing, AArch64 decoding, bounded CFG analysis, synthetic tests, CI,
-and deterministic inspection reports are present.
+and deterministic inspection reports are present. Milestone 5 adds bounded dynamic
+strings/symbols, semantic AArch64 RELA relocations, deterministic import resolution,
+loader-time atomic relocation application, and `nso-dynamic-inspect`.
 
 No supported TOTK build is committed. The repository contains no game binaries,
 keys, firmware, SDKs, or extracted game assets. The committed TOTK manifest is an
 explicit `template` and contains no real hashes or Build IDs.
 
-Relocation application, symbol resolution, semantic IR, LLVM lowering, runtime,
-Horizon compatibility layer, renderer, and playable game are not implemented.
+Semantic IR, LLVM lowering, runtime, Horizon compatibility layer, renderer, and
+playable game are not implemented.
 
 ## Build and test
 
@@ -91,6 +93,10 @@ game assets.
   offsets, ELF64 dynamic metadata, bounded RELA/JMPREL parsing, and immutable
   module metadata aggregation;
 - deterministic human-readable `nso-inspect` output with materialization status.
+- bounded dynamic string and symbol parsing from validated hash-derived table bounds;
+- typed AArch64 RELA conversion, generic symbol resolution, explicit unresolved imports,
+  and transactional loader-authorized relocation writes;
+- deterministic `nso-dynamic-inspect` text and JSON reports.
 - Capstone-backed, SwitchRecomp-owned AArch64 instruction decoding with checked
   PC-relative targets, normalized operands, and explicit control-flow status;
 - bounded deterministic basic-block/CFG analysis with typed edges, direct call
@@ -101,7 +107,7 @@ The default materialization limits are 256 MiB per segment and 512 MiB for the
 combined `.text`, `.rodata`, `.data`, and BSS buffers. Library callers can pass
 smaller or larger limits explicitly; limits are checked before allocation.
 
-ZBIC decoding, relocations, IR,
+ZBIC decoding, REL tables, lazy PLT binding, symbol versioning, IR,
 LLVM, runtime/HLE, renderer, exact TOTK target metadata, and game execution
 remain unimplemented. `nso-inspect` accepts `--header-only` when a caller needs
 to inspect a ZBIC-marked header without claiming materialization succeeded.
@@ -114,6 +120,7 @@ to inspect a ZBIC-marked header without claiming materialization succeeded.
 - Milestone 2B — checked guest memory mappings and NSO guest loader: implemented.
 - Milestone 3 — MOD0 and dynamic metadata discovery: implemented.
 - Milestone 4 — AArch64 decoding and control-flow analysis: implemented.
+- Milestone 5 — Dynamic symbols, import resolution, and AArch64 RELA application: implemented.
 
 Materialization consumes a legally obtained, already prepared local NSO. The
 repository does not decrypt, extract, or distribute Nintendo content.

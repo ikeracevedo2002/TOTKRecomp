@@ -36,6 +36,19 @@ enum class ErrorCode
     AnalysisBlockLimitExceeded,
     AnalysisWorklistLimitExceeded,
     AnalysisScopeViolation,
+    InvalidRelocationEntrySize,
+    InvalidSymbolEntrySize,
+    RelocationTableOutOfBounds,
+    RelocationTargetNotWritableDuringLoad,
+    MisalignedRelocationTarget,
+    UnsupportedRelocationType,
+    InvalidSymbolIndex,
+    SymbolTableOutOfBounds,
+    StringTableOutOfBounds,
+    UnterminatedSymbolName,
+    UndefinedStrongSymbol,
+    DuplicateExternalSymbol,
+    UnsupportedRelFormat,
 };
 
 [[nodiscard]] std::string_view error_code_name(ErrorCode code) noexcept;

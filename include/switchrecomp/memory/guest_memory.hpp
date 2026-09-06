@@ -118,6 +118,14 @@ class GuestMemory
 
     [[nodiscard]] Result<void> write(GuestAddress address, std::span<const std::byte> source);
 
+    // Loader-time relocation writes deliberately bypass the final region write
+    // permission, but retain all address, overflow, mapping, and containment
+    // checks. Normal guest code must continue to use write().
+    [[nodiscard]] Result<void> validate_loader_write(GuestAddress address,
+                                                     GuestSize size) const;
+    [[nodiscard]] Result<void> loader_write(GuestAddress address,
+                                            std::span<const std::byte> source);
+
     [[nodiscard]] Result<GuestMemoryPermissions> permissions_at(GuestAddress address,
                                                                 GuestSize size = 1U) const;
 

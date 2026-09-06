@@ -61,6 +61,32 @@ std::string_view error_code_name(ErrorCode code) noexcept
         return "analysis_worklist_limit_exceeded";
     case ErrorCode::AnalysisScopeViolation:
         return "analysis_scope_violation";
+    case ErrorCode::InvalidRelocationEntrySize:
+        return "invalid_relocation_entry_size";
+    case ErrorCode::InvalidSymbolEntrySize:
+        return "invalid_symbol_entry_size";
+    case ErrorCode::RelocationTableOutOfBounds:
+        return "relocation_table_out_of_bounds";
+    case ErrorCode::RelocationTargetNotWritableDuringLoad:
+        return "relocation_target_not_writable_during_load";
+    case ErrorCode::MisalignedRelocationTarget:
+        return "misaligned_relocation_target";
+    case ErrorCode::UnsupportedRelocationType:
+        return "unsupported_relocation_type";
+    case ErrorCode::InvalidSymbolIndex:
+        return "invalid_symbol_index";
+    case ErrorCode::SymbolTableOutOfBounds:
+        return "symbol_table_out_of_bounds";
+    case ErrorCode::StringTableOutOfBounds:
+        return "string_table_out_of_bounds";
+    case ErrorCode::UnterminatedSymbolName:
+        return "unterminated_symbol_name";
+    case ErrorCode::UndefinedStrongSymbol:
+        return "undefined_strong_symbol";
+    case ErrorCode::DuplicateExternalSymbol:
+        return "duplicate_external_symbol";
+    case ErrorCode::UnsupportedRelFormat:
+        return "unsupported_rel_format";
     }
     return "unknown";
 }
