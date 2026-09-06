@@ -1,6 +1,6 @@
 # TotkRecomp Architecture and Implementation Plan
 
-> Status: Proposed architecture with Milestones 0, 1, 2A, 2B, and 3 implemented
+> Status: Proposed architecture with Milestones 0, 1, 2A, 2B, 3, and 4 implemented
 > Repository snapshot: 2026-09-05  
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
 > Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, MOD0/dynamic/RELA metadata discovery, synthetic tests, and the `nso-inspect` report are committed; no supported game build has been committed.
@@ -1678,11 +1678,21 @@ guest image without applying relocations. Synthetic fixtures cover malformed
 headers, signed offsets, bounded dynamic termination, unknown/duplicate tags,
 range validation, RELA decoding, and transactionality.
 
-### Milestone 4 — AArch64 decoding
+### Milestone 4 — AArch64 decoding and control-flow analysis
 
-**Goal:** Decode instructions and traverse control flow.
+**Implemented:** Decode executable guest bytes through the pinned Capstone
+backend behind a SwitchRecomp-owned AArch64 representation. The layer preserves
+guest addresses, opcodes, normalized operands/register identities, conditions,
+memory operands, PC-relative values, disassembly, and explicit decoder status.
+The CFG analyzer performs bounded intraprocedural traversal with deterministic
+basic blocks, typed edges, direct call candidates, unresolved indirect flow,
+checked target arithmetic, executable-memory validation, range limits, and
+block splitting.
 
-**Success:** Known synthetic AArch64 test binaries analyze without silent unknown control flow; unsupported instructions are reported.
+**Success:** Synthetic AArch64 fixtures cover representative scalar, memory,
+FP/SIMD, atomic, system, branch, trap, malformed, and CFG cases without
+silently treating unknown control flow as fallthrough. Semantic lifting,
+relocations, and execution remain separate milestones.
 
 ### Milestone 5 — Minimal lifting
 
@@ -1923,13 +1933,15 @@ These are the first practical engineering tasks. They intentionally stop before 
 - **Success:** Expected guest-visible pointers and instruction fields are present before execution.
 - **Dependencies:** Guest memory and relocation parser.
 
-### 10. Integrate an AArch64 decoder
+### 10. Integrate an AArch64 decoder — implemented in Milestone 4
 
 - **Goal:** Decode aligned instructions behind the internal decoder interface.
-- **Inputs:** LLVM MC or another reviewed candidate.
-- **Output:** Decoded instruction objects preserving address/opcode/disassembly.
-- **Success:** Coverage and unknown-instruction reports are deterministic.
-- **Dependencies:** Build foundation; dependency/license review.
+- **Inputs:** Executable `GuestMemory` bytes and synthetic raw opcodes.
+- **Output:** SwitchRecomp-owned decoded instructions preserving address,
+  opcode, normalized operands, PC-relative values, and explicit flow status.
+- **Backend:** Capstone v5.0.3, pinned and isolated behind the public wrapper.
+- **Success:** Representative decoder and CFG tests are deterministic; unknown
+  control flow is never silently treated as fallthrough.
 
 ### 11. Define canonical function metadata
 
@@ -1939,13 +1951,14 @@ These are the first practical engineering tasks. They intentionally stop before 
 - **Success:** Metadata can be reviewed, diffed, and rejected when hashes do not match.
 - **Dependencies:** NSO reports and decoder.
 
-### 12. Build the smallest CFG analyzer
+### 12. Build the smallest CFG analyzer — implemented in Milestone 4
 
 - **Goal:** Analyze synthetic functions seeded by known entry points and direct branches.
-- **Inputs:** AArch64 decoder and synthetic binaries.
-- **Output:** Basic blocks, edges, call targets, and unsupported-edge diagnostics.
-- **Success:** Known synthetic CFGs match expected metadata.
-- **Dependencies:** Decoder and metadata schema.
+- **Inputs:** AArch64 decoder and executable synthetic guest mappings.
+- **Output:** Basic blocks, typed edges, call candidates, unresolved indirect
+  flow, deterministic diagnostics, and bounded traversal results.
+- **Success:** Known synthetic CFGs match expected metadata and graph invariants.
+- **Dependencies:** Decoder and guest memory; function metadata remains future work.
 
 ### 13. Export analyst metadata
 

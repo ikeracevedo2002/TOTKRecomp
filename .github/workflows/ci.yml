@@ -25,6 +25,8 @@ jobs:
         run: |
           build/nso-inspect --help
           build/nso-inspect --version
+          build/aarch64-analyze --help
+          build/aarch64-analyze --version
 
   windows:
     name: Windows / MSVC
@@ -41,3 +43,5 @@ jobs:
         run: |
           build/Debug/nso-inspect.exe --help
           build/Debug/nso-inspect.exe --version
+          build/Debug/aarch64-analyze.exe --help
+          build/Debug/aarch64-analyze.exe --version
