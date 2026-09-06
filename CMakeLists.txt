@@ -184,6 +184,10 @@ add_library(switchrecomp-aarch64
     src/switchrecomp/aarch64/register.cpp
     src/switchrecomp/aarch64/instruction.cpp
     src/switchrecomp/aarch64/decoder.cpp
+    src/switchrecomp/aarch64/decoder_m9.cpp
+)
+set_source_files_properties(src/switchrecomp/aarch64/decoder.cpp PROPERTIES
+    COMPILE_DEFINITIONS "SWITCHRECOMP_LEGACY_DECODER_IMPL;decode=decode_legacy;fetch_and_decode=fetch_and_decode_legacy"
 )
 target_include_directories(switchrecomp-aarch64
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -216,7 +220,11 @@ add_library(switchrecomp-ir
     src/switchrecomp/ir/function.cpp
     src/switchrecomp/ir/builder.cpp
     src/switchrecomp/ir/verifier.cpp
+    src/switchrecomp/ir/verifier_m9.cpp
     src/switchrecomp/ir/printer.cpp
+)
+set_source_files_properties(src/switchrecomp/ir/verifier.cpp PROPERTIES
+    COMPILE_DEFINITIONS "SWITCHRECOMP_LEGACY_VERIFIER_IMPL;verify=verify_legacy"
 )
 target_include_directories(switchrecomp-ir
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -245,6 +253,10 @@ totkrecomp_enable_sanitizers(switchrecomp-runtime-core)
 
 add_library(switchrecomp-lifter
     src/switchrecomp/lifter/lifter.cpp
+    src/switchrecomp/lifter/lifter_m9.cpp
+)
+set_source_files_properties(src/switchrecomp/lifter/lifter.cpp PROPERTIES
+    COMPILE_DEFINITIONS "SWITCHRECOMP_LEGACY_LIFTER_IMPL;lift_function=lift_function_legacy;is_instruction_liftable=is_instruction_liftable_legacy"
 )
 target_include_directories(switchrecomp-lifter
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
