@@ -42,6 +42,14 @@ std::string_view opcode_name(Opcode opcode) noexcept
     case Opcode::GuestAddressAddValue: return "guest_address_add_value";
     case Opcode::GuestLoad: return "guest_load";
     case Opcode::GuestStore: return "guest_store";
+    case Opcode::AtomicLoad: return "atomic_load";
+    case Opcode::AtomicStore: return "atomic_store";
+    case Opcode::ExclusiveLoad: return "exclusive_load";
+    case Opcode::ExclusiveStore: return "exclusive_store";
+    case Opcode::ClearExclusive: return "clear_exclusive";
+    case Opcode::MemoryBarrier: return "memory_barrier";
+    case Opcode::ReadSystemRegister: return "read_system_register";
+    case Opcode::WriteSystemRegister: return "write_system_register";
     case Opcode::BitCast: return "bitcast";
     case Opcode::ReadVectorRegister: return "read_vector_register";
     case Opcode::WriteVectorRegister: return "write_vector_register";
@@ -115,6 +123,60 @@ std::string_view vector_arrangement_name(VectorArrangement arrangement) noexcept
     case VectorArrangement::S4: return "4s";
     case VectorArrangement::D1: return "1d";
     case VectorArrangement::D2: return "2d";
+    }
+    return "invalid";
+}
+
+std::string_view memory_order_name(MemoryOrder order) noexcept
+{
+    switch (order)
+    {
+    case MemoryOrder::Relaxed: return "relaxed";
+    case MemoryOrder::Acquire: return "acquire";
+    case MemoryOrder::Release: return "release";
+    case MemoryOrder::AcquireRelease: return "acq_rel";
+    case MemoryOrder::SequentiallyConsistent: return "seq_cst";
+    }
+    return "invalid";
+}
+
+std::string_view barrier_kind_name(BarrierKind kind) noexcept
+{
+    switch (kind)
+    {
+    case BarrierKind::Dmb: return "dmb";
+    case BarrierKind::Dsb: return "dsb";
+    case BarrierKind::Isb: return "isb";
+    }
+    return "invalid";
+}
+
+std::string_view barrier_option_name(BarrierOption option) noexcept
+{
+    switch (option)
+    {
+    case BarrierOption::Sy: return "sy";
+    case BarrierOption::St: return "st";
+    case BarrierOption::Ld: return "ld";
+    case BarrierOption::Ish: return "ish";
+    case BarrierOption::Ishst: return "ishst";
+    case BarrierOption::Ishld: return "ishld";
+    case BarrierOption::Nsh: return "nsh";
+    case BarrierOption::Nshst: return "nshst";
+    case BarrierOption::Nshld: return "nshld";
+    case BarrierOption::Osh: return "osh";
+    case BarrierOption::Oshst: return "oshst";
+    case BarrierOption::Oshld: return "oshld";
+    }
+    return "invalid";
+}
+
+std::string_view system_register_name(SystemRegister reg) noexcept
+{
+    switch (reg)
+    {
+    case SystemRegister::TpidrEl0: return "tpidr_el0";
+    case SystemRegister::TpidrroEl0: return "tpidrro_el0";
     }
     return "invalid";
 }
