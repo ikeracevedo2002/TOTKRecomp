@@ -291,7 +291,7 @@ target_link_libraries(switchrecomp-codegen
 )
 if(LLVM_FOUND)
     target_compile_definitions(switchrecomp-codegen PRIVATE SWITCHRECOMP_HAS_LLVM=1)
-    target_include_directories(switchrecomp-codegen PRIVATE ${LLVM_INCLUDE_DIRS})
+    target_include_directories(switchrecomp-codegen SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
     target_compile_definitions(switchrecomp-codegen PRIVATE ${LLVM_DEFINITIONS})
     target_link_libraries(switchrecomp-codegen PRIVATE ${SWITCHRECOMP_LLVM_LIBS})
 endif()
