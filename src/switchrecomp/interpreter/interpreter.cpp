@@ -44,30 +44,6 @@ namespace
             (std::uint64_t{1} << (type.bit_width() - 1U))) != 0U;
 }
 
-[[nodiscard]] bool condition_holds(ir::ConditionCode condition, bool n, bool z, bool c, bool v) noexcept
-{
-    switch (condition)
-    {
-    case ir::ConditionCode::Eq: return z;
-    case ir::ConditionCode::Ne: return !z;
-    case ir::ConditionCode::Cs: return c;
-    case ir::ConditionCode::Cc: return !c;
-    case ir::ConditionCode::Mi: return n;
-    case ir::ConditionCode::Pl: return !n;
-    case ir::ConditionCode::Vs: return v;
-    case ir::ConditionCode::Vc: return !v;
-    case ir::ConditionCode::Hi: return c && !z;
-    case ir::ConditionCode::Ls: return !c || z;
-    case ir::ConditionCode::Ge: return n == v;
-    case ir::ConditionCode::Lt: return n != v;
-    case ir::ConditionCode::Gt: return !z && n == v;
-    case ir::ConditionCode::Le: return z || n != v;
-    case ir::ConditionCode::Al: return true;
-    case ir::ConditionCode::Nv: return false;
-    }
-    return false;
-}
-
 [[nodiscard]] Result<std::uint64_t> get_value(const ir::Function& function,
                                               const std::vector<std::uint64_t>& values,
                                               ir::ValueId id)
@@ -185,6 +161,7 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
             }
             case ir::Opcode::Add:
             case ir::Opcode::Sub:
+            case ir::Opcode::Mul:
             case ir::Opcode::And:
             case ir::Opcode::Or:
             case ir::Opcode::Xor:
@@ -199,12 +176,28 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
                                        ? left.value() + right.value()
                                        : instruction.opcode == ir::Opcode::Sub
                                              ? left.value() - right.value()
-                                             : instruction.opcode == ir::Opcode::And
-                                                   ? left.value() & right.value()
-                                                   : instruction.opcode == ir::Opcode::Or
-                                                         ? left.value() | right.value()
-                                                         : left.value() ^ right.value();
+                                             : instruction.opcode == ir::Opcode::Mul
+                                                   ? left.value() * right.value()
+                                                   : instruction.opcode == ir::Opcode::And
+                                                         ? left.value() & right.value()
+                                                         : instruction.opcode == ir::Opcode::Or
+                                                               ? left.value() | right.value()
+                                                               : left.value() ^ right.value();
                 const auto stored = store_result(value);
+                if (!stored)
+                {
+                    return Result<runtime::ExecutionResult>::failure(stored.error());
+                }
+                break;
+            }
+            case ir::Opcode::Not:
+            {
+                const auto operand = read(instruction.operands[0]);
+                if (!operand)
+                {
+                    return Result<runtime::ExecutionResult>::failure(operand.error());
+                }
+                const auto stored = store_result(~operand.value());
                 if (!stored)
                 {
                     return Result<runtime::ExecutionResult>::failure(stored.error());
@@ -214,6 +207,7 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
             case ir::Opcode::ShiftLeft:
             case ir::Opcode::LogicalShiftRight:
             case ir::Opcode::ArithmeticShiftRight:
+            case ir::Opcode::RotateRight:
             {
                 const auto value = read(instruction.operands[0]);
                 const auto amount = read(instruction.operands[1]);
@@ -238,8 +232,13 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
                     if (instruction.opcode == ir::Opcode::ArithmeticShiftRight &&
                         signed_bit(value.value(), instruction.result_type) && shift != 0U)
                     {
-                        shifted |= ~mask_for(instruction.result_type) <<
+                        shifted |= std::numeric_limits<std::uint64_t>::max() <<
                                    (instruction.result_type.bit_width() - shift);
+                    }
+                    else if (instruction.opcode == ir::Opcode::RotateRight && shift != 0U)
+                    {
+                        shifted = (value.value() >> shift) |
+                                  (value.value() << (instruction.result_type.bit_width() - shift));
                     }
                 }
                 const auto stored = store_result(shifted);
@@ -366,8 +365,9 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
                 {
                     return Result<runtime::ExecutionResult>::failure(!n ? n.error() : !z ? z.error() : !c ? c.error() : v.error());
                 }
-                const auto value = condition_holds(instruction.condition, n.value() != 0U,
-                                                   z.value() != 0U, c.value() != 0U, v.value() != 0U);
+                const auto value = runtime::evaluate_condition(
+                    instruction.condition, n.value() != 0U, z.value() != 0U, c.value() != 0U,
+                    v.value() != 0U);
                 const auto stored = store_result(value ? 1U : 0U);
                 if (!stored)
                 {
@@ -383,6 +383,30 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
                     return Result<runtime::ExecutionResult>::failure(base.error());
                 }
                 const auto sum = checked_add_signed_u64(base.value(), instruction.immediate);
+                if (!sum)
+                {
+                    return Result<runtime::ExecutionResult>::failure(sum.error());
+                }
+                const auto stored = store_result(sum.value());
+                if (!stored)
+                {
+                    return Result<runtime::ExecutionResult>::failure(stored.error());
+                }
+                break;
+            }
+            case ir::Opcode::GuestAddressAddValue:
+            {
+                const auto base = read(instruction.operands[0]);
+                const auto offset = read(instruction.operands[1]);
+                if (!base || !offset)
+                {
+                    return Result<runtime::ExecutionResult>::failure(!base ? base.error()
+                                                                            : offset.error());
+                }
+                const auto sum = instruction.address_offset_signed
+                                     ? checked_add_signed_u64(base.value(),
+                                                              signed_value_from_u64(offset.value()))
+                                     : checked_add_u64(base.value(), offset.value());
                 if (!sum)
                 {
                     return Result<runtime::ExecutionResult>::failure(sum.error());
@@ -455,8 +479,33 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
             break;
         }
         case ir::TerminatorKind::Return:
+            if (terminator.target_value != ir::invalid_value)
+            {
+                const auto target = get_value(function, values, terminator.target_value);
+                if (!target)
+                {
+                    return Result<runtime::ExecutionResult>::failure(target.error());
+                }
+                if (target.value() != 0U)
+                {
+                    cpu.pc = target.value();
+                }
+            }
             result.final_guest_pc = cpu.pc;
             return Result<runtime::ExecutionResult>::success(result);
+        case ir::TerminatorKind::DirectCall:
+        case ir::TerminatorKind::IndirectBranch:
+        case ir::TerminatorKind::IndirectCall:
+        {
+            const auto target = get_value(function, values, terminator.target_value);
+            if (!target)
+            {
+                return Result<runtime::ExecutionResult>::failure(target.error());
+            }
+            cpu.pc = target.value();
+            result.final_guest_pc = cpu.pc;
+            return Result<runtime::ExecutionResult>::success(result);
+        }
         case ir::TerminatorKind::Trap:
             (void)runtime::switchrecomp_runtime_trap(&runtime, terminator.trap_reason.c_str());
             return runtime_failure(runtime);

@@ -65,4 +65,28 @@ void write_flag(CpuState& state, ir::Flag flag, bool value) noexcept
     }
 }
 
+bool evaluate_condition(ir::ConditionCode condition, bool n, bool z, bool c, bool v) noexcept
+{
+    switch (condition)
+    {
+    case ir::ConditionCode::Eq: return z;
+    case ir::ConditionCode::Ne: return !z;
+    case ir::ConditionCode::Cs: return c;
+    case ir::ConditionCode::Cc: return !c;
+    case ir::ConditionCode::Mi: return n;
+    case ir::ConditionCode::Pl: return !n;
+    case ir::ConditionCode::Vs: return v;
+    case ir::ConditionCode::Vc: return !v;
+    case ir::ConditionCode::Hi: return c && !z;
+    case ir::ConditionCode::Ls: return !c || z;
+    case ir::ConditionCode::Ge: return n == v;
+    case ir::ConditionCode::Lt: return n != v;
+    case ir::ConditionCode::Gt: return !z && n == v;
+    case ir::ConditionCode::Le: return z || n != v;
+    case ir::ConditionCode::Al: return true;
+    case ir::ConditionCode::Nv: return false;
+    }
+    return false;
+}
+
 } // namespace switchrecomp::runtime

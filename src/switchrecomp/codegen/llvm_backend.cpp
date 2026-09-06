@@ -226,6 +226,15 @@ class ModuleLowerer
         return module_->getOrInsertFunction("switchrecomp_runtime_guest_address_add", type);
     }
 
+    [[nodiscard]] FunctionCallee runtime_address_add_value()
+    {
+        auto* type = FunctionType::get(Type::getInt32Ty(context_),
+                                       {runtime_->getType(), Type::getInt64Ty(context_),
+                                        Type::getInt64Ty(context_), Type::getInt8Ty(context_),
+                                        PointerType::getUnqual(Type::getInt64Ty(context_))}, false);
+        return module_->getOrInsertFunction("switchrecomp_runtime_guest_address_add_value", type);
+    }
+
     [[nodiscard]] FunctionCallee runtime_trap()
     {
         auto* type = FunctionType::get(Type::getInt32Ty(context_),
@@ -301,12 +310,14 @@ class ModuleLowerer
         }
         case ir::Opcode::Add:
         case ir::Opcode::Sub:
+        case ir::Opcode::Mul:
         case ir::Opcode::And:
         case ir::Opcode::Or:
         case ir::Opcode::Xor:
         case ir::Opcode::ShiftLeft:
         case ir::Opcode::LogicalShiftRight:
         case ir::Opcode::ArithmeticShiftRight:
+        case ir::Opcode::RotateRight:
         {
             const auto left = require_value(instruction.operands[0]);
             const auto right = require_value(instruction.operands[1]);
@@ -319,15 +330,36 @@ class ModuleLowerer
             {
             case ir::Opcode::Add: lowered = builder_.CreateAdd(left.value(), right.value(), "add"); break;
             case ir::Opcode::Sub: lowered = builder_.CreateSub(left.value(), right.value(), "sub"); break;
+            case ir::Opcode::Mul: lowered = builder_.CreateMul(left.value(), right.value(), "mul"); break;
             case ir::Opcode::And: lowered = builder_.CreateAnd(left.value(), right.value(), "and"); break;
             case ir::Opcode::Or: lowered = builder_.CreateOr(left.value(), right.value(), "or"); break;
             case ir::Opcode::Xor: lowered = builder_.CreateXor(left.value(), right.value(), "xor"); break;
             case ir::Opcode::ShiftLeft: lowered = builder_.CreateShl(left.value(), right.value(), "shl"); break;
             case ir::Opcode::LogicalShiftRight: lowered = builder_.CreateLShr(left.value(), right.value(), "lshr"); break;
             case ir::Opcode::ArithmeticShiftRight: lowered = builder_.CreateAShr(left.value(), right.value(), "ashr"); break;
+            case ir::Opcode::RotateRight:
+            {
+                auto* width = ConstantInt::get(right.value()->getType(),
+                                               instruction.result_type.bit_width());
+                auto* inverse = builder_.CreateSub(width, right.value(), "ror.inverse");
+                auto* right_shift = builder_.CreateLShr(left.value(), right.value(), "ror.right");
+                auto* left_shift = builder_.CreateShl(left.value(), inverse, "ror.left");
+                lowered = builder_.CreateOr(right_shift, left_shift, "ror");
+                break;
+            }
             default: break;
             }
             assign(instruction, lowered);
+            return Result<void>::success();
+        }
+        case ir::Opcode::Not:
+        {
+            const auto source = require_value(instruction.operands[0]);
+            if (!source)
+            {
+                return Result<void>::failure(source.error());
+            }
+            assign(instruction, builder_.CreateNot(source.value(), "not"));
             return Result<void>::success();
         }
         case ir::Opcode::Truncate:
@@ -482,6 +514,28 @@ class ModuleLowerer
             assign(instruction, builder_.CreateLoad(Type::getInt64Ty(context_), output, "guest.address.value"));
             return Result<void>::success();
         }
+        case ir::Opcode::GuestAddressAddValue:
+        {
+            const auto base = require_value(instruction.operands[0]);
+            const auto offset = require_value(instruction.operands[1]);
+            if (!base || !offset)
+            {
+                return Result<void>::failure(!base ? base.error() : offset.error());
+            }
+            auto* output = builder_.CreateAlloca(Type::getInt64Ty(context_), nullptr, "guest.address");
+            auto* call = builder_.CreateCall(runtime_address_add_value(),
+                                             {runtime_, base.value(), offset.value(),
+                                              builder_.getInt8(instruction.address_offset_signed ? 1U : 0U),
+                                              output});
+            const auto checked = checked_runtime_call(call);
+            if (!checked)
+            {
+                return checked;
+            }
+            assign(instruction, builder_.CreateLoad(Type::getInt64Ty(context_), output,
+                                                     "guest.address.value"));
+            return Result<void>::success();
+        }
         case ir::Opcode::GuestLoad:
         {
             const auto address = require_value(instruction.operands[0]);
@@ -498,9 +552,9 @@ class ModuleLowerer
                 return checked;
             }
             Value* loaded = builder_.CreateLoad(Type::getInt64Ty(context_), output, "guest.load.value");
-            if (instruction.result_type == ir::i32_type())
+            if (instruction.result_type != ir::i64_type())
             {
-                loaded = builder_.CreateTrunc(loaded, Type::getInt32Ty(context_), "guest.load.w");
+                loaded = builder_.CreateTrunc(loaded, type(instruction.result_type), "guest.load.narrow");
             }
             assign(instruction, loaded);
             return Result<void>::success();
@@ -514,9 +568,9 @@ class ModuleLowerer
                 return Result<void>::failure(!address ? address.error() : stored_value.error());
             }
             auto* value = stored_value.value();
-            if (instruction.memory_size == 4U)
+            if (value->getType()->getIntegerBitWidth() != 64U)
             {
-                value = builder_.CreateZExt(value, Type::getInt64Ty(context_), "guest.store.w");
+                value = builder_.CreateZExt(value, Type::getInt64Ty(context_), "guest.store.narrow");
             }
             const auto checked = checked_runtime_call(builder_.CreateCall(
                 runtime_store(), {runtime_, address.value(), builder_.getInt8(instruction.memory_size), value}));
@@ -543,7 +597,34 @@ class ModuleLowerer
             builder_.CreateCondBr(condition.value(), blocks_[terminator.target], blocks_[terminator.false_target]);
             return Result<void>::success();
         }
+        case ir::TerminatorKind::DirectCall:
+        case ir::TerminatorKind::IndirectBranch:
+        case ir::TerminatorKind::IndirectCall:
+        {
+            const auto target = require_value(terminator.target_value);
+            if (!target)
+            {
+                return Result<void>::failure(target.error());
+            }
+            builder_.CreateStore(target.value(), builder_.CreateStructGEP(cpu_type_, cpu_, 2U, "cpu.pc"));
+            builder_.CreateRet(builder_.getInt32(0));
+            return Result<void>::success();
+        }
         case ir::TerminatorKind::Return:
+            if (terminator.target_value != ir::invalid_value)
+            {
+                const auto target = require_value(terminator.target_value);
+                if (!target)
+                {
+                    return Result<void>::failure(target.error());
+                }
+                auto* current_pc = builder_.CreateLoad(Type::getInt64Ty(context_),
+                                                        builder_.CreateStructGEP(cpu_type_, cpu_, 2U, "cpu.pc"),
+                                                        "cpu.pc.current");
+                auto* nonzero = builder_.CreateICmpNE(target.value(), builder_.getInt64(0), "ret.target.valid");
+                auto* selected = builder_.CreateSelect(nonzero, target.value(), current_pc, "ret.target");
+                builder_.CreateStore(selected, builder_.CreateStructGEP(cpu_type_, cpu_, 2U, "cpu.pc"));
+            }
             builder_.CreateRet(builder_.getInt32(0));
             return Result<void>::success();
         case ir::TerminatorKind::Trap:
@@ -673,6 +754,10 @@ Result<runtime::ExecutionResult> LlvmBackend::execute(const ir::Function& functi
         {(*jit)->mangleAndIntern("switchrecomp_runtime_guest_address_add"),
          llvm::orc::ExecutorSymbolDef(
              llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_guest_address_add),
+             llvm::JITSymbolFlags::Exported)},
+        {(*jit)->mangleAndIntern("switchrecomp_runtime_guest_address_add_value"),
+         llvm::orc::ExecutorSymbolDef(
+             llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_guest_address_add_value),
              llvm::JITSymbolFlags::Exported)},
         {(*jit)->mangleAndIntern("switchrecomp_runtime_trap"),
          llvm::orc::ExecutorSymbolDef(

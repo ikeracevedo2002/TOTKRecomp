@@ -142,6 +142,26 @@ extern "C" std::uint32_t switchrecomp_runtime_guest_address_add(RuntimeContext* 
     return 0U;
 }
 
+extern "C" std::uint32_t switchrecomp_runtime_guest_address_add_value(
+    RuntimeContext* runtime, std::uint64_t base, std::uint64_t offset,
+    std::uint8_t signed_offset, std::uint64_t* result) noexcept
+{
+    if (runtime == nullptr || result == nullptr)
+    {
+        return failure(runtime, make_error(ErrorCode::InvalidRuntimeContext,
+                                            "guest address addition requires context and result"));
+    }
+    const auto sum = signed_offset != 0U
+                         ? checked_add_signed_u64(base, signed_value_from_u64(offset))
+                         : checked_add_u64(base, offset);
+    if (!sum)
+    {
+        return failure(runtime, sum.error());
+    }
+    *result = sum.value();
+    return 0U;
+}
+
 extern "C" std::uint32_t switchrecomp_runtime_trap(RuntimeContext* runtime,
                                                      const char* reason) noexcept
 {

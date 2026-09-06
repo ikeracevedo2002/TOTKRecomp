@@ -34,6 +34,11 @@ std::uint32_t switchrecomp_runtime_guest_store(RuntimeContext* runtime, std::uin
 std::uint32_t switchrecomp_runtime_guest_address_add(RuntimeContext* runtime,
                                                      std::uint64_t base, std::int64_t offset,
                                                      std::uint64_t* result) noexcept;
+std::uint32_t switchrecomp_runtime_guest_address_add_value(RuntimeContext* runtime,
+                                                           std::uint64_t base,
+                                                           std::uint64_t offset,
+                                                           std::uint8_t signed_offset,
+                                                           std::uint64_t* result) noexcept;
 std::uint32_t switchrecomp_runtime_trap(RuntimeContext* runtime, const char* reason) noexcept;
 }
 

@@ -1,6 +1,8 @@
 #include "switchrecomp/analysis/cfg_analyzer.hpp"
+#include "switchrecomp/analysis/coverage.hpp"
 #include "switchrecomp/analysis/control_flow_graph.hpp"
 #include "switchrecomp/common/error.hpp"
+#include "switchrecomp/format/nso.hpp"
 #include "switchrecomp/memory/guest_memory.hpp"
 #include "switchrecomp/version.hpp"
 
@@ -40,6 +42,8 @@ void print_help(std::ostream& output)
               "  --entry ADDRESS       Guest entry address (default: base).\n"
               "  --max-instructions N  Maximum decoded instructions.\n"
               "  --max-blocks N        Maximum basic blocks.\n"
+              "  --coverage             Scan every instruction in the input range.\n"
+              "  --json                 Emit deterministic JSON coverage output.\n"
               "\nThe input is project-owned synthetic data or a locally supplied prepared image;\n"
               "this tool does not extract or decrypt game content.\n";
 }
@@ -117,6 +121,8 @@ int main(int argc, char** argv)
         std::uint64_t base = 0x1000U;
         std::optional<std::uint64_t> entry;
         switchrecomp::analysis::AnalysisOptions options;
+        bool coverage = false;
+        bool json = false;
         for (int index = 1; index < argc; ++index)
         {
             const std::string_view argument(argv[index]);
@@ -129,6 +135,17 @@ int main(int argc, char** argv)
             {
                 std::cout << switchrecomp::version << '\n';
                 return static_cast<int>(ExitCode::Success);
+            }
+            if (argument == "--coverage")
+            {
+                coverage = true;
+                continue;
+            }
+            if (argument == "--json")
+            {
+                json = true;
+                coverage = true;
+                continue;
             }
             const auto require_value = [&](std::string_view option_name) -> std::string_view {
                 if (index + 1 >= argc)
@@ -199,16 +216,65 @@ int main(int argc, char** argv)
             return static_cast<int>(ExitCode::GeneralError);
         }
         switchrecomp::memory::GuestMemory memory;
-        const auto mapped = memory.map(base, bytes,
-                                       switchrecomp::memory::GuestMemoryPermissions::Read |
-                                           switchrecomp::memory::GuestMemoryPermissions::Execute,
-                                       "synthetic-code", switchrecomp::memory::GuestRegionKind::Text);
+        switchrecomp::memory::GuestAddress analysis_base = base;
+        switchrecomp::memory::GuestSize analysis_size = static_cast<switchrecomp::memory::GuestSize>(bytes.size());
+        switchrecomp::Result<void> mapped = switchrecomp::Result<void>::success();
+        const bool is_nso = bytes.size() >= 4U && std::to_integer<unsigned char>(bytes[0]) == 'N' &&
+                            std::to_integer<unsigned char>(bytes[1]) == 'S' &&
+                            std::to_integer<unsigned char>(bytes[2]) == 'O' &&
+                            std::to_integer<unsigned char>(bytes[3]) == '0';
+        if (is_nso)
+        {
+            const auto header = switchrecomp::format::parse_nso_header(bytes);
+            if (!header)
+            {
+                print_error(header.error());
+                return static_cast<int>(ExitCode::AnalysisFailure);
+            }
+            const auto image = switchrecomp::format::materialize_nso(bytes, header.value());
+            if (!image)
+            {
+                print_error(image.error());
+                return static_cast<int>(ExitCode::AnalysisFailure);
+            }
+            analysis_base = image.value().text.memory_offset;
+            analysis_size = static_cast<switchrecomp::memory::GuestSize>(image.value().text.bytes.size());
+            mapped = memory.map(analysis_base, image.value().text.bytes,
+                                switchrecomp::memory::GuestMemoryPermissions::Read |
+                                    switchrecomp::memory::GuestMemoryPermissions::Execute,
+                                ".text", switchrecomp::memory::GuestRegionKind::Text);
+        }
+        else
+        {
+            mapped = memory.map(base, bytes,
+                                switchrecomp::memory::GuestMemoryPermissions::Read |
+                                    switchrecomp::memory::GuestMemoryPermissions::Execute,
+                                "synthetic-code", switchrecomp::memory::GuestRegionKind::Text);
+        }
         if (!mapped)
         {
             print_error(mapped.error());
             return static_cast<int>(ExitCode::AnalysisFailure);
         }
-        const auto actual_entry = entry.value_or(base);
+        if (coverage)
+        {
+            const auto report = switchrecomp::analysis::scan_coverage(
+                memory, analysis_base, analysis_size, std::filesystem::path(input_path).filename().string(),
+                switchrecomp::analysis::CoverageOptions{options.max_instructions});
+            if (!report)
+            {
+                print_error(report.error());
+                return static_cast<int>(ExitCode::AnalysisFailure);
+            }
+            std::cout << (json ? switchrecomp::analysis::render_coverage_json(report.value())
+                               : switchrecomp::analysis::render_coverage(report.value()));
+            if (json)
+            {
+                std::cout << '\n';
+            }
+            return static_cast<int>(ExitCode::Success);
+        }
+        const auto actual_entry = entry.value_or(analysis_base);
         const auto graph = switchrecomp::analysis::analyze_control_flow(memory, actual_entry, options);
         if (!graph)
         {

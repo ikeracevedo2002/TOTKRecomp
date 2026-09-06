@@ -30,4 +30,7 @@ void write_register(CpuState& state, const ir::GuestRegister& reg, std::uint64_t
 [[nodiscard]] bool read_flag(const CpuState& state, ir::Flag flag) noexcept;
 void write_flag(CpuState& state, ir::Flag flag, bool value) noexcept;
 
+[[nodiscard]] bool evaluate_condition(ir::ConditionCode condition, bool n, bool z, bool c,
+                                      bool v) noexcept;
+
 } // namespace switchrecomp::runtime

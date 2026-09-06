@@ -12,12 +12,15 @@ std::string_view opcode_name(Opcode opcode) noexcept
     case Opcode::SetPc: return "set_pc";
     case Opcode::Add: return "add";
     case Opcode::Sub: return "sub";
+    case Opcode::Mul: return "mul";
     case Opcode::And: return "and";
     case Opcode::Or: return "or";
     case Opcode::Xor: return "xor";
+    case Opcode::Not: return "not";
     case Opcode::ShiftLeft: return "shift_left";
     case Opcode::LogicalShiftRight: return "logical_shift_right";
     case Opcode::ArithmeticShiftRight: return "arithmetic_shift_right";
+    case Opcode::RotateRight: return "rotate_right";
     case Opcode::Truncate: return "truncate";
     case Opcode::ZeroExtend: return "zero_extend";
     case Opcode::SignExtend: return "sign_extend";
@@ -36,6 +39,7 @@ std::string_view opcode_name(Opcode opcode) noexcept
     case Opcode::ReadFlag: return "read_flag";
     case Opcode::WriteFlag: return "write_flag";
     case Opcode::GuestAddressAdd: return "guest_address_add";
+    case Opcode::GuestAddressAddValue: return "guest_address_add_value";
     case Opcode::GuestLoad: return "guest_load";
     case Opcode::GuestStore: return "guest_store";
     }

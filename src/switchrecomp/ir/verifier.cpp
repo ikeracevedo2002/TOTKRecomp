@@ -222,21 +222,44 @@ Result<void> verify(const Function& function)
                 break;
             case Opcode::Add:
             case Opcode::Sub:
+            case Opcode::Mul:
             case Opcode::And:
             case Opcode::Or:
             case Opcode::Xor:
+            case Opcode::Not:
             case Opcode::ShiftLeft:
             case Opcode::LogicalShiftRight:
             case Opcode::ArithmeticShiftRight:
+            case Opcode::RotateRight:
             {
-                const auto pair = require_same_integer_pair();
-                if (!pair)
+                if (instruction.opcode == Opcode::Not)
                 {
-                    checked = invalid(pair.error().message);
+                    checked = require_arity(instruction, 1U);
+                    if (checked)
+                    {
+                        const auto operand = operand_type(function, instruction.operands[0], "not");
+                        if (!operand || !valid_integer_type(operand.value()) ||
+                            operand.value() != instruction.result_type)
+                        {
+                            checked = invalid("not requires one operand matching its result type");
+                        }
+                    }
                 }
                 else
                 {
-                    checked = require_result(pair.value());
+                    const auto pair = require_same_integer_pair();
+                    if (!pair)
+                    {
+                        checked = invalid(pair.error().message);
+                    }
+                    else if (instruction.opcode == Opcode::RotateRight && pair.value().bit_width() == 1U)
+                    {
+                        checked = invalid("rotate_right requires an integer width greater than one");
+                    }
+                    else
+                    {
+                        checked = require_result(pair.value());
+                    }
                 }
                 break;
             }
@@ -384,14 +407,37 @@ Result<void> verify(const Function& function)
                     }
                 }
                 break;
+            case Opcode::GuestAddressAddValue:
+                checked = require_arity(instruction, 2U);
+                if (checked)
+                {
+                    const auto base = operand_type(function, instruction.operands[0], "guest address");
+                    const auto offset = operand_type(function, instruction.operands[1], "guest address");
+                    if (!base || !offset || base.value() != i64_type() || offset.value() != i64_type())
+                    {
+                        checked = invalid("guest address value addition requires two i64 operands");
+                    }
+                    else
+                    {
+                        checked = require_result(i64_type());
+                    }
+                }
+                break;
             case Opcode::GuestLoad:
                 checked = require_arity(instruction, 1U);
                 if (checked)
                 {
                     const auto type = operand_type(function, instruction.operands[0], "guest load");
-                    const bool size_ok = instruction.memory_size == 4U || instruction.memory_size == 8U;
+                    const bool size_ok = instruction.memory_size == 1U || instruction.memory_size == 2U ||
+                                         instruction.memory_size == 4U || instruction.memory_size == 8U;
+                    const auto expected = instruction.memory_size == 1U
+                                              ? i8_type()
+                                              : instruction.memory_size == 2U
+                                                    ? i16_type()
+                                                    : instruction.memory_size == 4U ? i32_type()
+                                                                                    : i64_type();
                     if (!type || type.value() != i64_type() || !size_ok ||
-                        instruction.result_type != (instruction.memory_size == 4U ? i32_type() : i64_type()))
+                        instruction.result_type != expected)
                     {
                         checked = invalid("guest_load has invalid address, size, or result type");
                     }
@@ -403,9 +449,12 @@ Result<void> verify(const Function& function)
                 {
                     const auto address = operand_type(function, instruction.operands[0], "guest store");
                     const auto value = operand_type(function, instruction.operands[1], "guest store");
-                    const bool size_ok = instruction.memory_size == 4U || instruction.memory_size == 8U;
+                    const bool size_ok = instruction.memory_size == 1U || instruction.memory_size == 2U ||
+                                         instruction.memory_size == 4U || instruction.memory_size == 8U;
                     if (!address || !value || address.value() != i64_type() || !size_ok ||
-                        value.value() != (instruction.memory_size == 4U ? i32_type() : i64_type()))
+                        value.value() != (instruction.memory_size == 1U ? i8_type()
+                                           : instruction.memory_size == 2U ? i16_type()
+                                           : instruction.memory_size == 4U ? i32_type() : i64_type()))
                     {
                         checked = invalid("guest_store has invalid address, size, or value type");
                     }
@@ -433,7 +482,8 @@ Result<void> verify(const Function& function)
         {
         case TerminatorKind::Branch:
             if (!valid_target(terminator.target) || terminator.false_target != invalid_block ||
-                terminator.condition != invalid_value || !terminator.trap_reason.empty())
+                terminator.condition != invalid_value || terminator.target_value != invalid_value ||
+                !terminator.trap_reason.empty())
             {
                 return invalid("branch terminator has an invalid target or carries extra data");
             }
@@ -442,22 +492,38 @@ Result<void> verify(const Function& function)
         {
             const auto type = function.value(terminator.condition);
             if (type == nullptr || type->type != i1_type() || !valid_target(terminator.target) ||
-                !valid_target(terminator.false_target) || !terminator.trap_reason.empty())
+                !valid_target(terminator.false_target) || terminator.target_value != invalid_value ||
+                !terminator.trap_reason.empty())
             {
                 return invalid("conditional branch has an invalid condition or target");
             }
             break;
         }
+        case TerminatorKind::DirectCall:
+        case TerminatorKind::IndirectBranch:
+        case TerminatorKind::IndirectCall:
+            if (terminator.target_value == invalid_value || function.value(terminator.target_value) == nullptr ||
+                function.value(terminator.target_value)->type != i64_type() ||
+                terminator.target != invalid_block || terminator.false_target != invalid_block ||
+                terminator.condition != invalid_value || !terminator.trap_reason.empty())
+            {
+                return invalid("call/indirect terminator has an invalid target value or carries extra data");
+            }
+            break;
         case TerminatorKind::Return:
             if (terminator.target != invalid_block || terminator.false_target != invalid_block ||
-                terminator.condition != invalid_value)
+                terminator.condition != invalid_value ||
+                (terminator.target_value != invalid_value &&
+                 (function.value(terminator.target_value) == nullptr ||
+                  function.value(terminator.target_value)->type != i64_type())))
             {
                 return invalid("return terminator carries branch data");
             }
             break;
         case TerminatorKind::Trap:
             if (terminator.target != invalid_block || terminator.false_target != invalid_block ||
-                terminator.condition != invalid_value || terminator.trap_reason.empty())
+                terminator.condition != invalid_value || terminator.target_value != invalid_value ||
+                terminator.trap_reason.empty())
             {
                 return invalid("trap terminator has an invalid payload or no diagnostic reason");
             }

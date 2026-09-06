@@ -7,7 +7,7 @@ TOTK-specific target metadata.
 
 ## Current status
 
-Milestones 0, 1, 2A, 2B, 3, 4, 5, and 6 are implemented: C++20/CMake build targets, common
+Milestones 0, 1, 2A, 2B, 3, 4, 5, 6, and 7 are implemented: C++20/CMake build targets, common
 bounds-checked binary utilities, SHA-256 validation, logging, versioned
 target-manifest validation, strict fixed-size NSO0 parsing, bounded section
 materialization, a checked host-backed guest memory map, MOD0/dynamic/RELA
@@ -17,6 +17,9 @@ strings/symbols, semantic AArch64 RELA relocations, deterministic import resolut
 loader-time atomic relocation application, and `nso-dynamic-inspect`. Milestone 6 adds
 an LLVM-independent Semantic IR, AArch64 lifting for a documented scalar subset, a
 reference interpreter, and an optional LLVM lowering/JIT backend for synthetic functions.
+Milestone 7 expands integer, flag, memory, bitfield, conditional-select, and branch
+semantics, adds deterministic synthetic coverage fixtures, and provides the
+`aarch64-analyze --coverage` report path.
 
 No supported TOTK build is committed. The repository contains no game binaries,
 keys, firmware, SDKs, or extracted game assets. The committed TOTK manifest is an
@@ -61,6 +64,7 @@ Inspect and materialize an NSO0 input:
 ./build/aarch64-analyze --help
 ./build/aarch64-analyze --version
 ./build/aarch64-analyze --base 0x1000 --entry 0x1000 path/to/raw-aarch64-code.bin
+./build/aarch64-analyze --coverage --json path/to/module.nso
 ```
 
 On a multi-config generator, use `build/Debug/nso-inspect`.
@@ -70,7 +74,8 @@ On a multi-config generator, use `build/Debug/nso-inspect`.
 - [Architecture RFC](docs/ARCHITECTURE.md)
 - [Milestone 3 metadata design](docs/MILESTONE_3.md)
 - [Milestone 4 AArch64 analysis design](docs/MILESTONE_4.md)
-- [Semantic IR and minimal lifting](docs/SEMANTIC_IR.md)
+- [Semantic IR and expanded AArch64 lifting](docs/SEMANTIC_IR.md)
+- [AArch64 support matrix and coverage workflow](docs/AARCH64_SUPPORT.md)
 - [Build notes](docs/BUILD.md)
 - [Dependency policy](docs/DEPENDENCIES.md)
 - [Target manifests and local configuration](docs/TARGETS.md)
@@ -106,6 +111,10 @@ game assets.
 - bounded deterministic basic-block/CFG analysis with typed edges, direct call
   candidates, unresolved indirect-flow diagnostics, executable-memory checks,
   and block splitting.
+- expanded AArch64 integer, NZCV, conditional-select, bitfield, scalar-memory,
+  pair-memory, and test-branch semantics through the project-owned Semantic IR;
+- reference interpreter execution and optional LLVM lowering share the same
+  typed IR primitives, with deterministic synthetic coverage reports.
 
 The default materialization limits are 256 MiB per segment and 512 MiB for the
 combined `.text`, `.rodata`, `.data`, and BSS buffers. Library callers can pass
@@ -128,6 +137,7 @@ to inspect a ZBIC-marked header without claiming materialization succeeded.
 - Milestone 4 — AArch64 decoding and control-flow analysis: implemented.
 - Milestone 5 — Dynamic symbols, import resolution, and AArch64 RELA application: implemented.
 - Milestone 6 — Semantic IR and minimal AArch64 lifting: implemented.
+- Milestone 7 — Expanded AArch64 semantics and real-code coverage tooling: implemented.
 
 Materialization consumes a legally obtained, already prepared local NSO. The
 repository does not decrypt, extract, or distribute Nintendo content.

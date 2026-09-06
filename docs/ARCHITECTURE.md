@@ -1,9 +1,9 @@
 # TotkRecomp Architecture and Implementation Plan
 
-> Status: Proposed architecture with Milestones 0–6 implemented
+> Status: Proposed architecture with Milestones 0–7 implemented
 > Repository snapshot: 2026-09-06
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
-> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, MOD0/dynamic/RELA metadata discovery, dynamic symbol/relocation application, Semantic IR, synthetic tests, and deterministic inspection reports are committed; no supported game build has been committed.
+> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, MOD0/dynamic/RELA metadata discovery, dynamic symbol/relocation application, expanded AArch64 Semantic IR and lifting, synthetic tests, and deterministic inspection/coverage reports are committed; no supported game build has been committed.
 
 This document is the primary engineering RFC for TotkRecomp. It describes the intended architecture, the evidence behind the design, the work required to validate it, and the boundaries of what is currently known.
 
@@ -16,13 +16,15 @@ It is deliberately conservative. A proposed component is not evidence that the c
 The repository contains the Milestone 0 bootstrap, Milestone 1 strict NSO0
 header parser, Milestone 2A image materializer, Milestone 2B guest loader,
 Milestone 3 MOD0/dynamic metadata parser, Milestone 4 decoder/CFG, Milestone 5
-dynamic linking, and Milestone 6 Semantic IR/lifting:
+dynamic linking, Milestone 6 Semantic IR/lifting, and Milestone 7 expanded
+AArch64 semantics and coverage:
 a C++20 source tree, CMake build, common safety utilities, manifest validation,
 tests, CI, strict NSO0 inspection, safe NSO image
 materialization, integrity verification, a checked guest-memory loader, and a
 deterministic `nso-inspect` report, an LLVM-independent typed Semantic IR, a
 verifier, a reference interpreter, and an optional LLVM lowering/JIT backend for
-synthetic standalone functions. There is still no game-specific runtime,
+synthetic standalone functions, normalized scalar memory/control-flow semantics,
+and a local whole-range coverage scanner. There is still no game-specific runtime,
 metadata for a supported game version, renderer, or supported game build to
 preserve.
 
@@ -387,9 +389,9 @@ not partially modify the image. REL, lazy binding, symbol versioning,
 multi-module link order, and Horizon resolution remain future layers. See
 [`RELOCATIONS.md`](RELOCATIONS.md).
 
-### 7.5 Semantic IR and minimal lifting — Milestone 6
+### 7.5 Semantic IR and expanded AArch64 lifting — Milestones 6–7
 
-Milestone 6 introduces the first executable recompilation path without making
+Milestones 6 and 7 provide the executable recompilation path without making
 LLVM the architectural contract:
 
 ```
@@ -402,11 +404,13 @@ The IR is typed, deterministic, source-mapped, explicitly terminated, and
 independent of LLVM at its public interface. `runtime::CpuState` models X0–X30,
 SP, PC, and NZCV with correct W/X and XZR/WZR semantics. Guest loads/stores go
 through checked `GuestMemory` helpers and never reinterpret a guest address as
-a host pointer. The lifter supports the documented initial scalar subset and
-rejects unsupported operand forms, calls, FP/SIMD, atomics, and system
-instructions explicitly. The interpreter and optional LLVM backend execute
-synthetic standalone functions through the same ABI; this does not execute
-TOTK.
+a host pointer. The lifter supports documented integer, NZCV, bitfield,
+conditional-select, scalar-memory, pair-memory, PC-relative, and internal-
+branch forms. It rejects unsupported operand forms, divide instructions,
+FP/SIMD, atomics, and system instructions explicitly. The interpreter and
+optional LLVM backend execute synthetic standalone functions through the same
+ABI, and `aarch64-analyze` provides deterministic whole-range coverage reports;
+this does not execute TOTK.
 
 ### 7.6 Multiple modules
 
@@ -1644,7 +1648,7 @@ Rules:
 | [RecompOne](https://github.com/BlackLabelHQ/RecompOne) | PS1 MIPS | C# | Recompiler and runtime are separate .NET projects | A runtime can replace console services without vendor components |
 | [SymphonyRecomp](https://github.com/BlackLabelHQ/SymphonyRecomp) | PS1 MIPS | RecompOne-based | Project-specific wrapper/config/patch workflow | Recompilation, decompilation, and patching are distinct activities |
 | [skate3recomp](https://github.com/mchughalex/skate3recomp) | Xbox 360 PowerPC | Recompiled code plus extensive native code | Build manifests, title-update metadata, native D3D12/Vulkan rendering | Native renderer work can dominate game-specific engineering |
-| TotkRecomp | AArch64 | Semantic IR lowered to optional LLVM backend (Milestone 6) | SwitchRecomp plus on-demand Horizon/runtime services (future) | Prefer a verified high-level boundary, Vulkan first |
+| TotkRecomp | AArch64 | Expanded Semantic IR lowered to optional LLVM backend (Milestone 7) | SwitchRecomp plus on-demand Horizon/runtime services (future) | Prefer a verified high-level boundary, Vulkan first |
 
 This table records architectural patterns observed in public repository documentation and layouts. It does not claim that their internal implementations are portable to AArch64 or legally reusable.
 
@@ -1767,11 +1771,15 @@ structured verifier, explicit CPU state, initial scalar AArch64 lifter,
 reference interpreter, checked guest-memory runtime boundary, and optional LLVM
 lowering/JIT execution for synthetic standalone functions.
 
-### Milestone 7 — Differential instruction suite
+### Milestone 7 — Expanded AArch64 semantics and coverage
 
-**Goal:** Validate integer, memory, flag, branch, and address-formation families.
+**Goal:** Expand integer, memory, flag, branch, address-formation, and
+conditional-select families, then measure normalized opcode coverage over a
+locally supplied executable range.
 
-**Success:** The tested subset passes state, memory, and exception comparisons across generated cases.
+**Success:** The tested subset passes deterministic state and memory fixtures;
+the interpreter and optional LLVM backend lower the same typed IR; coverage
+reports are deterministic and never include private input paths or game data.
 
 ### Milestone 8 — Function calls
 
@@ -2042,11 +2050,11 @@ These are the first practical engineering tasks. They intentionally stop before 
 - **Success:** Interpreter and native execution match the reference harness.
 - **Dependencies:** Decoder, IR, and runtime context.
 
-### 15. Expand only under differential coverage — next implementation phase
+### 15. Expand only under differential coverage — Milestone 7 implemented
 
-- **Goal:** Add loads/stores, branches, flags, calls, then FP/SIMD/atomics in gated groups.
+- **Goal:** Add the next gated groups—function-map calls, then FP/SIMD/atomics—only after differential coverage is available.
 - **Inputs:** Differential tests and failure corpus.
-- **Output:** Increasingly capable semantic IR/code generator.
+- **Output:** Increasingly capable semantic IR/code generator and versioned coverage corpus.
 - **Success:** Each group passes tests before it is enabled for larger analysis.
 - **Dependencies:** All prior test infrastructure.
 

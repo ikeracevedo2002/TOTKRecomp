@@ -1,7 +1,8 @@
-# Semantic IR and minimal AArch64 lifting
+# Semantic IR and expanded AArch64 lifting
 
-Milestone 6 adds the first executable recompilation path for synthetic,
-standalone AArch64 functions:
+Milestones 6 and 7 provide an executable recompilation path for synthetic,
+standalone AArch64 functions, with expanded integer, memory, and control-flow
+semantics:
 
 ```text
 AArch64 bytes → decoder → CFG → Semantic IR → verifier
@@ -21,7 +22,8 @@ accesses, source locations, and unsupported instructions explicit. LLVM is an
 optional backend and is not exposed by `switchrecomp-ir`; the interpreter can
 therefore validate semantics without LLVM.
 
-The initial IR is intentionally small. It has integer types `i1`, `i8`, `i16`,
+The IR now includes orthogonal integer, bitwise, rotate, extension, flag,
+selection, checked-address and guest-memory primitives. It has integer types `i1`, `i8`, `i16`,
 `i32`, `i64`, stable `ValueId`/`BlockId` identities, typed instructions, explicit
 basic-block terminators, and deterministic textual printing. It does not yet
 perform SSA optimization, constant folding, register allocation, or inlining.
@@ -64,36 +66,33 @@ instructions the lifter emits the result, N/Z calculations, and dedicated
 carry/overflow primitives. The same formulas are lowered independently by the
 interpreter and LLVM backend and are covered by boundary tests.
 
-## Initial instruction coverage
+## Milestone 7 instruction coverage
 
 Only the documented forms are supported. Other forms fail explicitly with an
 unsupported-instruction diagnostic containing the guest PC, opcode, and
 disassembly.
 
-| Instruction | Forms supported | Flags | Memory | Status |
+| Instruction family | Forms supported | Flags | Memory | Status |
 | --- | --- | --- | --- | --- |
 | NOP | scalar no-operand | no | no | supported |
-| MOV | W/X register or immediate alias | no | no | supported for documented forms |
-| MOVZ | W/X, imm16, LSL 0/16/32/48 as valid for width | no | no | supported |
-| MOVK | W/X, imm16, LSL 0/16/32/48 as valid for width | no | no | supported |
-| ADD/SUB | W/X register or immediate | no | no | supported for documented forms |
-| ADDS/SUBS | W/X register or immediate | NZCV | no | supported |
-| CMP | register/immediate subtraction form | NZCV | no | supported |
-| AND/ORR/EOR | W/X register or immediate | no | no | supported for documented forms |
-| ADR | X destination, validated decoder PC-relative value | no | no | supported |
-| ADRP | X destination, page-relative decoder value | no | no | supported |
-| LDR/STR | W/X, base X/SP plus signed displacement, no writeback | no | read/write | partial |
-| LDUR/STUR | W/X, base X/SP plus signed displacement, no writeback | no | read/write | partial |
-| B | internal direct CFG target | no | no | supported |
-| B.cond | all normal condition codes, internal target | no | no | supported |
-| CBZ/CBNZ | W/X register, internal target | no | no | supported |
-| RET | standalone function termination | no | no | supported |
-| BL/BLR/BR | — | — | — | future / explicit rejection |
+| MOV/MVN/MOVZ/MOVK/MOVN | W/X aliases, move-wide lanes valid for width | no | no | supported |
+| ADD/SUB/ADDS/SUBS | W/X immediate, shifted, and common extended-register forms | NZCV for S forms | no | supported |
+| CMP/CMN/NEG/NEGS | register/immediate arithmetic forms | NZCV | no | supported |
+| CCMP/CCMN | — | fallback NZCV | no | explicitly deferred |
+| AND/ANDS/ORR/ORN/EOR/EON/BIC/BICS/TST | W/X logical forms and aliases | NZ for S/test forms; C/V cleared | no | supported |
+| CSEL/CSINC/CSINV/CSNEG aliases | CSET/CSETM/CINC/CINV/CNEG included | no | no | supported |
+| LSL/LSR/ASR/ROR and UBFM/SBFM/BFM aliases | immediate shift and common bitfield aliases | no | no | supported |
+| MUL/MADD/MSUB/MNEG | modulo-width integer multiply and accumulate | no | no | supported |
+| ADR/ADRP | validated guest-PC and page-relative values | no | no | supported |
+| LDR/STR scalar | byte/half/word/doubleword; sign extension; base, offset, and writeback forms | no | read/write | supported forms |
+| LDP/STP | scalar pairs with offset, pre-index, and post-index forms | no | read/write | supported forms |
+| B/B.cond/CBZ/CBNZ/TBZ/TBNZ | internal CFG targets and all normal conditions | reads NZCV where applicable | no | supported |
+| BL/BLR/BR/RET | LR write and explicit PC handoff; no general dispatcher yet | no | no | partial |
 | FP/SIMD, atomics, system instructions | — | — | — | explicit rejection |
 
-Loads and stores currently reject literal, register-offset, pre-index, and
-post-index forms. This is deliberate: a smaller correct subset is preferable to
-silently mis-lifting an addressing mode.
+Literal loads remain supported only when their validated guest target is mapped.
+Indirect calls and branches return through the explicit guest `CpuState::pc`
+handoff; a full function-pointer dispatcher is deferred.
 
 ## LLVM backend
 
@@ -124,9 +123,12 @@ cross the generated-function boundary.
 Fixtures use recorded 32-bit AArch64 words and deterministic expected state.
 The differential tests compare CPU registers, SP, NZCV, guest memory, and
 execution status between the interpreter and LLVM native backend when LLVM is
-enabled. The next milestone is **Milestone 7 — Differential Instruction Suite**.
+enabled. Milestone 7 adds deterministic instruction fixtures and a whole-range
+coverage scanner. The scanner is an instruction-family baseline: operand-form
+validation still happens during lifting and unsupported forms remain structured
+errors.
 
-Explicitly deferred are BL/BLR/BR dispatch and function maps, FP/SIMD, exclusive
+Explicitly deferred are BL/BLR/BR function-map dispatch, FP/SIMD, exclusive
 atomics and memory ordering, system-call/Horizon behavior, whole-module
 execution, renderer integration, XCI/NSP/NCA extraction, and all TOTK-specific
 metadata or patches.

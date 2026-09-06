@@ -111,6 +111,18 @@ std::string print(const Function& function)
             output << ", block_" << block.terminator.target << ", block_"
                    << block.terminator.false_target;
             break;
+        case TerminatorKind::DirectCall:
+            output << "direct_call ";
+            print_value(output, block.terminator.target_value);
+            break;
+        case TerminatorKind::IndirectBranch:
+            output << "indirect_branch ";
+            print_value(output, block.terminator.target_value);
+            break;
+        case TerminatorKind::IndirectCall:
+            output << "indirect_call ";
+            print_value(output, block.terminator.target_value);
+            break;
         case TerminatorKind::Return:
             output << "return";
             break;

@@ -26,12 +26,16 @@ struct Instruction
     std::uint64_t constant = 0U;
     std::uint8_t memory_size = 0U;
     SourceLocation source;
+    bool address_offset_signed = false;
 };
 
 enum class TerminatorKind : std::uint8_t
 {
     Branch,
     ConditionalBranch,
+    DirectCall,
+    IndirectBranch,
+    IndirectCall,
     Return,
     Trap,
 };
@@ -44,6 +48,7 @@ struct Terminator
     BlockId false_target = invalid_block;
     SourceLocation source;
     std::string trap_reason;
+    ValueId target_value = invalid_value;
 };
 
 } // namespace switchrecomp::ir

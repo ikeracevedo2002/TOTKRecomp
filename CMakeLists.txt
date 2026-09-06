@@ -198,6 +198,7 @@ totkrecomp_enable_sanitizers(switchrecomp-aarch64)
 add_library(switchrecomp-analysis
     src/switchrecomp/analysis/control_flow_graph.cpp
     src/switchrecomp/analysis/cfg_analyzer.cpp
+    src/switchrecomp/analysis/coverage.cpp
 )
 target_include_directories(switchrecomp-analysis
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -338,6 +339,7 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/relocation_symbol_tests.cpp
         tests/semantic_ir_tests.cpp
         tests/lifter_interpreter_tests.cpp
+        tests/milestone7_semantics_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE

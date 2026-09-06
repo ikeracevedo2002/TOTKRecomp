@@ -3,6 +3,7 @@
 #include "switchrecomp/analysis/control_flow_graph.hpp"
 #include "switchrecomp/common/result.hpp"
 #include "switchrecomp/ir/function.hpp"
+#include "switchrecomp/aarch64/instruction.hpp"
 
 #include <cstddef>
 
@@ -21,5 +22,9 @@ struct LiftOptions
 
 [[nodiscard]] Result<ir::Function> lift_function(
     const analysis::ControlFlowGraph& cfg, const LiftOptions& options = {});
+
+// This is the decoder/lifter support matrix used by local coverage tooling.
+// Operand-form validation still happens in lift_function and returns a structured error.
+[[nodiscard]] bool is_instruction_liftable(aarch64::InstructionId id) noexcept;
 
 } // namespace switchrecomp::lifter
