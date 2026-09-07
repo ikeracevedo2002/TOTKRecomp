@@ -174,7 +174,8 @@ using json = nlohmann::json;
                 {"sha256", identity.input_sha256},
                 {"guest_base", hex_address(identity.guest_base)},
                 {"guest_base_verified", identity.guest_base_verified},
-                {"guest_base_source", "analysis_selected"},
+                {"guest_base_source", module_base_provenance_name(
+                                           identity.guest_base_provenance)},
                 {"executable_ranges", std::move(ranges)},
                 {"translator_version", identity.translator_version},
                 {"metadata_schema_version", identity.metadata_schema_version},

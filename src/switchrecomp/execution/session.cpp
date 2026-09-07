@@ -223,6 +223,7 @@ using json = nlohmann::json;
                                           ? json(hex_address(observation.dynamic_pltgot_slot_delta.value()))
                                           : json(nullptr)},
         {"provenance", json{
+                           {"consumer_module", import.consumer_module},
                            {"relocation_target", hex_address(import.relocation_target)},
                            {"relocation_index", import.relocation_index},
                            {"relocation_offset", hex_address(import.relocation.offset)},
@@ -587,6 +588,7 @@ const char* execution_stop_reason_name(ExecutionStopReason reason) noexcept
     case ExecutionStopReason::IrOperationLimitExceeded: return "ir_operation_limit_exceeded";
     case ExecutionStopReason::EventLimitExceeded: return "event_limit_exceeded";
     case ExecutionStopReason::GuestBlockLimitExceeded: return "guest_block_limit_exceeded";
+    case ExecutionStopReason::InvalidCrossModuleTarget: return "invalid_cross_module_target";
     }
     return "unknown";
 }
@@ -657,7 +659,45 @@ ImportBoundaryIndex::ImportBoundaryIndex(
                          ImportBoundary{unresolved->relocation.target_address,
                                          unresolved->relocation_index,
                                          unresolved->relocation,
-                                         unresolved->symbol});
+                                         unresolved->symbol,
+                                         {}});
+    }
+}
+
+ImportBoundaryIndex::ImportBoundaryIndex(const analysis::ProcessImage& process_image)
+{
+    struct Item
+    {
+        const loader::UnresolvedRelocation* relocation = nullptr;
+        std::string module;
+    };
+    std::vector<Item> ordered;
+    for (const auto& module : process_image.modules())
+    {
+        for (const auto& relocation : module.unresolved_relocations)
+        {
+            ordered.push_back(Item{&relocation, module.identity.module});
+        }
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const auto& left, const auto& right) {
+        if (left.relocation->relocation.target_address !=
+            right.relocation->relocation.target_address)
+        {
+            return left.relocation->relocation.target_address <
+                   right.relocation->relocation.target_address;
+        }
+        if (left.module != right.module) return left.module < right.module;
+        return left.relocation->relocation_index < right.relocation->relocation_index;
+    });
+    for (const auto& item : ordered)
+    {
+        const auto& unresolved = *item.relocation;
+        entries_.emplace(unresolved.relocation.target_address,
+                         ImportBoundary{unresolved.relocation.target_address,
+                                         unresolved.relocation_index,
+                                         unresolved.relocation,
+                                         unresolved.symbol,
+                                         item.module});
     }
 }
 
@@ -681,9 +721,54 @@ ExecutionSession::ExecutionSession(
 {
 }
 
+ExecutionSession::ExecutionSession(
+    memory::GuestMemory& memory, const analysis::ProcessFunctionMap& function_map,
+    const analysis::ProcessImage& process_image, ExecutionSessionOptions options,
+    ExecutionLoadSummary load_summary, runtime::RuntimeImportRegistry* runtime_imports)
+    : memory_(&memory), process_function_map_(&function_map), process_image_(&process_image),
+      imports_(process_image),
+      runtime_imports_(runtime_imports == nullptr ? &empty_runtime_imports_ : runtime_imports),
+      options_(std::move(options)), load_summary_(load_summary)
+{
+    for (const auto& map : function_map.maps())
+    {
+        if (map.identity().module == process_image.summary().primary_module)
+        {
+            function_map_ = &map;
+            break;
+        }
+    }
+}
+
+ExecutionSession::ExecutionSession(
+    memory::GuestMemory& memory, const analysis::ProcessFunctionMap& function_map,
+    const std::vector<loader::UnresolvedRelocation>& unresolved_relocations,
+    ExecutionSessionOptions options, ExecutionLoadSummary load_summary,
+    runtime::RuntimeImportRegistry* runtime_imports)
+    : memory_(&memory), process_function_map_(&function_map), imports_(unresolved_relocations),
+      runtime_imports_(runtime_imports == nullptr ? &empty_runtime_imports_ : runtime_imports),
+      options_(std::move(options)), load_summary_(load_summary)
+{
+    if (!function_map.maps().empty()) function_map_ = &function_map.maps().front();
+}
+
 const analysis::FunctionRecord* ExecutionSession::function_record(GuestAddress entry) const noexcept
 {
+    if (process_function_map_ != nullptr) return process_function_map_->find(entry);
     return function_map_ == nullptr ? nullptr : function_map_->find(entry);
+}
+
+const analysis::FinalizedFunctionMap* ExecutionSession::function_map_for(
+    GuestAddress entry) const noexcept
+{
+    if (process_function_map_ != nullptr) return process_function_map_->map_for(entry);
+    return function_map_;
+}
+
+std::string ExecutionSession::module_name_for(GuestAddress entry) const
+{
+    const auto* map = function_map_for(entry);
+    return map == nullptr ? std::string{} : map->identity().module;
 }
 
 ExecutionStopReason ExecutionSession::classify_error(const Error& error) const noexcept
@@ -787,7 +872,7 @@ Result<void> ExecutionSession::map_stack(ExecutionSessionResult& result)
     }
     if (!record_event(result, ExecutionEvent{0U, ExecutionEventKind::StackMapped, 0U, 0U,
                                                result.stack_base, true, 0U,
-                                               runtime::ExecutionBoundaryKind::None, {}, {}}))
+                                               runtime::ExecutionBoundaryKind::None, {}, {}, {}, {}}))
     {
         return Result<void>::success();
     }
@@ -816,7 +901,10 @@ Result<const ir::Function*> ExecutionSession::lift_for_execution(
     {
         std::ostringstream message;
         message << "function ownership conflict for " << hex_address(entry);
-        for (const auto& conflict : function_map_->conflicts())
+        const auto* owning_map = function_map_for(entry);
+        for (const auto& conflict : owning_map == nullptr
+                                         ? std::vector<analysis::FunctionBoundaryConflict>{}
+                                         : owning_map->conflicts())
         {
             if (conflict.first_function == entry || conflict.second_function == entry)
             {
@@ -869,10 +957,11 @@ Result<void> ExecutionSession::enter_function(GuestAddress entry,
     current_.function_entry = entry;
     current_.interpreter = interpreter::InterpreterFrame{};
     result.executed_functions.push_back(entry);
+    result.executed_function_modules.push_back(module_name_for(entry));
     result.maximum_call_depth = std::max(result.maximum_call_depth, current_.call_depth);
     return record_event(result, ExecutionEvent{0U, ExecutionEventKind::FunctionEnter, entry, 0U, 0U,
                                                 false, current_.call_depth,
-                                                runtime::ExecutionBoundaryKind::None, {}, {}})
+                                                runtime::ExecutionBoundaryKind::None, {}, {}, {}, {}})
                ? Result<void>::success()
                : Result<void>::success();
 }
@@ -889,6 +978,12 @@ Result<void> ExecutionSession::stop(ExecutionSessionResult& result, ExecutionSto
     result.target_provenance = boundary == nullptr ? "" : boundary->boundary.target_provenance;
     result.final_cpu = cpu_;
     result.current_function = current_.function_entry;
+    result.current_function_module = module_name_for(current_.function_entry);
+    result.stop_module = module_name_for(target.value_or(current_.function_entry));
+    if (result.stop_module.empty() && result.import_boundary)
+    {
+        result.stop_module = result.import_boundary->consumer_module;
+    }
     result.stop_pc = boundary == nullptr ? cpu_.pc : boundary->boundary.source_guest_pc;
     result.call_stack.clear();
     for (const auto& frame : suspended_frames_)
@@ -914,24 +1009,26 @@ Result<void> ExecutionSession::stop(ExecutionSessionResult& result, ExecutionSto
     const auto import_symbol = result.import_boundary
                                    ? result.import_boundary->symbol.name
                                    : std::string{};
-    if (!record_event(result, ExecutionEvent{0U, event_kind, current_.function_entry, result.stop_pc,
-                                               target.value_or(0U), target.has_value(),
-                                               current_.call_depth,
-                                               boundary == nullptr
-                                                   ? runtime::ExecutionBoundaryKind::None
+    ExecutionEvent stop_event{0U, event_kind, current_.function_entry, result.stop_pc,
+                               target.value_or(0U), target.has_value(), current_.call_depth,
+                               boundary == nullptr ? runtime::ExecutionBoundaryKind::None
                                                    : boundary->boundary.kind,
-                                               execution_stop_reason_name(reason), import_symbol}))
+                               execution_stop_reason_name(reason), import_symbol, {}, {}};
+    stop_event.function_module = result.current_function_module;
+    stop_event.target_module = module_name_for(target.value_or(current_.function_entry));
+    if (!record_event(result, std::move(stop_event)))
     {
         return Result<void>::success();
     }
-    (void)record_event(result, ExecutionEvent{0U, ExecutionEventKind::SessionStop,
-                                               current_.function_entry, result.stop_pc,
-                                               target.value_or(0U), target.has_value(),
-                                               current_.call_depth,
-                                               boundary == nullptr
-                                                   ? runtime::ExecutionBoundaryKind::None
-                                                   : boundary->boundary.kind,
-                                               execution_stop_reason_name(reason), import_symbol});
+    ExecutionEvent session_stop{0U, ExecutionEventKind::SessionStop, current_.function_entry,
+                                result.stop_pc, target.value_or(0U), target.has_value(),
+                                current_.call_depth,
+                                boundary == nullptr ? runtime::ExecutionBoundaryKind::None
+                                                    : boundary->boundary.kind,
+                                execution_stop_reason_name(reason), import_symbol, {}, {}};
+    session_stop.function_module = result.current_function_module;
+    session_stop.target_module = module_name_for(target.value_or(current_.function_entry));
+    (void)record_event(result, std::move(session_stop));
     running_ = false;
     return Result<void>::success();
 }
@@ -957,6 +1054,11 @@ Result<void> ExecutionSession::classify_target(const runtime::ExecutionResult& b
                     "indirect target is zero or not AArch64 aligned", target, &boundary);
     }
     const auto* record = function_record(target);
+    if (process_image_ != nullptr && process_image_->module_for_address(target, 4U) == nullptr)
+    {
+        return stop(result, ExecutionStopReason::InvalidCrossModuleTarget,
+                    "target is not owned by exactly one loaded process module", target, &boundary);
+    }
     if (record != nullptr && record->translation_status == analysis::TranslationStatus::Conflict)
     {
         return stop(result, ExecutionStopReason::FunctionOwnershipConflict,
@@ -1002,7 +1104,7 @@ Result<void> ExecutionSession::dispatch_call(const runtime::ExecutionResult& bou
     if (!record_event(result, ExecutionEvent{0U, event_kind, current_.function_entry,
                                                boundary.boundary.source_guest_pc,
                                                boundary.boundary.target_guest_address, true,
-                                               current_.call_depth, boundary.boundary.kind, {}, {}}))
+                                               current_.call_depth, boundary.boundary.kind, {}, {}, {}, {}}))
     {
         return Result<void>::success();
     }
@@ -1023,7 +1125,7 @@ Result<void> ExecutionSession::dispatch_transfer(const runtime::ExecutionResult&
                                                current_.function_entry,
                                                boundary.boundary.source_guest_pc,
                                                boundary.boundary.target_guest_address, true,
-                                               current_.call_depth, boundary.boundary.kind, {}, {}}))
+                                               current_.call_depth, boundary.boundary.kind, {}, {}, {}, {}}))
     {
         return Result<void>::success();
     }
@@ -1037,11 +1139,12 @@ Result<void> ExecutionSession::dispatch_transfer(const runtime::ExecutionResult&
     current_.interpreter = interpreter::InterpreterFrame{};
     ++result.function_transfers;
     result.executed_functions.push_back(current_.function_entry);
+    result.executed_function_modules.push_back(module_name_for(current_.function_entry));
     result.maximum_call_depth = std::max(result.maximum_call_depth, current_.call_depth);
     return record_event(result, ExecutionEvent{0U, ExecutionEventKind::FunctionEnter,
                                                 current_.function_entry, 0U, 0U, false,
                                                 current_.call_depth,
-                                                runtime::ExecutionBoundaryKind::None, {}, {}})
+                                                runtime::ExecutionBoundaryKind::None, {}, {}, {}, {}})
                ? Result<void>::success()
                : Result<void>::success();
 }
@@ -1072,8 +1175,18 @@ Result<void> ExecutionSession::dispatch_runtime_import(
         observation.descriptor.evidence.confidence = "not_registered";
     }
 
-    const auto* dynamic = module_metadata_ != nullptr && module_metadata_->dynamic
-                              ? &module_metadata_->dynamic.value()
+    const format::ModuleMetadata* import_metadata = module_metadata_;
+    const format::DynamicSymbolTable* import_symbols = symbols_;
+    if (process_image_ != nullptr && !import.consumer_module.empty())
+    {
+        if (const auto* module = process_image_->module(import.consumer_module))
+        {
+            import_metadata = &module->metadata;
+            import_symbols = module->symbols ? &module->symbols.value() : nullptr;
+        }
+    }
+    const auto* dynamic = import_metadata != nullptr && import_metadata->dynamic
+                              ? &import_metadata->dynamic.value()
                               : nullptr;
     classify_import_trampoline(function_record(current_.function_entry), boundary, import, dynamic,
                                observation);
@@ -1096,7 +1209,7 @@ Result<void> ExecutionSession::dispatch_runtime_import(
     for (std::size_t index = 0U; index < observed_count; ++index)
     {
         observation.arguments.push_back(
-            observe_argument(abi, index, *memory_, dynamic, symbols_));
+            observe_argument(abi, index, *memory_, dynamic, import_symbols));
     }
 
     const auto runtime_event = [&](ExecutionEventKind kind, std::string code) {
@@ -1104,7 +1217,7 @@ Result<void> ExecutionSession::dispatch_runtime_import(
                                                      boundary.boundary.source_guest_pc,
                                                      boundary.boundary.target_guest_address, true,
                                                      current_.call_depth, boundary.boundary.kind,
-                                                     std::move(code), import.symbol.name});
+                                                     std::move(code), import.symbol.name, {}, {}});
     };
 
     if (descriptor == nullptr)
@@ -1149,7 +1262,7 @@ Result<void> ExecutionSession::dispatch_runtime_import(
                                           runtime::ImportProvenance{
                                               import.relocation_target, import.relocation_index,
                                               import.relocation, import.symbol},
-                                          invocation, module_metadata_};
+                                          invocation, import_metadata};
     const auto invoked = runtime_imports_->invoke(context);
     runtime::RuntimeImportOutcome outcome = invoked
                                                 ? std::move(invoked).value()
@@ -1246,7 +1359,7 @@ Result<void> ExecutionSession::dispatch_runtime_import(
                                                 false, current_.call_depth,
                                                 runtime::ExecutionBoundaryKind::Return,
                                                 "runtime_tail_transfer_resume",
-                                                import.symbol.name})
+                                                import.symbol.name, {}, {}})
                ? Result<void>::success()
                : Result<void>::success();
 }
@@ -1281,38 +1394,107 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     result.entry = entry;
     result.options = options_;
     result.relocations = load_summary_;
+    if (process_image_ != nullptr)
+    {
+        result.process = process_image_->summary();
+        result.relocations.guest_bindings_attempted = result.process->bindings.size();
+        for (const auto& binding : result.process->bindings)
+        {
+            if (binding.provider.status == analysis::ProviderResolutionStatus::ResolvedGuestModule)
+            {
+                ++result.relocations.guest_bindings_resolved;
+                if (binding.provider_module && binding.provider_module.value() !=
+                                                     binding.consumer_module)
+                {
+                    ++result.relocations.cross_module_relocations;
+                }
+            }
+            else if (binding.provider.status == analysis::ProviderResolutionStatus::AmbiguousGuestProvider)
+            {
+                ++result.relocations.guest_bindings_ambiguous;
+            }
+            else
+            {
+                ++result.relocations.guest_bindings_unresolved;
+            }
+        }
+    }
     if (module_metadata_ != nullptr)
     {
         result.module_metadata = *module_metadata_;
     }
-    result.analyzed_functions = function_map_->functions().size();
-    result.precise_conflicts = function_map_->conflicts().size();
-    std::set<GuestAddress> conflicting_functions;
-    for (const auto& conflict : function_map_->conflicts())
+    if (process_function_map_ != nullptr)
     {
-        conflicting_functions.insert(conflict.first_function);
-        conflicting_functions.insert(conflict.second_function);
+        for (const auto& map : process_function_map_->maps())
+        {
+            result.analyzed_functions += map.functions().size();
+            result.precise_conflicts += map.conflicts().size();
+        }
+    }
+    else
+    {
+        result.analyzed_functions = function_map_->functions().size();
+        result.precise_conflicts = function_map_->conflicts().size();
+    }
+    std::set<GuestAddress> conflicting_functions;
+    std::vector<const analysis::FunctionBoundaryConflict*> conflicts;
+    if (process_function_map_ != nullptr)
+    {
+        for (const auto& map : process_function_map_->maps())
+            for (const auto& conflict : map.conflicts()) conflicts.push_back(&conflict);
+    }
+    else
+    {
+        for (const auto& conflict : function_map_->conflicts()) conflicts.push_back(&conflict);
+    }
+    for (const auto* conflict : conflicts)
+    {
+        conflicting_functions.insert(conflict->first_function);
+        conflicting_functions.insert(conflict->second_function);
     }
     result.conflicting_functions = conflicting_functions.size();
-    for (const auto& function : function_map_->functions())
+    const auto add_owned_bytes = [&](const auto& map) -> Result<void> {
+        for (const auto& function : map.functions())
+        {
+            const auto owned = analysis::precise_owned_byte_count(function.owned_code_ranges);
+            if (!owned || owned.value() > std::numeric_limits<memory::GuestSize>::max() -
+                                  result.precise_owned_bytes)
+            {
+                return Result<void>::failure(make_error(
+                    ErrorCode::AnalysisBudgetExceeded, "precise ownership byte count overflows"));
+            }
+            result.precise_owned_bytes += owned.value();
+        }
+        return Result<void>::success();
+    };
+    if (process_function_map_ != nullptr)
     {
-        const auto owned = analysis::precise_owned_byte_count(function.owned_code_ranges);
-        if (!owned || owned.value() > std::numeric_limits<memory::GuestSize>::max() -
-                              result.precise_owned_bytes)
+        for (const auto& map : process_function_map_->maps())
+        {
+            const auto owned = add_owned_bytes(map);
+            if (!owned)
+            {
+                running_ = false;
+                return Result<ExecutionSessionResult>::failure(owned.error());
+            }
+        }
+    }
+    else
+    {
+        const auto owned = add_owned_bytes(*function_map_);
+        if (!owned)
         {
             running_ = false;
-            return Result<ExecutionSessionResult>::failure(make_error(
-                ErrorCode::AnalysisBudgetExceeded, "precise ownership byte count overflows"));
+            return Result<ExecutionSessionResult>::failure(owned.error());
         }
-        result.precise_owned_bytes += owned.value();
     }
     if (!record_event(result, ExecutionEvent{0U, ExecutionEventKind::SessionStart, 0U, 0U, 0U,
                                                false, 0U,
-                                               runtime::ExecutionBoundaryKind::None, {}, {}}) ||
+                                               runtime::ExecutionBoundaryKind::None, {}, {}, {}, {}}) ||
         !record_event(result, ExecutionEvent{0U, ExecutionEventKind::EntrySelected, 0U,
                                                entry.address, entry.address, true, 0U,
                                                runtime::ExecutionBoundaryKind::None,
-                                               entry_selection_kind_name(entry.kind), {}}))
+                                               entry_selection_kind_name(entry.kind), {}, {}, {}}))
     {
         result.final_cpu = cpu_;
         return Result<ExecutionSessionResult>::success(std::move(result));
@@ -1399,7 +1581,7 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
                                                        boundary.source_guest_pc,
                                                        boundary.target_guest_address,
                                                        boundary.target_known, current_.call_depth,
-                                                       boundary.kind, {}, {}}))
+                                                       boundary.kind, {}, {}, {}, {}}))
                 break;
             if (suspended_frames_.empty())
             {
@@ -1421,7 +1603,7 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
                                                        current_.function_entry,
                                                        current_.expected_return_pc, 0U, false,
                                                        current_.call_depth,
-                                                       runtime::ExecutionBoundaryKind::Return, {}, {}}))
+                                                       runtime::ExecutionBoundaryKind::Return, {}, {}, {}, {}}))
                 break;
             break;
         case runtime::ExecutionBoundaryKind::DirectCall:
@@ -1489,6 +1671,8 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                   {"code", event.code}};
         if (event.has_target) item["target"] = hex_address(event.target);
         if (!event.import_symbol.empty()) item["import_symbol"] = event.import_symbol;
+        if (!event.function_module.empty()) item["function_module"] = event.function_module;
+        if (!event.target_module.empty()) item["target_module"] = event.target_module;
         events.push_back(std::move(item));
     }
     json stack = json::array();
@@ -1501,16 +1685,135 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
     }
     json executed = json::array();
     for (const auto entry : result.executed_functions) executed.push_back(hex_address(entry));
+    json executed_with_modules = json::array();
+    for (std::size_t index = 0U; index < result.executed_functions.size(); ++index)
+    {
+        executed_with_modules.push_back(json{
+            {"address", hex_address(result.executed_functions[index])},
+            {"module", index < result.executed_function_modules.size()
+                            ? result.executed_function_modules[index]
+                            : std::string{}}});
+    }
+    json process = nullptr;
+    if (result.process)
+    {
+        json modules = json::array();
+        for (const auto& module : result.process->modules)
+        {
+            json ranges = json::array();
+            for (const auto& range : module.mapped_ranges) ranges.push_back(range_json(range));
+            json segments = json::array();
+            for (const auto& segment : module.segments)
+            {
+                segments.push_back(json{{"kind", segment.kind},
+                                        {"file_offset", segment.file_offset},
+                                        {"memory_offset", segment.memory_offset},
+                                        {"memory_size", segment.memory_size},
+                                        {"stored_size", segment.stored_size},
+                                        {"compressed", segment.compressed},
+                                        {"hash_required", segment.hash_required}});
+            }
+            json mappings = json::array();
+            for (const auto& mapping : module.mappings)
+            {
+                mappings.push_back(json{{"base", hex_address(mapping.base)},
+                                        {"size", mapping.size},
+                                        {"permissions", permissions_text(mapping.permissions)},
+                                        {"read", memory::has_permission(
+                                                      mapping.permissions,
+                                                      memory::GuestMemoryPermissions::Read)},
+                                        {"write", memory::has_permission(
+                                                       mapping.permissions,
+                                                       memory::GuestMemoryPermissions::Write)},
+                                        {"execute", memory::has_permission(
+                                                         mapping.permissions,
+                                                         memory::GuestMemoryPermissions::Execute)},
+                                        {"kind", memory::guest_region_kind_name(mapping.kind)}});
+            }
+            modules.push_back(json{
+                {"logical_name", module.logical_name},
+                {"sha256", module.sha256},
+                {"build_id", module.build_id},
+                {"nso_version", module.nso_version},
+                {"nso_flags", module.nso_flags},
+                {"base", hex_address(module.base)},
+                {"base_provenance", analysis::module_base_provenance_name(module.base_provenance)},
+                {"runtime_base_verified", module.runtime_base_verified},
+                {"segments", std::move(segments)},
+                {"bss_size", module.bss_size},
+                {"mapped_ranges", std::move(ranges)},
+                {"mappings", std::move(mappings)},
+                {"metadata", json{{"mod0", module.mod0_available},
+                                   {"dynamic", module.dynamic_available},
+                                   {"dynamic_tags", module.dynamic_tags}}},
+                {"dynamic_symbols", json{{"total", module.dynamic_symbol_count},
+                                          {"defined", module.defined_symbol_count},
+                                          {"undefined", module.undefined_symbol_count}}},
+                {"relocations", json{{"total", module.relocation_count},
+                                      {"applied", module.applied_relocations},
+                                      {"unresolved", module.unresolved_relocations}}}});
+        }
+        json bindings = json::array();
+        for (const auto& binding : result.process->bindings)
+        {
+            json candidates = json::array();
+            for (const auto& candidate : binding.provider.candidates)
+            {
+                candidates.push_back(json{{"module", candidate.module},
+                                          {"symbol_index", candidate.symbol_index},
+                                          {"symbol", candidate.symbol},
+                                          {"binding", format::symbol_binding_name(candidate.binding)},
+                                          {"type", format::symbol_type_name(candidate.type)},
+                                          {"visibility", format::symbol_visibility_name(candidate.visibility)},
+                                          {"section_index", candidate.section_index},
+                                          {"value", hex_address(candidate.value)},
+                                          {"address", hex_address(candidate.address)},
+                                          {"executable", candidate.executable}});
+            }
+            bindings.push_back(json{
+                {"consumer_module", binding.consumer_module},
+                {"consumer_symbol_index", binding.consumer_symbol_index},
+                {"symbol", binding.symbol},
+                {"relocation_index", binding.relocation_index},
+                {"relocation", json{{"type", binding.relocation.raw_type},
+                                     {"type_name", format::aarch64_relocation_type_name(binding.relocation.type)},
+                                     {"source", format::relocation_source_name(binding.relocation.source)},
+                                     {"target", hex_address(binding.relocation.target_address)},
+                                     {"offset", hex_address(binding.relocation.offset)}}},
+                {"candidate_count", binding.provider.candidates.size()},
+                {"result", analysis::provider_resolution_status_name(binding.provider.status)},
+                {"provider_module", binding.provider_module ? json(*binding.provider_module) : json(nullptr)},
+                {"provider_symbol_index", binding.provider_symbol_index
+                                                ? json(*binding.provider_symbol_index) : json(nullptr)},
+                {"provider_address", binding.provider_address
+                                          ? json(hex_address(*binding.provider_address)) : json(nullptr)},
+                {"resolution_basis", binding.resolution_basis},
+                {"confidence", binding.confidence},
+                {"applied", binding.applied},
+                {"candidates", std::move(candidates)}});
+        }
+        process = json{{"primary_module", result.process->primary_module},
+                       {"layout_mode", result.process->layout_mode},
+                       {"provider_search_complete", result.process->provider_search_complete},
+                       {"modules", std::move(modules)}, {"bindings", std::move(bindings)}};
+    }
     json value{{"schema_version", ExecutionSessionResult::schema_version},
                 {"module", json{{"logical_name", result.identity.module},
                                   {"sha256", result.identity.input_sha256},
                                   {"build_id", result.identity.build_id},
                                   {"analysis_base", hex_address(result.identity.guest_base)},
                                   {"guest_base_verified", result.identity.guest_base_verified},
+                                  {"base_provenance", analysis::module_base_provenance_name(
+                                                          result.identity.guest_base_provenance)},
                                   {"executable_ranges", std::move(executable_ranges)}}},
                 {"relocations", json{{"parsed", result.relocations.relocations_parsed},
                                       {"applied", result.relocations.relocations_applied},
-                                      {"unresolved", result.relocations.unresolved_relocations}}},
+                                      {"unresolved", result.relocations.unresolved_relocations},
+                                      {"guest_bindings_attempted", result.relocations.guest_bindings_attempted},
+                                      {"guest_bindings_resolved", result.relocations.guest_bindings_resolved},
+                                      {"guest_bindings_ambiguous", result.relocations.guest_bindings_ambiguous},
+                                      {"guest_bindings_unresolved", result.relocations.guest_bindings_unresolved},
+                                      {"cross_module_relocations", result.relocations.cross_module_relocations}}},
                 {"analysis", json{{"functions", result.analyzed_functions},
                                    {"conflicting_functions", result.conflicting_functions},
                                    {"conflict_records", result.precise_conflicts},
@@ -1533,10 +1836,13 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                 {"execution", json{{"stop_reason", execution_stop_reason_name(result.stop_reason)},
                                     {"stop_pc", hex_address(result.stop_pc)},
                                     {"current_function", hex_address(result.current_function)},
+                                    {"current_function_module", result.current_function_module},
+                                    {"stop_module", result.stop_module},
                                     {"target", result.target ? json(hex_address(result.target.value())) : json(nullptr)},
                                     {"target_register", result.target_register},
                                     {"target_provenance", result.target_provenance},
                                     {"executed_functions", std::move(executed)},
+                                    {"executed_functions_with_modules", std::move(executed_with_modules)},
                                     {"direct_calls", result.direct_calls},
                                     {"indirect_calls", result.indirect_calls},
                                     {"function_transfers", result.function_transfers},
@@ -1571,11 +1877,13 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                       }
                                       return imports;
                                   }()}}},
-                {"events", std::move(events)}};
+                {"events", std::move(events)},
+                {"process", std::move(process)}};
     if (result.import_boundary)
     {
         const auto& import = result.import_boundary.value();
-        value["execution"]["import"] = json{{"relocation_target", hex_address(import.relocation_target)},
+        value["execution"]["import"] = json{{"consumer_module", import.consumer_module},
+                                               {"relocation_target", hex_address(import.relocation_target)},
                                                {"relocation_offset", hex_address(import.relocation.offset)},
                                                {"relocation_index", import.relocation_index},
                                                {"symbol_index", import.symbol.symbol_index},

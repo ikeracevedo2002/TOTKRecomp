@@ -23,6 +23,7 @@ struct AppliedRelocation
     std::size_t relocation_index = 0U;
     format::Relocation relocation{};
     std::uint64_t value = 0U;
+    std::uint8_t width = 8U;
 };
 
 struct UnresolvedRelocation
@@ -38,6 +39,12 @@ struct RelocationPlan
     std::vector<AppliedRelocation> applied;
     std::vector<UnresolvedRelocation> unresolved;
 };
+
+[[nodiscard]] constexpr std::uint8_t relocation_width(
+    format::AArch64RelocationType type) noexcept
+{
+    return type == format::AArch64RelocationType::Abs32 ? 4U : 8U;
+}
 
 // Classify and validate every relocation without changing GuestMemory. A
 // valid undefined global/weak symbol is retained as an unresolved import

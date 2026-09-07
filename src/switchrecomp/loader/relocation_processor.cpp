@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <new>
 #include <optional>
+#include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -36,14 +38,16 @@ namespace
                                             std::size_t index,
                                             const RelocationProcessorOptions& options)
 {
-    if ((relocation.target_address % sizeof(std::uint64_t)) != 0U)
+    const auto width = relocation_width(relocation.type);
+    if ((relocation.target_address % width) != 0U)
     {
         return Result<void>::failure(make_error(
             ErrorCode::MisalignedRelocationTarget,
-            "relocation[" + std::to_string(index) + "] target is not 8-byte aligned"));
+            "relocation[" + std::to_string(index) + "] target is not " +
+                std::to_string(width) + "-byte aligned"));
     }
 
-    const auto target_end = checked_add_u64(relocation.target_address, sizeof(std::uint64_t));
+    const auto target_end = checked_add_u64(relocation.target_address, width);
     if (!target_end)
     {
         return Result<void>::failure(make_error(
@@ -54,7 +58,7 @@ namespace
     if (options.use_loader_write)
     {
         const auto valid_target = guest_memory.validate_loader_write(
-            relocation.target_address, sizeof(std::uint64_t));
+            relocation.target_address, width);
         if (!valid_target)
         {
             return Result<void>::failure(make_error(
@@ -67,7 +71,7 @@ namespace
     else
     {
         const auto permissions = guest_memory.permissions_at(
-            relocation.target_address, sizeof(std::uint64_t));
+            relocation.target_address, width);
         if (!permissions)
         {
             return Result<void>::failure(make_error(
@@ -177,7 +181,15 @@ Result<RelocationPlan> plan_relocations(const memory::GuestMemory& guest_memory,
             {
                 return Result<RelocationPlan>::failure(target.error());
             }
-            plan.applied.push_back(AppliedRelocation{index, relocation, value.value()});
+            if (relocation.type == format::AArch64RelocationType::Abs32 &&
+                value.value() > std::numeric_limits<std::uint32_t>::max())
+            {
+                return Result<RelocationPlan>::failure(make_error(
+                    ErrorCode::ArithmeticOverflow,
+                    "relocation[" + std::to_string(index) + "] ABS32 value exceeds 32 bits"));
+            }
+            plan.applied.push_back(
+                AppliedRelocation{index, relocation, value.value(), relocation_width(relocation.type)});
         }
         return Result<RelocationPlan>::success(std::move(plan));
     }
@@ -215,9 +227,12 @@ Result<void> apply_relocation_plan(memory::GuestMemory& guest_memory, const Relo
             std::array<std::byte, sizeof(std::uint64_t)> bytes{};
             encode_u64_le(entry.value, bytes);
             const auto result = options.use_loader_write
-                                    ? guest_memory.loader_write(entry.relocation.target_address,
-                                                                bytes)
-                                    : guest_memory.write(entry.relocation.target_address, bytes);
+                                    ? guest_memory.loader_write(
+                                          entry.relocation.target_address,
+                                          std::span<const std::byte>(bytes.data(), entry.width))
+                                    : guest_memory.write(
+                                          entry.relocation.target_address,
+                                          std::span<const std::byte>(bytes.data(), entry.width));
             if (!result)
             {
                 return Result<void>::failure(result.error());

@@ -124,6 +124,8 @@ AArch64RelocationType aarch64_relocation_type(std::uint32_t raw_type) noexcept
         return AArch64RelocationType::None;
     case 257U:
         return AArch64RelocationType::Abs64;
+    case 258U:
+        return AArch64RelocationType::Abs32;
     case 1027U:
         return AArch64RelocationType::Relative;
     case 1025U:
@@ -143,6 +145,8 @@ std::string_view aarch64_relocation_type_name(AArch64RelocationType type) noexce
         return "R_AARCH64_NONE";
     case AArch64RelocationType::Abs64:
         return "R_AARCH64_ABS64";
+    case AArch64RelocationType::Abs32:
+        return "R_AARCH64_ABS32";
     case AArch64RelocationType::Relative:
         return "R_AARCH64_RELATIVE";
     case AArch64RelocationType::GlobDat:

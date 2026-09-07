@@ -35,6 +35,7 @@ enum class AArch64RelocationType
 {
     None,
     Abs64,
+    Abs32,
     Relative,
     GlobDat,
     JumpSlot,

@@ -8,7 +8,7 @@ Horizon handlers.
 
 ```text
 NSO → GuestMemory → MOD0 → .dynamic → dynstr/dynsym/RELA
-    → semantic relocations → symbol resolution → relocated guest image
+    → semantic relocations → process guest-provider resolution → relocated guest image
 ```
 
 `DynamicStringTable` owns a bounded copy of `DT_STRTAB`/`DT_STRSZ`. `get()`
@@ -72,7 +72,24 @@ typed unresolved result for valid undefined global/weak bindings so the
 diagnostic planner can retain them without using an address. Duplicate
 external registrations fail explicitly.
 Visibility is retained for future inter-module policy; a complete module-scope
-visibility/link-order model is outside this milestone.
+visibility/link-order model is outside the earlier module-local layer.
+
+Milestone 13 adds `ProcessSymbolNamespace` above `SymbolResolver`. It indexes
+eligible definitions from every supplied guest module with module identity,
+symbol index, binding, type, visibility, section, raw value, and provider guest
+address. The provider base is always used to compute `S`; the consumer base is
+never substituted and host function pointers are never written to guest
+memory. A unique strong provider resolves an undefined import, a single weak
+provider resolves when no strong provider exists, and multiple plausible
+providers remain ambiguous while Nintendo-specific lookup ordering is
+unverified. Hidden/local/undefined definitions are not exported providers.
+
+The process planner retains a binding record even after applying a
+`R_AARCH64_JUMP_SLOT` or `R_AARCH64_GLOB_DAT`, including consumer module,
+relocation source/index/slot, provider module/symbol/address, candidate count,
+and resolution basis. Unresolved or ambiguous symbols remain guest import
+boundaries and only then reach the runtime/HLE registry. This keeps guest
+linker accounting separate from runtime-import accounting.
 
 ## Guest-memory write model and atomicity
 

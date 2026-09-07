@@ -1,6 +1,7 @@
 #pragma once
 
 #include "switchrecomp/analysis/whole_module.hpp"
+#include "switchrecomp/analysis/process_image.hpp"
 #include "switchrecomp/common/result.hpp"
 #include "switchrecomp/interpreter/interpreter.hpp"
 #include "switchrecomp/runtime/execution.hpp"
@@ -63,6 +64,7 @@ enum class ExecutionStopReason
     IrOperationLimitExceeded,
     EventLimitExceeded,
     GuestBlockLimitExceeded,
+    InvalidCrossModuleTarget,
 };
 
 [[nodiscard]] const char* execution_stop_reason_name(ExecutionStopReason reason) noexcept;
@@ -119,6 +121,8 @@ struct ExecutionEvent
     runtime::ExecutionBoundaryKind boundary = runtime::ExecutionBoundaryKind::None;
     std::string code;
     std::string import_symbol;
+    std::string function_module;
+    std::string target_module;
 };
 
 struct ExecutionBudgets
@@ -142,6 +146,11 @@ struct ExecutionLoadSummary
     std::size_t relocations_parsed = 0U;
     std::size_t relocations_applied = 0U;
     std::size_t unresolved_relocations = 0U;
+    std::size_t guest_bindings_attempted = 0U;
+    std::size_t guest_bindings_resolved = 0U;
+    std::size_t guest_bindings_ambiguous = 0U;
+    std::size_t guest_bindings_unresolved = 0U;
+    std::size_t cross_module_relocations = 0U;
 };
 
 struct ImportBoundary
@@ -150,12 +159,14 @@ struct ImportBoundary
     std::size_t relocation_index = 0U;
     format::Relocation relocation{};
     format::ImportSymbol symbol{};
+    std::string consumer_module;
 };
 
 class ImportBoundaryIndex
 {
   public:
     explicit ImportBoundaryIndex(const std::vector<loader::UnresolvedRelocation>& relocations);
+    explicit ImportBoundaryIndex(const analysis::ProcessImage& process_image);
 
     [[nodiscard]] const ImportBoundary* find(memory::GuestAddress relocation_target) const noexcept;
 
@@ -223,7 +234,7 @@ struct RuntimeExecutionSummary
 
 struct ExecutionSessionResult
 {
-    static constexpr std::uint32_t schema_version = 2U;
+    static constexpr std::uint32_t schema_version = 3U;
 
     analysis::ModuleIdentity identity;
     EntrySelection entry;
@@ -247,7 +258,11 @@ struct ExecutionSessionResult
     std::string target_provenance;
     std::optional<ImportBoundary> import_boundary;
     std::string diagnostic;
+    std::string current_function_module;
+    std::string stop_module;
+    std::optional<analysis::ProcessImageSummary> process;
     std::vector<memory::GuestAddress> executed_functions;
+    std::vector<std::string> executed_function_modules;
     std::size_t direct_calls = 0U;
     std::size_t indirect_calls = 0U;
     std::size_t function_transfers = 0U;
@@ -270,6 +285,18 @@ class ExecutionSession
                       runtime::RuntimeImportRegistry* runtime_imports = nullptr,
                       const format::ModuleMetadata* module_metadata = nullptr,
                       const format::DynamicSymbolTable* symbols = nullptr);
+
+    ExecutionSession(memory::GuestMemory& memory, const analysis::ProcessFunctionMap& function_map,
+                      const analysis::ProcessImage& process_image,
+                      ExecutionSessionOptions options = {},
+                      ExecutionLoadSummary load_summary = {},
+                      runtime::RuntimeImportRegistry* runtime_imports = nullptr);
+
+    ExecutionSession(memory::GuestMemory& memory, const analysis::ProcessFunctionMap& function_map,
+                      const std::vector<loader::UnresolvedRelocation>& unresolved_relocations,
+                      ExecutionSessionOptions options = {},
+                      ExecutionLoadSummary load_summary = {},
+                      runtime::RuntimeImportRegistry* runtime_imports = nullptr);
 
     [[nodiscard]] Result<ExecutionSessionResult> run(const EntrySelection& entry);
 
@@ -310,9 +337,14 @@ class ExecutionSession
                                                ExecutionSessionResult& result, bool call);
     [[nodiscard]] const analysis::FunctionRecord* function_record(
         memory::GuestAddress entry) const noexcept;
+    [[nodiscard]] const analysis::FinalizedFunctionMap* function_map_for(
+        memory::GuestAddress entry) const noexcept;
+    [[nodiscard]] std::string module_name_for(memory::GuestAddress entry) const;
 
     memory::GuestMemory* memory_ = nullptr;
     const analysis::FinalizedFunctionMap* function_map_ = nullptr;
+    const analysis::ProcessFunctionMap* process_function_map_ = nullptr;
+    const analysis::ProcessImage* process_image_ = nullptr;
     ImportBoundaryIndex imports_;
     runtime::RuntimeImportRegistry empty_runtime_imports_;
     runtime::RuntimeImportRegistry* runtime_imports_ = nullptr;

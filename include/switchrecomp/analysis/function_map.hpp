@@ -28,6 +28,17 @@ enum class FunctionDiscoverySource : std::uint8_t
     Heuristic,
 };
 
+enum class ModuleBaseProvenance : std::uint8_t
+{
+    ExplicitAnalysisBase,
+    DeterministicAnalysisLayout,
+    ExternallyObserved,
+    RuntimeVerified,
+};
+
+[[nodiscard]] std::string_view module_base_provenance_name(
+    ModuleBaseProvenance provenance) noexcept;
+
 enum class EntryPointKind : std::uint8_t
 {
     TextStartCandidate,
@@ -103,6 +114,7 @@ struct ModuleIdentity
     std::string input_sha256;
     memory::GuestAddress guest_base = 0U;
     bool guest_base_verified = false;
+    ModuleBaseProvenance guest_base_provenance = ModuleBaseProvenance::ExplicitAnalysisBase;
     std::vector<GuestAddressRange> executable_ranges;
     std::string translator_version;
     std::uint32_t metadata_schema_version = 2U;

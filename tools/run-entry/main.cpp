@@ -1,4 +1,5 @@
 #include "switchrecomp/execution/session.hpp"
+#include "switchrecomp/analysis/process_image.hpp"
 #include "switchrecomp/version.hpp"
 
 #include <charconv>
@@ -8,6 +9,8 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <map>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -57,13 +60,18 @@ enum class ExitCode : int
 
 void help(std::ostream& output)
 {
-    output << "Usage: run-entry [options] prepared-main.nso\n\n"
+    output << "Usage: run-entry [options] prepared-main.nso\n"
+              "       run-entry --local-config <file> [options]\n"
+              "       run-entry --module NAME=PATH [--module NAME=PATH ...] [options]\n\n"
               "Run one bounded prepared guest entry with the Semantic IR interpreter.\n\n"
               "Options:\n"
               "  --help                         Show this help text.\n"
               "  --version                      Show the project version.\n"
               "  --module-name NAME             Logical module name (default: main).\n"
               "  --module-base ADDR             Analysis-selected guest base.\n"
+              "  --module NAME=PATH             Add a process module (repeatable).\n"
+              "  --local-config PATH             Read a local-only multi-module config.\n"
+              "  --module-base-for NAME=ADDR    Set one process module analysis base.\n"
               "  --entry KIND                   dt-init, dt-fini, text-start, process.\n"
               "  --entry-address ADDR           Unverified analyst address.\n"
               "  --backend interpreter           M11 reference backend.\n"
@@ -96,6 +104,19 @@ void print_error(const Error& error)
     return true;
 }
 
+[[nodiscard]] bool parse_assignment(std::string_view text, std::string& left,
+                                    std::string& right)
+{
+    const auto separator = text.find('=');
+    if (separator == std::string_view::npos || separator == 0U || separator + 1U >= text.size())
+    {
+        return false;
+    }
+    left = text.substr(0U, separator);
+    right = text.substr(separator + 1U);
+    return !left.empty() && !right.empty();
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -107,6 +128,11 @@ int main(int argc, char** argv)
     std::string report_path;
     bool emit_json = false;
     std::filesystem::path input_path;
+    std::filesystem::path local_config_path;
+    std::vector<std::pair<std::string, std::filesystem::path>> configured_modules;
+    std::map<std::string, std::uint64_t> configured_bases;
+    std::string configured_primary = "main";
+    bool provider_search_complete = false;
     analysis::PreparedModuleOptions load_options;
     execution::ExecutionSessionOptions execution_options;
     analysis::FunctionMapOptions function_options;
@@ -134,6 +160,36 @@ int main(int argc, char** argv)
         if (take_value(index, argc, argv, "--module-name", value))
         {
             module_name = value;
+            continue;
+        }
+        if (take_value(index, argc, argv, "--local-config", value))
+        {
+            local_config_path = value;
+            continue;
+        }
+        if (take_value(index, argc, argv, "--module", value))
+        {
+            std::string name;
+            std::string path;
+            if (!parse_assignment(value, name, path))
+            {
+                std::cerr << "invalid --module; expected NAME=PATH\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
+            configured_modules.emplace_back(std::move(name), std::filesystem::path(path));
+            continue;
+        }
+        if (take_value(index, argc, argv, "--module-base-for", value))
+        {
+            std::string name;
+            std::string address;
+            std::uint64_t parsed_base = 0U;
+            if (!parse_assignment(value, name, address) || !parse_u64(address, parsed_base))
+            {
+                std::cerr << "invalid --module-base-for; expected NAME=ADDR\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
+            configured_bases[name] = parsed_base;
             continue;
         }
         if (take_value(index, argc, argv, "--module-base", value))
@@ -232,6 +288,215 @@ int main(int argc, char** argv)
         }
         std::cerr << "unknown or incomplete argument: " << argument << '\n';
         return static_cast<int>(ExitCode::InvalidArguments);
+    }
+
+    if (!local_config_path.empty())
+    {
+        std::vector<std::byte> config_bytes;
+        if (!read_file(local_config_path, config_bytes))
+        {
+            std::cerr << "unable to read local config\n";
+            return static_cast<int>(ExitCode::InfrastructureFailure);
+        }
+        try
+        {
+            const auto root = nlohmann::json::parse(
+                std::string(reinterpret_cast<const char*>(config_bytes.data()), config_bytes.size()));
+            if (!root.contains("modules") || !root.at("modules").is_object())
+            {
+                std::cerr << "local config modules must be an object\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
+            for (const auto& [name, path] : root.at("modules").items())
+            {
+                if (!path.is_string())
+                {
+                    std::cerr << "local config module paths must be strings\n";
+                    return static_cast<int>(ExitCode::InvalidArguments);
+                }
+                configured_modules.emplace_back(name, path.get<std::string>());
+            }
+            if (root.contains("primary_module") && root.at("primary_module").is_string())
+            {
+                configured_primary = root.at("primary_module").get<std::string>();
+            }
+            if (root.contains("provider_search_complete") &&
+                root.at("provider_search_complete").is_boolean())
+            {
+                provider_search_complete = root.at("provider_search_complete").get<bool>();
+            }
+            if (root.contains("module_bases") && root.at("module_bases").is_object())
+            {
+                for (const auto& [name, base] : root.at("module_bases").items())
+                {
+                    std::uint64_t parsed = 0U;
+                    if (base.is_number_unsigned()) parsed = base.get<std::uint64_t>();
+                    else if (base.is_string() && !parse_u64(base.get<std::string>(), parsed))
+                    {
+                        std::cerr << "invalid local config module base\n";
+                        return static_cast<int>(ExitCode::InvalidArguments);
+                    }
+                    else if (!base.is_number_unsigned())
+                    {
+                        std::cerr << "invalid local config module base\n";
+                        return static_cast<int>(ExitCode::InvalidArguments);
+                    }
+                    configured_bases[name] = parsed;
+                }
+            }
+        }
+        catch (const std::exception& error)
+        {
+            std::cerr << "invalid local config: " << error.what() << '\n';
+            return static_cast<int>(ExitCode::InvalidArguments);
+        }
+    }
+
+    const bool process_mode = !configured_modules.empty();
+    if (process_mode)
+    {
+        if (local_config_path.empty() && configured_primary == "main" && module_name != "main")
+        {
+            configured_primary = module_name;
+        }
+        if (!input_path.empty())
+        {
+            bool has_main = false;
+            for (const auto& module : configured_modules) has_main |= module.first == configured_primary;
+            if (!has_main) configured_modules.emplace_back(configured_primary, input_path);
+        }
+        std::sort(configured_modules.begin(), configured_modules.end(),
+                  [](const auto& left, const auto& right) { return left.first < right.first; });
+        for (std::size_t index = 1U; index < configured_modules.size(); ++index)
+        {
+            if (configured_modules[index - 1U].first == configured_modules[index].first)
+            {
+                std::cerr << "duplicate process module name\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
+        }
+        if (configured_primary.empty()) configured_primary = "main";
+        bool has_primary = false;
+        for (const auto& module : configured_modules) has_primary |= module.first == configured_primary;
+        if (!has_primary)
+        {
+            std::cerr << "primary process module is not configured\n";
+            return static_cast<int>(ExitCode::InvalidArguments);
+        }
+
+        std::vector<std::vector<std::byte>> module_bytes;
+        module_bytes.reserve(configured_modules.size());
+        std::vector<analysis::ProcessModuleInput> module_inputs;
+        module_inputs.reserve(configured_modules.size());
+        for (const auto& [name, path] : configured_modules)
+        {
+            module_bytes.emplace_back();
+            if (!read_file(path, module_bytes.back()))
+            {
+                std::cerr << "unable to read process module " << name << '\n';
+                return static_cast<int>(ExitCode::InfrastructureFailure);
+            }
+            std::optional<std::uint64_t> explicit_base;
+            if (const auto found = configured_bases.find(name); found != configured_bases.end())
+            {
+                explicit_base = found->second;
+            }
+            module_inputs.push_back(analysis::ProcessModuleInput{name, module_bytes.back(), explicit_base});
+        }
+        analysis::ProcessImageOptions process_options;
+        process_options.primary_module = configured_primary;
+        process_options.provider_search_complete = provider_search_complete;
+        process_options.module_options = load_options;
+        process_options.module_options.module_base = 0U;
+        process_options.module_options.module_name = "";
+        auto process = analysis::load_process_image(module_inputs, process_options);
+        if (!process)
+        {
+            print_error(process.error());
+            return static_cast<int>(ExitCode::InfrastructureFailure);
+        }
+        std::vector<analysis::FinalizedFunctionMap> maps;
+        maps.reserve(process.value().modules().size());
+        for (const auto& module : process.value().modules())
+        {
+            const auto map = analysis::FunctionMapBuilder::build(
+                analysis::ModuleAnalysisInput{module.identity, &process.value().memory(), module.seeds},
+                function_options);
+            if (!map)
+            {
+                print_error(map.error());
+                return static_cast<int>(ExitCode::InfrastructureFailure);
+            }
+            maps.push_back(std::move(map).value());
+        }
+        const auto process_map = analysis::ProcessFunctionMap::build(std::move(maps));
+        if (!process_map)
+        {
+            print_error(process_map.error());
+            return static_cast<int>(ExitCode::InfrastructureFailure);
+        }
+        const auto* primary_map = [&]() -> const analysis::FinalizedFunctionMap* {
+            for (const auto& map : process_map.value().maps())
+                if (map.identity().module == configured_primary) return &map;
+            return nullptr;
+        }();
+        if (primary_map == nullptr)
+        {
+            std::cerr << "primary process module has no finalized function map\n";
+            return static_cast<int>(ExitCode::InfrastructureFailure);
+        }
+        execution::EntrySelectionKind selection_kind;
+        if (entry_name == "dt-init") selection_kind = execution::EntrySelectionKind::DynamicInit;
+        else if (entry_name == "dt-fini") selection_kind = execution::EntrySelectionKind::DynamicFini;
+        else if (entry_name == "text-start") selection_kind = execution::EntrySelectionKind::TextStartCandidate;
+        else if (entry_name == "process") selection_kind = execution::EntrySelectionKind::VerifiedProcessEntry;
+        else if (entry_name == "analyst") selection_kind = execution::EntrySelectionKind::AnalystAddress;
+        else
+        {
+            std::cerr << "unknown --entry kind\n";
+            return static_cast<int>(ExitCode::InvalidArguments);
+        }
+        const auto selected = execution::select_entry(primary_map->identity(), selection_kind, analyst_address);
+        if (!selected)
+        {
+            print_error(selected.error());
+            return static_cast<int>(ExitCode::InfrastructureFailure);
+        }
+        runtime::RuntimeImportRegistry runtime_imports;
+        const auto registered = runtime::register_m12_evidence_imports(runtime_imports);
+        if (!registered)
+        {
+            print_error(registered.error());
+            return static_cast<int>(ExitCode::InfrastructureFailure);
+        }
+        execution::ExecutionLoadSummary summary;
+        for (const auto& module : process.value().modules())
+        {
+            summary.relocations_parsed += module.relocations.size();
+            summary.relocations_applied += module.applied_relocations;
+            summary.unresolved_relocations += module.unresolved_relocations.size();
+        }
+        execution::ExecutionSession session(process.value().memory(), process_map.value(),
+                                            process.value(), execution_options, summary,
+                                            &runtime_imports);
+        const auto run = session.run(selected.value());
+        if (!run)
+        {
+            print_error(run.error());
+            return static_cast<int>(ExitCode::InfrastructureFailure);
+        }
+        const auto report = execution::render_execution_report_json(run.value());
+        if (!report_path.empty())
+        {
+            std::ofstream output(report_path, std::ios::binary);
+            if (!output) { std::cerr << "unable to write report\n"; return static_cast<int>(ExitCode::InfrastructureFailure); }
+            output << report;
+            if (!output) { std::cerr << "unable to finish report\n"; return static_cast<int>(ExitCode::InfrastructureFailure); }
+        }
+        if (emit_json) std::cout << report;
+        else std::cout << "STOPPED: " << execution::execution_stop_reason_name(run.value().stop_reason)
+                        << " pc=" << std::hex << run.value().stop_pc << std::dec << '\n';
+        return static_cast<int>(ExitCode::Success);
     }
 
     // Keep the CLI's analysis controls separate from the metadata parser and

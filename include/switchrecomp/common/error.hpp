@@ -84,6 +84,13 @@ enum class ErrorCode
     CodegenFailure,
     LlvmVerificationFailed,
     JitCompilationFailed,
+    DuplicateModuleIdentity,
+    ModuleAddressOverlap,
+    ModuleLayoutOverflow,
+    AmbiguousProvider,
+    InvalidProviderDefinition,
+    ProviderSearchIncomplete,
+    InvalidCrossModuleTransfer,
 };
 
 [[nodiscard]] std::string_view error_code_name(ErrorCode code) noexcept;

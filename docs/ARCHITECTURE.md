@@ -1,7 +1,7 @@
 # TotkRecomp Architecture and Implementation Plan
 
-> Status: Proposed architecture with Milestones 0–11 implemented
-> Repository snapshot: 2026-09-06
+> Status: Proposed architecture with Milestones 0–13 implemented
+> Repository snapshot: 2026-09-07
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
 > Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, MOD0/dynamic/RELA metadata discovery, dynamic symbol/relocation application, expanded AArch64 Semantic IR and lifting, deterministic whole-module function discovery/translation reporting, synthetic tests, and deterministic inspection/coverage reports are committed; no supported game build has been committed.
 
@@ -213,6 +213,27 @@ This controlled entry execution consumes a single prepared main module and a
 metadata-selected `DT_INIT` candidate. It is not full process launch: no rtld,
 SDK, Horizon, service bring-up, multi-module image, or verified process-entry
 model is constructed.
+
+Milestone 13 adds the missing process-level layer without changing that
+boundary model. `ProcessImage` owns deterministic multi-module layout and
+module-specific metadata; `ProcessSymbolNamespace` discovers guest providers;
+the transactional relocation planner writes guest addresses only after all
+modules and candidates validate; and `ProcessFunctionMap`/`ExecutionSession`
+resolve exact function ownership across module boundaries. The precedence is
+now:
+
+```text
+consumer undefined symbol
+        ↓
+process guest-provider lookup
+        ├─ resolved → guest relocation → module-aware execution
+        └─ unresolved/ambiguous/incomplete → RuntimeImportRegistry boundary
+```
+
+Resolved guest bindings are linker accounting, not runtime-import accounting.
+Analysis-selected bases remain explicitly distinct from externally observed or
+runtime-verified bases. The local M13 executable set is incomplete, so the
+real `__nnmusl_init_dso` run remains at the existing M12 boundary.
 
 ## 5. Why static recompilation is viable, and why this target is difficult
 
@@ -1942,14 +1963,15 @@ reported as translated have passed Semantic IR verification.
 **Deferred:** Real TOTK `main` analysis is a local workflow only and its reports
 are never committed. The main `.text` start is not a verified process entry.
 Full native startup is rtld-led and requires the ExeFS module order and `rtld`
-launch model; that multi-module architecture is deferred. Game boot,
-Horizon/runtime bring-up, filesystem,
+launch model; M13 now models supplied modules and guest linking without
+claiming the retail startup order. Game boot, Horizon/runtime bring-up, filesystem,
 graphics, audio, input, renderer, full exception behavior, complete AArch64
 coverage, pair-exclusive/LSE atomics, WFE/WFI, and final executable linking
 remain future work. M10.2 prepares trustworthy ownership data for controlled
-M11 initialization-path work; it does not execute the game entry path.
+M11 initialization-path work; M13 adds the process-level layer but does not
+execute the game entry path beyond the first evidence-backed boundary.
 
-**Roadmap numbering correction:** The future roadmap previously contained a numbering gap after Milestone 10. The affected future milestones have been renumbered to restore the intended continuous sequence from Milestone 11 through Milestone 20. No milestone scope was inserted or removed by this documentation correction.
+**Roadmap numbering correction:** The future roadmap previously contained a numbering gap after Milestone 10. The affected future milestones have been renumbered to restore the intended continuous sequence from Milestone 11 through Milestone 21. M13 is now the multi-module process/linking milestone; no filesystem or renderer scope was removed.
 
 ### Milestone 11 — Controlled entry-path execution
 
@@ -1980,49 +2002,67 @@ registration, when used by a future handler, is validate-then-commit.
 **Deferred:** Nintendo loader semantics, provider/module selection, full TLS,
 multi-module startup, Horizon/services, and speculative compatibility returns.
 
-### Milestone 13 — Filesystem and asset loading
+### Milestone 13 — Multi-module guest linking and provider resolution
+
+**Implemented:** `analysis::ProcessImage` loads arbitrary prepared NSO modules
+into one checked, deterministic guest address space with explicit base
+provenance, per-module metadata/symbol/relocation provenance, and transactional
+process-wide relocation planning. `ProcessSymbolNamespace` discovers eligible
+guest providers without treating filenames as proof; unique providers resolve,
+ambiguous providers remain ambiguous, and incomplete searches remain explicit.
+`ProcessFunctionMap` and `ExecutionSession` preserve module ownership across
+guest calls and tail transfers. Schema-3 execution reports retain consumer →
+relocation → provider records separately from runtime/HLE accounting.
+
+**Real result:** The local executable set contains only `main`, so the search
+for `__nnmusl_init_dso` is incomplete and finds no provider candidate. The
+single-module run remains at M12's `runtime_import_unimplemented` boundary;
+no guessed host handler was added. See [MILESTONE_13.md](MILESTONE_13.md) for
+the inventory, public evidence, synthetic coverage, and exact blocker.
+
+### Milestone 14 — Filesystem and asset loading
 
 **Goal:** Mount user-provided game data and implement the required streaming path.
 
 **Success:** TOTK opens required resources and begins loading without missing-path or handle-semantics failures.
 
-### Milestone 14 — Graphics initialization
+### Milestone 15 — Graphics initialization
 
 **Goal:** Trace and intercept the selected graphics boundary and create logical native resources.
 
 **Success:** Recompiled code creates the required native device/resources through the canonical render interface.
 
-### Milestone 15 — First present
+### Milestone 16 — First present
 
 **Goal:** Produce a window, swapchain, render target, and present path.
 
 **Success:** A frame initiated by recompiled code reaches the display. A cleared framebuffer counts.
 
-### Milestone 16 — First visible game output
+### Milestone 17 — First visible game output
 
 **Goal:** Render actual TOTK graphics, even if incomplete.
 
 **Success:** Game-generated geometry or UI is visible through the native renderer.
 
-### Milestone 17 — Menu boot
+### Milestone 18 — Menu boot
 
 **Goal:** Reach an interactable title screen or early menu.
 
 **Success:** Input works and the menu remains stable across repeated runs.
 
-### Milestone 18 — In-game
+### Milestone 19 — In-game
 
 **Goal:** Reach a playable scene.
 
 **Success:** Gameplay begins with known limitations documented.
 
-### Milestone 19 — Correctness
+### Milestone 20 — Correctness
 
 **Focus:** Crashes, memory, synchronization, graphics, audio, saves, streaming, input, timing, and gameplay behavior.
 
 **Success:** A repeatable validation suite covers representative flows and regressions.
 
-### Milestone 20 — Performance
+### Milestone 21 — Performance
 
 **Focus:** Direct-call lowering, dispatcher locality, LLVM optimization, SSA/register improvements, guest-memory fast paths, allocation, renderer batching, shader/pipeline caches, and asynchronous compilation.
 

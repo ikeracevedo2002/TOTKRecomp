@@ -48,6 +48,32 @@ paths locally. `config/local.json` is ignored by Git. Local configuration may
 point to `main`, `subsdk*`, RomFS, cache, and analysis directories, but it is not
 part of target identity.
 
+## Multi-module process configuration
+
+Milestone 13 extends the local-only configuration with an arbitrary `modules`
+object, an explicit `primary_module`, optional `module_bases`, and a
+`provider_search_complete` assertion. For example:
+
+```json
+{
+  "modules": {
+    "main": "/local/path/main.nso",
+    "sdk": "/local/path/sdk.nso"
+  },
+  "primary_module": "main",
+  "module_bases": {
+    "main": "0x7100000000"
+  },
+  "provider_search_complete": false
+}
+```
+
+Logical names and parsed NSO identity, not host paths, identify modules in
+reports. Explicit bases are analysis-only unless separately verified. When the
+executable set is incomplete, leave `provider_search_complete` false so an
+unresolved symbol is reported as an incomplete search rather than as proof of
+an external runtime service.
+
 ## File matching
 
 The bootstrap validator compares a local module against its manifest using file

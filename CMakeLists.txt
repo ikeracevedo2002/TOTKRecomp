@@ -214,6 +214,7 @@ add_library(switchrecomp-analysis
     src/switchrecomp/analysis/cfg_analyzer.cpp
     src/switchrecomp/analysis/coverage.cpp
     src/switchrecomp/analysis/function_map.cpp
+    src/switchrecomp/analysis/process_image.cpp
 )
 target_include_directories(switchrecomp-analysis
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -432,6 +433,7 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/milestone10_whole_main_tests.cpp
         tests/milestone11_execution_tests.cpp
         tests/milestone12_runtime_tests.cpp
+        tests/milestone13_multimodule_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE

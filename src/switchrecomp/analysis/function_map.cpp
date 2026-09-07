@@ -15,6 +15,19 @@
 namespace switchrecomp::analysis
 {
 
+std::string_view module_base_provenance_name(ModuleBaseProvenance provenance) noexcept
+{
+    switch (provenance)
+    {
+    case ModuleBaseProvenance::ExplicitAnalysisBase: return "explicit_analysis_base";
+    case ModuleBaseProvenance::DeterministicAnalysisLayout:
+        return "deterministic_analysis_layout";
+    case ModuleBaseProvenance::ExternallyObserved: return "externally_observed";
+    case ModuleBaseProvenance::RuntimeVerified: return "runtime_verified";
+    }
+    return "unknown";
+}
+
 namespace
 {
 

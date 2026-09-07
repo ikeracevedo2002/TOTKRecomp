@@ -82,6 +82,13 @@ std::string_view error_code_name(ErrorCode code) noexcept
     case ErrorCode::CodegenFailure: return "codegen_failure";
     case ErrorCode::LlvmVerificationFailed: return "llvm_verification_failed";
     case ErrorCode::JitCompilationFailed: return "jit_compilation_failed";
+    case ErrorCode::DuplicateModuleIdentity: return "duplicate_module_identity";
+    case ErrorCode::ModuleAddressOverlap: return "module_address_overlap";
+    case ErrorCode::ModuleLayoutOverflow: return "module_layout_overflow";
+    case ErrorCode::AmbiguousProvider: return "ambiguous_provider";
+    case ErrorCode::InvalidProviderDefinition: return "invalid_provider_definition";
+    case ErrorCode::ProviderSearchIncomplete: return "provider_search_incomplete";
+    case ErrorCode::InvalidCrossModuleTransfer: return "invalid_cross_module_transfer";
     }
     return "unknown";
 }

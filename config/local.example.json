@@ -3,6 +3,11 @@
   "modules": {
     "main": "/path/to/your/local/main.nso"
   },
+  "primary_module": "main",
+  "module_bases": {
+    "main": "0x7100000000"
+  },
+  "provider_search_complete": false,
   "romfs": "/path/to/your/local/romfs",
   "cache": "build/cache",
   "analysis_project": "/path/to/your/local/analysis-project"

@@ -50,6 +50,14 @@ real `__nnmusl_init_dso` boundary is recognized but remains explicitly
 unimplemented because its contract and provider are not established; no fake
 return value is used.
 
+Milestone 13 adds deterministic multi-module process analysis, module-aware
+guest symbol-provider discovery, cross-module relocation planning, and
+process-aware guest execution. Runtime/HLE import resolution is consulted only
+after guest-module provider resolution. The available local executable set is
+currently one `main` NSO, so `__nnmusl_init_dso` remains an evidence-driven
+unresolved provider search and the real run still stops at the M12
+`runtime_import_unimplemented` boundary.
+
 No supported TOTK build is committed. The repository contains no game binaries,
 keys, firmware, SDKs, or extracted game assets. The committed TOTK manifest is an
 explicit `template` and contains no real hashes or Build IDs.
@@ -98,6 +106,10 @@ Inspect and materialize an NSO0 input:
   --report build/reports/main.json path/to/prepared-main.nso
 ./build/run-entry --entry dt-init --module-base 0x7100000000 \
   --report build/reports/m12-dt-init.json path/to/prepared-main.nso
+
+# Multi-module process analysis; paths remain local-only.
+./build/run-entry --local-config config/local.json --entry dt-init \
+  --report build/reports/m13-process.json
 ```
 
 `translate-module` consumes an already prepared, legally supplied NSO. It
@@ -118,6 +130,7 @@ On a multi-config generator, use `build/Debug/nso-inspect`.
 - [Milestone 10 whole-main translation](docs/MILESTONE_10.md)
 - [Milestone 11 controlled entry execution](docs/MILESTONE_11.md)
 - [Milestone 12 runtime import boundary](docs/MILESTONE_12.md)
+- [Milestone 13 multi-module provider resolution](docs/MILESTONE_13.md)
 - [AArch64 support matrix and coverage workflow](docs/AARCH64_SUPPORT.md)
 - [Build notes](docs/BUILD.md)
 - [Dependency policy](docs/DEPENDENCIES.md)
@@ -216,6 +229,12 @@ to inspect a ZBIC-marked header without claiming materialization succeeded.
 - Milestone 12 — Evidence-driven runtime import boundary: implemented with
   explicit ABI/provenance/continuation handling and deterministic diagnostics;
   `__nnmusl_init_dso` remains a typed unimplemented boundary pending evidence.
+- Milestone 13 — Multi-module guest linking and provider resolution: implemented
+  with deterministic process layouts, module-aware provider candidates,
+  transactional cross-module relocation planning, process-aware execution, and
+  schema-3 reports. The currently supplied one-module local set is explicitly
+  incomplete for real `__nnmusl_init_dso` provider discovery, so the M12
+  runtime boundary remains the honest next stop.
 
 Materialization consumes a legally obtained, already prepared local NSO. The
 repository does not decrypt, extract, or distribute Nintendo content.
