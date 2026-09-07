@@ -59,10 +59,13 @@ unresolved provider search and the real run still stops at the M12
 `runtime_import_unimplemented` boundary.
 Milestone 14 adds bounded executable-set ingestion, deterministic directory
 inventory, identity/coherence validation, provenance-aware completeness, and
-schema-4 process inspection. The inventory and synthetic cross-module
-execution tests are implemented; the real complete-set closure remains
-blocked because no prepared local executable-module set is available in this
-workspace. M14 does not implement `__nnmusl_init_dso` speculatively.
+schema-4 process inspection. Milestone 15 adds load-order evidence, strict
+complete-search gating, provider-base JUMP_SLOT readback, transactional
+runtime-handler precedence, and focused real-set execution. The supplied
+four-module prepared set identifies an eligible `sdk` provider for
+`__nnmusl_init_dso`; its exact-build completeness remains not manifest-verified
+and the focused run stops at an unsupported provider `umulh` instruction. No
+host replacement is used.
 
 No supported TOTK build is committed. The repository contains no game binaries,
 keys, firmware, SDKs, or extracted game assets. The committed TOTK manifest is an
@@ -121,6 +124,8 @@ Inspect and materialize an NSO0 input:
 ./build/process-inspect --local-config config/local.json --json \
   --report build/reports/m14-process-inventory.json
 ./build/process-inspect --directory /path/to/prepared-exefs --json
+./build/run-entry --local-config config/local.json --entry dt-init \
+  --analysis-focus-symbol __nnmusl_init_dso --report build/reports/m15-process.json
 ```
 
 `translate-module` consumes an already prepared, legally supplied NSO. It
@@ -143,6 +148,7 @@ On a multi-config generator, use `build/Debug/nso-inspect`.
 - [Milestone 12 runtime import boundary](docs/MILESTONE_12.md)
 - [Milestone 13 multi-module provider resolution](docs/MILESTONE_13.md)
 - [Milestone 14 complete executable-set ingestion and provider closure](docs/MILESTONE_14.md)
+- [Milestone 15 real executable-set closure and `__nnmusl_init_dso`](docs/MILESTONE_15.md)
 - [AArch64 support matrix and coverage workflow](docs/AARCH64_SUPPORT.md)
 - [Build notes](docs/BUILD.md)
 - [Dependency policy](docs/DEPENDENCIES.md)
@@ -250,8 +256,14 @@ to inspect a ZBIC-marked header without claiming materialization succeeded.
 - Milestone 14 — Complete executable-set ingestion and provider closure:
   infrastructure implemented with schema-4 inventory/inspection, explicit
   completeness provenance, and synthetic cross-module execution coverage.
-  Real executable-set closure is blocked by unavailable legally supplied local
-  modules; no provider or runtime contract is fabricated.
+  Real local evidence is now available, but exact-build manifest verification
+  remains open; the guest `sdk` provider is resolved and controlled execution
+  stops at an unsupported provider instruction.
+- Milestone 15 — Real executable-set closure and `__nnmusl_init_dso`:
+  implemented with deterministic load-order evidence, complete-search gating,
+  transactional provider-base relocation readback, runtime-fallback precedence,
+  and focused real-set reporting. The next blocker is provider instruction
+  coverage and, if observed, faithful rtld/process bootstrap.
 
 Materialization consumes a legally obtained, already prepared local NSO. The
 repository does not decrypt, extract, or distribute Nintendo content.

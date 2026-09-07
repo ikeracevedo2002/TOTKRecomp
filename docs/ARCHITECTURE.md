@@ -2033,9 +2033,26 @@ seeding, and process-aware execution remain the sole process pipeline.
 
 Directory discovery is not a completeness attestation. Manifest-verified
 completeness requires exact logical names, SHA-256 values, and Build IDs.
-`__nnmusl_init_dso` remains unresolved when the prepared exact-build module set
-is unavailable, and no runtime implementation is guessed. See
-[MILESTONE_14.md](MILESTONE_14.md).
+The M14 directory-only real-input state was incomplete; M15 keeps that state
+typed while allowing an explicit local assertion to drive a controlled
+experiment. See [MILESTONE_14.md](MILESTONE_14.md).
+
+### Milestone 15 — Real executable-set closure and `__nnmusl_init_dso`
+
+**Implemented:** M15 retains every parsed focus-symbol occurrence, refuses to
+select a provider from an incomplete search, records public ExeFS load-order
+evidence without using filenames as lookup precedence, and records checked
+provider-base arithmetic plus relocation-slot readback. Runtime fallback is
+eligible only for an explicit complete no-provider result. The supplied local
+four-module set identifies `sdk` dynamic symbol 8767 as the eligible guest
+provider, and both observed JUMP_SLOTs resolve to its guest address. The
+controlled `DT_INIT` experiment reaches the resolved guest target but stops at
+an unsupported `umulh` in the provider's owning function; no host replacement
+is added. Exact-build manifest verification and faithful rtld/process bootstrap
+remain open.
+
+See [MILESTONE_15.md](MILESTONE_15.md) for the inventory, public-source
+evidence, report hashes, execution frontier, and exact next blocker.
 
 ### Future milestone — Filesystem and asset loading
 
@@ -2043,43 +2060,43 @@ is unavailable, and no runtime implementation is guessed. See
 
 **Success:** TOTK opens required resources and begins loading without missing-path or handle-semantics failures.
 
-### Milestone 15 — Graphics initialization
+### Milestone 16 — Graphics initialization
 
 **Goal:** Trace and intercept the selected graphics boundary and create logical native resources.
 
 **Success:** Recompiled code creates the required native device/resources through the canonical render interface.
 
-### Milestone 16 — First present
+### Milestone 17 — First present
 
 **Goal:** Produce a window, swapchain, render target, and present path.
 
 **Success:** A frame initiated by recompiled code reaches the display. A cleared framebuffer counts.
 
-### Milestone 17 — First visible game output
+### Milestone 18 — First visible game output
 
 **Goal:** Render actual TOTK graphics, even if incomplete.
 
 **Success:** Game-generated geometry or UI is visible through the native renderer.
 
-### Milestone 18 — Menu boot
+### Milestone 19 — Menu boot
 
 **Goal:** Reach an interactable title screen or early menu.
 
 **Success:** Input works and the menu remains stable across repeated runs.
 
-### Milestone 19 — In-game
+### Milestone 20 — In-game
 
 **Goal:** Reach a playable scene.
 
 **Success:** Gameplay begins with known limitations documented.
 
-### Milestone 20 — Correctness
+### Milestone 21 — Correctness
 
 **Focus:** Crashes, memory, synchronization, graphics, audio, saves, streaming, input, timing, and gameplay behavior.
 
 **Success:** A repeatable validation suite covers representative flows and regressions.
 
-### Milestone 21 — Performance
+### Milestone 22 — Performance
 
 **Focus:** Direct-call lowering, dispatcher locality, LLVM optimization, SSA/register improvements, guest-memory fast paths, allocation, renderer batching, shader/pipeline caches, and asynchronous compilation.
 
