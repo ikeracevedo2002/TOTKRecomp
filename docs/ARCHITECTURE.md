@@ -390,6 +390,25 @@ limits. Symbol values remain module-relative until a resolver adds the guest
 module base. Undefined imports are explicit and can be satisfied by a generic
 external registry.
 
+Relocation handling has two typed stages. `plan_relocations()` validates and
+classifies the complete table into resolved writes, unresolved external
+bindings, or hard errors; `apply_relocation_plan()` commits only the resolved
+writes after planning succeeds. Valid undefined global/weak symbols used by
+supported symbol-backed relocation types remain diagnostic boundaries with
+their symbol and relocation metadata. They never produce a zero, synthetic
+guest address, or host pointer. The strict `apply_relocations()` facade still
+rejects unresolved bindings, while whole-module diagnostic loading carries them
+into the report. RELA and JMPREL source identity is retained for deterministic
+reporting.
+
+Finalized function-map conflicts use the same freeze point as the canonical
+function records. After fixed-point discovery and range population, all
+pairwise half-open range overlaps are computed once in canonical-entry order;
+adjacent ranges (`end == begin`) are not overlaps. Conflict pairs are
+normalized, deduplicated, and validated in both directions so discovery order
+cannot change conflict identity or ordering. Conflicting records retain their
+discovery evidence while receiving explicit conflict confidence/status.
+
 The semantic relocation pipeline supports the AArch64 ABI types `NONE`,
 `ABS64`, `GLOB_DAT`, `JUMP_SLOT`, and `RELATIVE`. It uses checked `S + A` / `B + A`
 arithmetic, writes little-endian guest values through

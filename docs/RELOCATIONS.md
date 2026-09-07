@@ -47,8 +47,12 @@ The processor supports:
 
 `S` is the resolved guest symbol address, `A` is the signed explicit addend,
 `P` is the relocation target, and `B` is the module guest base. All arithmetic
-is checked and values are written as little-endian 64-bit guest data. Unknown
-types remain inspectable and fail with `UnsupportedRelocationType`.
+is checked and resolved values are written as little-endian 64-bit guest data.
+Unknown types remain inspectable and fail with
+`UnsupportedRelocationType`. A supported symbol-backed relocation whose
+global/weak symbol is undefined is instead represented by the diagnostic
+relocation planner as an unresolved external boundary; it is never written as
+zero or another synthetic value.
 
 The numeric assignments and generic dynamic-relocation operations follow Arm's
 official [AAELF64 specification](https://github.com/ARM-software/abi-aa/blob/main/aaelf64/aaelf64.rst);
@@ -62,11 +66,11 @@ do not carry the explicit addend used by this implementation.
 `SymbolResolver` resolves current-module definitions as `module_base + st_value`,
 then checks a deterministic external registry. The registry can later be
 populated by other NSO modules or runtime/Horizon layers; no platform symbols
-are hardcoded here.
-
-Missing strong undefined symbols fail with `UndefinedStrongSymbol`. Missing weak
-undefined symbols resolve to guest address zero while remaining visible in
-`unresolved_imports()`. Duplicate external registrations fail explicitly.
+are hardcoded here. Its strict `resolve()` API reports an unresolved strong
+symbol as `UndefinedStrongSymbol`, while `resolve_for_relocation()` returns a
+typed unresolved result for valid undefined global/weak bindings so the
+diagnostic planner can retain them without using an address. Duplicate
+external registrations fail explicitly.
 Visibility is retained for future inter-module policy; a complete module-scope
 visibility/link-order model is outside this milestone.
 
@@ -78,7 +82,10 @@ still validates overflow, mapping, and single-region containment but can write a
 region that will be read-only during execution. The processor computes and
 validates every relocation before committing bytes, so parse, resolution,
 arithmetic, unsupported-type, and invalid-target failures leave the image
-unchanged.
+unchanged. `plan_relocations()` returns applied entries and unresolved import
+boundaries; `apply_relocation_plan()` commits only the validated resolved
+writes. The whole-module diagnostic loader uses this split, while strict
+`apply_relocations()` retains its blocking behavior.
 
 ## CLI and limitations
 

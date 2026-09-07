@@ -184,7 +184,9 @@ to inspect a ZBIC-marked header without claiming materialization succeeded.
 - Milestone 7 — Expanded AArch64 semantics and real-code coverage tooling: implemented.
 - Milestone 8 — AArch64 FP/SIMD state, semantics, and required vector memory: implemented.
 - Milestone 9 — Native threads, TLS, atomics, barriers, and memory ordering: implemented for the documented synthetic subset.
-- Milestone 10 — Whole-main translation: implemented for prepared modules and the documented synthetic corpus; real-game boot remains deferred.
+- Milestone 10 — Whole-main translation: implemented for prepared modules and
+  exercised locally against one legally supplied prepared TOTK main NSO with
+  bounded diagnostic reporting; real-game boot remains deferred.
 
 Materialization consumes a legally obtained, already prepared local NSO. The
 repository does not decrypt, extract, or distribute Nintendo content.
