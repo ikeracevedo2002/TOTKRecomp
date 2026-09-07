@@ -120,6 +120,7 @@ void help(std::ostream& output)
               "  --module-base-for NAME=ADDR    Set one process module analysis base.\n"
               "  --entry KIND                   dt-init, dt-fini, text-start, process.\n"
               "  --entry-address ADDR           Unverified analyst address.\n"
+              "  --analysis-focus-symbol NAME  Analyze only the bounded startup/provider closure for NAME.\n"
               "  --backend interpreter           M11 reference backend.\n"
               "  --stack-size N                 Synthetic guest stack size.\n"
               "  --report PATH                  Write deterministic JSON report.\n"
@@ -178,6 +179,7 @@ int main(int argc, char** argv)
     std::vector<std::pair<std::string, std::filesystem::path>> configured_modules;
     std::map<std::string, std::uint64_t> configured_bases;
     std::string configured_primary = "main";
+    std::string analysis_focus_symbol;
     bool provider_search_complete = false;
     analysis::ModuleSetCompleteness module_set_completeness =
         analysis::ModuleSetCompleteness::Incomplete;
@@ -276,6 +278,10 @@ int main(int argc, char** argv)
                 return static_cast<int>(ExitCode::InvalidArguments);
             }
             analyst_address = address;
+            continue;
+        }
+        if (take_value(index, argc, argv, "--analysis-focus-symbol", analysis_focus_symbol))
+        {
             continue;
         }
         if (take_value(index, argc, argv, "--backend", value))
@@ -634,6 +640,8 @@ int main(int argc, char** argv)
         process_options.module_set_coherence_basis = inventory.coherence_basis;
         process_options.module_set_source = inventory.source;
         process_options.ignored_module_entries = inventory.ignored_entries;
+        process_options.module_order = analysis::ProcessModuleOrderEvidence{
+            inventory.module_load_order, inventory.module_load_order_basis};
         process_options.module_options = load_options;
         process_options.module_options.module_base = 0U;
         process_options.module_options.module_name = "";
@@ -645,10 +653,45 @@ int main(int argc, char** argv)
         }
         std::vector<analysis::FinalizedFunctionMap> maps;
         maps.reserve(process.value().modules().size());
+        const auto focus_provider = analysis_focus_symbol.empty()
+                                         ? analysis::ProviderLookup{}
+                                         : process.value().lookup_provider(analysis_focus_symbol);
         for (const auto& module : process.value().modules())
         {
+            std::vector<analysis::FunctionSeed> seeds = module.seeds;
+            if (!analysis_focus_symbol.empty())
+            {
+                seeds.clear();
+                for (const auto& seed : module.seeds)
+                {
+                    const bool is_focus_symbol = seed.name &&
+                                                 seed.name.value() == analysis_focus_symbol;
+                    const bool is_primary_init = module.identity.module == configured_primary &&
+                                                 seed.source == analysis::FunctionDiscoverySource::AnalystSeed &&
+                                                 seed.note.find("DT_INIT") != std::string::npos;
+                    if (is_focus_symbol || is_primary_init) seeds.push_back(seed);
+                }
+                if (focus_provider.selected_candidate &&
+                    focus_provider.selected_candidate.value() < focus_provider.candidates.size())
+                {
+                    const auto& candidate = focus_provider.candidates[
+                        focus_provider.selected_candidate.value()];
+                    if (candidate.module == module.identity.module &&
+                        std::none_of(seeds.begin(), seeds.end(), [&](const auto& seed) {
+                            return seed.entry == candidate.address;
+                        }))
+                    {
+                        seeds.push_back(analysis::FunctionSeed{
+                            candidate.address, analysis::FunctionDiscoverySource::DynamicSymbol,
+                            analysis::FunctionConfidence::Confirmed, std::nullopt,
+                            std::optional<std::string>(analysis_focus_symbol),
+                            "M15 selected provider closure seed"});
+                    }
+                }
+                if (seeds.empty()) continue;
+            }
             const auto map = analysis::FunctionMapBuilder::build(
-                analysis::ModuleAnalysisInput{module.identity, &process.value().memory(), module.seeds},
+                analysis::ModuleAnalysisInput{module.identity, &process.value().memory(), std::move(seeds)},
                 function_options);
             if (!map)
             {
