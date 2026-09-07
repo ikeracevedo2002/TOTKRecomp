@@ -345,17 +345,33 @@ using GuestAddress = memory::GuestAddress;
                                                      const FunctionRecord& second,
                                                      std::string module)
 {
+    const FunctionRecord* normalized_first = &first;
+    const FunctionRecord* normalized_second = &second;
+    if (normalized_second->canonical_entry < normalized_first->canonical_entry)
+    {
+        std::swap(normalized_first, normalized_second);
+    }
     return FunctionBoundaryConflict{
         std::move(module),
-        first.canonical_entry,
-        second.canonical_entry,
-        GuestAddressRange{first.range_begin, first.range_end - first.range_begin},
-        GuestAddressRange{second.range_begin, second.range_end - second.range_begin},
-        first.primary_source,
-        second.primary_source,
-        first.confidence,
-        second.confidence,
+        normalized_first->canonical_entry,
+        normalized_second->canonical_entry,
+        GuestAddressRange{normalized_first->range_begin,
+                          normalized_first->range_end - normalized_first->range_begin},
+        GuestAddressRange{normalized_second->range_begin,
+                          normalized_second->range_end - normalized_second->range_begin},
+        normalized_first->primary_source,
+        normalized_second->primary_source,
+        normalized_first->confidence,
+        normalized_second->confidence,
         "unresolved; manual review required"};
+}
+
+[[nodiscard]] bool ranges_overlap(const FunctionRecord& left,
+                                  const FunctionRecord& right) noexcept
+{
+    // Function ranges are half-open: [range_begin, range_end). Equal end and
+    // begin addresses are adjacency, not a boundary conflict.
+    return left.range_begin < right.range_end && right.range_begin < left.range_end;
 }
 
 } // namespace
@@ -630,50 +646,55 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
                   return left.canonical_entry < right.canonical_entry;
               });
 
-    std::vector<std::size_t> by_range(result.functions_.size());
-    for (std::size_t index = 0U; index < by_range.size(); ++index)
+    // Compute the complete conflict set only after all fixed-point discovery
+    // and range population has finished. The result functions are already in
+    // canonical-entry order, so each pair is considered exactly once and its
+    // identity is independent of seed/discovery order.
+    for (std::size_t left = 0U; left < result.functions_.size(); ++left)
     {
-        by_range[index] = index;
-    }
-    std::sort(by_range.begin(), by_range.end(), [&](std::size_t left, std::size_t right) {
-        if (result.functions_[left].range_begin != result.functions_[right].range_begin)
+        if (!result.functions_[left].cfg)
         {
-            return result.functions_[left].range_begin < result.functions_[right].range_begin;
+            continue;
         }
-        return result.functions_[left].canonical_entry < result.functions_[right].canonical_entry;
-    });
-    std::vector<std::size_t> active;
-    for (const auto index : by_range)
-    {
-        const auto& current = result.functions_[index];
-        if (current.cfg)
+        for (std::size_t right = left + 1U; right < result.functions_.size(); ++right)
         {
-            active.erase(std::remove_if(active.begin(), active.end(), [&](std::size_t active_index) {
-                            return result.functions_[active_index].range_end <= current.range_begin;
-                        }),
-                         active.end());
-            for (const auto active_index : active)
+            if (!result.functions_[right].cfg ||
+                !ranges_overlap(result.functions_[left], result.functions_[right]))
             {
-                const auto& previous = result.functions_[active_index];
-                if (previous.range_begin < current.range_end &&
-                    current.range_begin < previous.range_end)
-                {
-                    result.conflicts_.push_back(
-                        make_conflict(previous, current, input.identity.module));
-                    result.functions_[active_index].confidence = FunctionConfidence::Conflict;
-                    result.functions_[active_index].translation_status = TranslationStatus::Conflict;
-                    result.functions_[index].confidence = FunctionConfidence::Conflict;
-                    result.functions_[index].translation_status = TranslationStatus::Conflict;
-                }
+                continue;
             }
-            active.push_back(index);
+            result.conflicts_.push_back(
+                make_conflict(result.functions_[left], result.functions_[right],
+                              input.identity.module));
         }
     }
-    std::sort(result.conflicts_.begin(), result.conflicts_.end(),
-              [](const FunctionBoundaryConflict& left, const FunctionBoundaryConflict& right) {
-                  return std::tie(left.first_function, left.second_function) <
-                         std::tie(right.first_function, right.second_function);
-              });
+    // Mark records only after all conflict records have captured the original
+    // discovery confidence. The evidence vector remains the provenance source
+    // even after the finalized record receives Conflict status.
+    for (const auto& conflict : result.conflicts_)
+    {
+        const auto first = std::lower_bound(
+            result.functions_.begin(), result.functions_.end(), conflict.first_function,
+            [](const FunctionRecord& function, GuestAddress entry) {
+                return function.canonical_entry < entry;
+            });
+        const auto second = std::lower_bound(
+            result.functions_.begin(), result.functions_.end(), conflict.second_function,
+            [](const FunctionRecord& function, GuestAddress entry) {
+                return function.canonical_entry < entry;
+            });
+        if (first != result.functions_.end() && first->canonical_entry == conflict.first_function)
+        {
+            first->confidence = FunctionConfidence::Conflict;
+            first->translation_status = TranslationStatus::Conflict;
+        }
+        if (second != result.functions_.end() &&
+            second->canonical_entry == conflict.second_function)
+        {
+            second->confidence = FunctionConfidence::Conflict;
+            second->translation_status = TranslationStatus::Conflict;
+        }
+    }
     result.frozen_ = true;
     const auto valid = validate_finalized_function_map(result);
     if (!valid)
@@ -735,6 +756,43 @@ Result<void> validate_finalized_function_map(const FinalizedFunctionMap& map)
         }
     }
 
+    std::set<std::pair<GuestAddress, GuestAddress>> recorded_conflicts;
+    for (const auto& conflict : map.conflicts_)
+    {
+        if (conflict.module != map.identity_.module ||
+            conflict.first_function >= conflict.second_function ||
+            !recorded_conflicts.emplace(conflict.first_function, conflict.second_function).second)
+        {
+            return Result<void>::failure(make_error(
+                ErrorCode::FunctionBoundaryConflict,
+                "function map contains a duplicate or non-normalized conflict"));
+        }
+
+        const auto first = std::lower_bound(
+            map.functions_.begin(), map.functions_.end(), conflict.first_function,
+            [](const FunctionRecord& function, GuestAddress entry) {
+                return function.canonical_entry < entry;
+            });
+        const auto second = std::lower_bound(
+            map.functions_.begin(), map.functions_.end(), conflict.second_function,
+            [](const FunctionRecord& function, GuestAddress entry) {
+                return function.canonical_entry < entry;
+            });
+        if (first == map.functions_.end() || first->canonical_entry != conflict.first_function ||
+            second == map.functions_.end() || second->canonical_entry != conflict.second_function ||
+            !first->cfg || !second->cfg ||
+            conflict.first_range.base != first->range_begin ||
+            conflict.first_range.size != first->range_end - first->range_begin ||
+            conflict.second_range.base != second->range_begin ||
+            conflict.second_range.size != second->range_end - second->range_begin ||
+            !ranges_overlap(*first, *second))
+        {
+            return Result<void>::failure(make_error(
+                ErrorCode::FunctionBoundaryConflict,
+                "function map contains a phantom or stale boundary conflict"));
+        }
+    }
+
     for (std::size_t left = 0U; left < map.functions_.size(); ++left)
     {
         if (!map.functions_[left].cfg)
@@ -753,16 +811,22 @@ Result<void> validate_finalized_function_map(const FinalizedFunctionMap& map)
             {
                 continue;
             }
-            const auto conflict = std::find_if(
-                map.conflicts_.begin(), map.conflicts_.end(), [&](const auto& item) {
-                    return item.first_function == map.functions_[left].canonical_entry &&
-                           item.second_function == map.functions_[right].canonical_entry;
-                });
-            if (conflict == map.conflicts_.end())
+            const auto pair = std::make_pair(map.functions_[left].canonical_entry,
+                                             map.functions_[right].canonical_entry);
+            if (recorded_conflicts.find(pair) == recorded_conflicts.end())
             {
                 return Result<void>::failure(make_error(
                     ErrorCode::FunctionBoundaryConflict,
                     "overlapping function ranges were not recorded as a conflict"));
+            }
+            if (map.functions_[left].confidence != FunctionConfidence::Conflict ||
+                map.functions_[left].translation_status != TranslationStatus::Conflict ||
+                map.functions_[right].confidence != FunctionConfidence::Conflict ||
+                map.functions_[right].translation_status != TranslationStatus::Conflict)
+            {
+                return Result<void>::failure(make_error(
+                    ErrorCode::FunctionBoundaryConflict,
+                    "overlapping functions were not marked as conflicting"));
             }
         }
     }

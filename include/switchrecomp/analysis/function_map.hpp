@@ -79,6 +79,7 @@ struct ModuleIdentity
     std::string build_id;
     std::string input_sha256;
     memory::GuestAddress guest_base = 0U;
+    bool guest_base_verified = false;
     std::vector<GuestAddressRange> executable_ranges;
     std::string translator_version;
     std::uint32_t metadata_schema_version = 1U;
