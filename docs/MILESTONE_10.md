@@ -322,7 +322,7 @@ diagnostic runs reached local report generation. The relocation-enabled run
 parsed 504,436 relocations, applied 502,345, and retained 2,091 unresolved
 bindings (1,451 non-PLT and 640 JMPREL); 675 unresolved imports were listed.
 It discovered/analyzed 613 functions, translated 8, marked 1 unsupported and
-604 failed, with 4,437 blocks, 4,958 CFG edges, 126 decoded instructions,
+604 failed, with 74,240 analyzed bytes, 4,437 blocks, 4,958 CFG edges, 126 decoded instructions,
 125 lifted instructions, 1 unsupported instruction, 820 direct calls, 675
 indirect calls, and 792 unresolved indirect-flow observations. The finalized
 map contained 16,103 explicit boundary conflicts involving 604 functions.

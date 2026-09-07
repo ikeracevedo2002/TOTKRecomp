@@ -423,9 +423,11 @@ TEST_CASE("M10 synthetic NSO crosses loading, MOD0, dynamic metadata, discovery 
     REQUIRE(result.value().coverage.functions_discovered == 2U);
     REQUIRE(result.value().coverage.functions_translated == 2U);
     REQUIRE(result.value().coverage.direct_calls == 1U);
+    REQUIRE(result.value().coverage.bytes_analyzed > 0U);
     const auto first_report = analysis::render_translation_report_json(result.value());
     const auto second_report = analysis::render_translation_report_json(result.value());
     REQUIRE(first_report == second_report);
     REQUIRE(first_report.find("/workspace") == std::string::npos);
+    REQUIRE(first_report.find("\"bytes_analyzed\"") != std::string::npos);
     REQUIRE(first_report.find("synthetic-main.nso") != std::string::npos);
 }

@@ -345,6 +345,7 @@ using json = nlohmann::json;
                 {"functions_unsupported", coverage.functions_unsupported},
                 {"functions_failed", coverage.functions_failed},
                 {"conflicting_functions", coverage.conflicting_functions},
+                {"bytes_analyzed", coverage.bytes_analyzed},
                 {"basic_blocks", coverage.basic_blocks},
                 {"cfg_edges", coverage.cfg_edges},
                 {"direct_calls", coverage.direct_calls},
@@ -463,6 +464,8 @@ using json = nlohmann::json;
         if (function.cfg)
         {
             ++result.coverage.functions_analyzed;
+            result.coverage.bytes_analyzed +=
+                static_cast<memory::GuestSize>(function.cfg->instruction_count) * 4U;
             result.coverage.basic_blocks += function.cfg->blocks.size();
             for (const auto& [unused, block] : function.cfg->blocks)
             {
