@@ -5,15 +5,40 @@
 #include "switchrecomp/runtime/fp.hpp"
 
 #include <cstdint>
+#include <iomanip>
 #include <limits>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace switchrecomp::interpreter
 {
 
+void InterpreterFrame::reset(const ir::Function& function_value)
+{
+    function = &function_value;
+    current_block = function_value.entry_block();
+    values.assign(function_value.values().size(), 0U);
+    high_values.assign(function_value.values().size(), 0U);
+    provenance.assign(function_value.values().size(), InterpreterValueProvenance{});
+    register_provenance.fill(InterpreterValueProvenance{});
+}
+
 namespace
 {
+
+[[nodiscard]] bool add_signed_without_overflow(std::int64_t left, std::int64_t right,
+                                                std::int64_t& result) noexcept
+{
+    if ((right > 0 && left > std::numeric_limits<std::int64_t>::max() - right) ||
+        (right < 0 && left < std::numeric_limits<std::int64_t>::min() - right))
+    {
+        return false;
+    }
+    result = left + right;
+    return true;
+}
 
 [[nodiscard]] std::uint64_t mask_for(ir::Type type) noexcept
 {
@@ -82,9 +107,9 @@ namespace
 
 } // namespace
 
-Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::CpuState& cpu,
-                                         runtime::RuntimeContext& runtime,
-                                         const runtime::ExecutionOptions& options)
+Result<runtime::ExecutionResult> execute_until_boundary(
+    const ir::Function& function, runtime::CpuState& cpu, runtime::RuntimeContext& runtime,
+    InterpreterFrame& frame, const runtime::ExecutionOptions& options)
 {
     const auto verified = ir::verify(function);
     if (!verified)
@@ -92,14 +117,15 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
         return Result<runtime::ExecutionResult>::failure(verified.error());
     }
     runtime.clear_error();
-    std::vector<std::uint64_t> values(function.values().size(), 0U);
-    std::vector<std::uint64_t> high_values(function.values().size(), 0U);
-    auto current = function.entry_block();
+    if (frame.function != &function || frame.values.size() != function.values().size())
+    {
+        frame.reset(function);
+    }
     runtime::ExecutionResult result;
 
     while (true)
     {
-        const auto* block = function.block(current);
+        const auto* block = function.block(frame.current_block);
         if (block == nullptr)
         {
             return Result<runtime::ExecutionResult>::failure(
@@ -110,27 +136,35 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
         {
             if (result.executed_operations >= options.max_ir_operations)
             {
-                return Result<runtime::ExecutionResult>::failure(make_error(
-                    ErrorCode::ExecutionLimitExceeded,
-                    "interpreter exceeded the configured IR operation limit"));
+                result.status = runtime::ExecutionStatus::LimitExceeded;
+                result.boundary = runtime::ExecutionBoundary{
+                    runtime::ExecutionBoundaryKind::BudgetExhaustion, cpu.pc, 0U, false,
+                    ir::invalid_block, 0U, function.guest_entry(), false, 0U, {}, {}};
+                result.final_guest_pc = cpu.pc;
+                return Result<runtime::ExecutionResult>::success(std::move(result));
             }
             ++result.executed_operations;
-            const auto read = [&](ir::ValueId id) { return get_value(function, values, id); };
-            const auto store_result = [&](std::uint64_t value, std::uint64_t high = 0U) -> Result<void> {
-                if (instruction.result == ir::invalid_value || instruction.result >= values.size())
+            const auto read = [&](ir::ValueId id) { return get_value(function, frame.values, id); };
+            const auto store_result = [&](std::uint64_t value, std::uint64_t high = 0U,
+                                          InterpreterValueProvenance value_provenance = {}) -> Result<void> {
+                if (instruction.result == ir::invalid_value || instruction.result >= frame.values.size())
                 {
                     return Result<void>::failure(
                         make_error(ErrorCode::InvalidIrValue, "instruction result is invalid"));
                 }
-                values[instruction.result] = value_for_width(value, instruction.result_type);
-                high_values[instruction.result] = high;
+                frame.values[instruction.result] = value_for_width(value, instruction.result_type);
+                frame.high_values[instruction.result] = high;
+                frame.provenance[instruction.result] = value_provenance;
                 return Result<void>::success();
             };
 
             switch (instruction.opcode)
             {
             case ir::Opcode::Constant:
-                if (const auto stored = store_result(instruction.constant, instruction.constant_high); !stored)
+                if (const auto stored = store_result(
+                        instruction.constant, instruction.constant_high,
+                        InterpreterValueProvenance{InterpreterValueProvenance::Kind::Constant,
+                                                   instruction.constant, 0}); !stored)
                 {
                     return Result<runtime::ExecutionResult>::failure(stored.error());
                 }
@@ -142,7 +176,14 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
                 break;
             case ir::Opcode::ReadRegister:
             {
-                if (const auto stored = store_result(runtime::read_register(cpu, instruction.reg)); !stored)
+                InterpreterValueProvenance value_provenance;
+                if (!instruction.reg.is_zero && !instruction.reg.is_stack_pointer &&
+                    instruction.reg.index < frame.register_provenance.size())
+                {
+                    value_provenance = frame.register_provenance[instruction.reg.index];
+                }
+                if (const auto stored = store_result(runtime::read_register(cpu, instruction.reg), 0U,
+                                                     value_provenance); !stored)
                 {
                     return Result<runtime::ExecutionResult>::failure(stored.error());
                 }
@@ -156,6 +197,14 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
                     return Result<runtime::ExecutionResult>::failure(operand.error());
                 }
                 runtime::write_register(cpu, instruction.reg, operand.value());
+                if (!instruction.reg.is_zero && !instruction.reg.is_stack_pointer &&
+                    instruction.reg.index < frame.register_provenance.size())
+                {
+                    frame.register_provenance[instruction.reg.index] =
+                        instruction.operands[0] < frame.provenance.size()
+                            ? frame.provenance[instruction.operands[0]]
+                            : InterpreterValueProvenance{};
+                }
                 break;
             }
             case ir::Opcode::ReadFlag:
@@ -185,7 +234,7 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
             case ir::Opcode::WriteVectorRegister:
             {
                 const auto low = read(instruction.operands[0]);
-                const auto high = get_high_value(function, values, high_values, instruction.operands[0]);
+                const auto high = get_high_value(function, frame.values, frame.high_values, instruction.operands[0]);
                 if (!low || !high)
                     return Result<runtime::ExecutionResult>::failure(!low ? low.error() : high.error());
                 runtime::write_vector_register(cpu, instruction.vector_index,
@@ -446,7 +495,16 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
                 {
                     return Result<runtime::ExecutionResult>::failure(sum.error());
                 }
-                const auto stored = store_result(sum.value());
+                auto provenance = frame.provenance[instruction.operands[0]];
+                if (provenance.kind == InterpreterValueProvenance::Kind::GuestLoad)
+                {
+                    if (!add_signed_without_overflow(provenance.adjustment, instruction.immediate,
+                                                     provenance.adjustment))
+                    {
+                        provenance = InterpreterValueProvenance{};
+                    }
+                }
+                const auto stored = store_result(sum.value(), 0U, provenance);
                 if (!stored)
                 {
                     return Result<runtime::ExecutionResult>::failure(stored.error());
@@ -470,7 +528,22 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
                 {
                     return Result<runtime::ExecutionResult>::failure(sum.error());
                 }
-                const auto stored = store_result(sum.value());
+                auto provenance = frame.provenance[instruction.operands[0]];
+                if (provenance.kind == InterpreterValueProvenance::Kind::GuestLoad &&
+                    instruction.operands[1] < frame.provenance.size() &&
+                    frame.provenance[instruction.operands[1]].kind ==
+                        InterpreterValueProvenance::Kind::Constant)
+                {
+                    if (offset.value() >
+                            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
+                        !add_signed_without_overflow(
+                            provenance.adjustment, static_cast<std::int64_t>(offset.value()),
+                            provenance.adjustment))
+                    {
+                        provenance = InterpreterValueProvenance{};
+                    }
+                }
+                const auto stored = store_result(sum.value(), 0U, provenance);
                 if (!stored)
                 {
                     return Result<runtime::ExecutionResult>::failure(stored.error());
@@ -490,7 +563,10 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
                 {
                     return runtime_failure(runtime);
                 }
-                const auto stored = store_result(loaded);
+                const auto stored = store_result(
+                    loaded, 0U,
+                    InterpreterValueProvenance{InterpreterValueProvenance::Kind::GuestLoad,
+                                               address.value(), 0});
                 if (!stored)
                 {
                     return Result<runtime::ExecutionResult>::failure(stored.error());
@@ -516,7 +592,7 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
             case ir::Opcode::BitCast:
             {
                 const auto source = read(instruction.operands[0]);
-                const auto high = get_high_value(function, values, high_values, instruction.operands[0]);
+                const auto high = get_high_value(function, frame.values, frame.high_values, instruction.operands[0]);
                 if (!source || !high)
                     return Result<runtime::ExecutionResult>::failure(!source ? source.error() : high.error());
                 const auto stored = store_result(source.value(), instruction.result_type.is_vector() ? high.value() : 0U);
@@ -588,7 +664,7 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
             case ir::Opcode::VectorExtractLane:
             {
                 const auto vector = read(instruction.operands[0]);
-                const auto high = get_high_value(function, values, high_values, instruction.operands[0]);
+                const auto high = get_high_value(function, frame.values, frame.high_values, instruction.operands[0]);
                 if (!vector || !high)
                     return Result<runtime::ExecutionResult>::failure(!vector ? vector.error() : high.error());
                 const auto lane = runtime::read_lane_bits(runtime::Vector128{vector.value(), high.value()},
@@ -601,7 +677,7 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
             case ir::Opcode::VectorInsertLane:
             {
                 const auto vector = read(instruction.operands[0]);
-                const auto vector_high = get_high_value(function, values, high_values, instruction.operands[0]);
+                const auto vector_high = get_high_value(function, frame.values, frame.high_values, instruction.operands[0]);
                 const auto lane = read(instruction.operands[1]);
                 if (!vector || !vector_high || !lane)
                     return Result<runtime::ExecutionResult>::failure(!vector ? vector.error() : !vector_high ? vector_high.error() : lane.error());
@@ -626,9 +702,9 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
             case ir::Opcode::VectorCompare:
             {
                 const auto left = read(instruction.operands[0]);
-                const auto left_high = get_high_value(function, values, high_values, instruction.operands[0]);
+                const auto left_high = get_high_value(function, frame.values, frame.high_values, instruction.operands[0]);
                 const auto right = read(instruction.operands[1]);
-                const auto right_high = get_high_value(function, values, high_values, instruction.operands[1]);
+                const auto right_high = get_high_value(function, frame.values, frame.high_values, instruction.operands[1]);
                 if (!left || !left_high || !right || !right_high)
                     return Result<runtime::ExecutionResult>::failure(!left ? left.error() : !left_high ? left_high.error() : !right ? right.error() : right_high.error());
                 const auto arrangement = static_cast<std::uint8_t>(instruction.arrangement);
@@ -644,9 +720,9 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
             case ir::Opcode::VectorShuffle:
             {
                 const auto left = read(instruction.operands[0]);
-                const auto left_high = get_high_value(function, values, high_values, instruction.operands[0]);
+                const auto left_high = get_high_value(function, frame.values, frame.high_values, instruction.operands[0]);
                 const auto right = read(instruction.operands[1]);
-                const auto right_high = get_high_value(function, values, high_values, instruction.operands[1]);
+                const auto right_high = get_high_value(function, frame.values, frame.high_values, instruction.operands[1]);
                 if (!left || !left_high || !right || !right_high)
                     return Result<runtime::ExecutionResult>::failure(!left ? left.error() : !left_high ? left_high.error() : !right ? right.error() : right_high.error());
                 const auto result_vector = runtime::vector_shuffle(instruction.vector_index,
@@ -672,7 +748,7 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
             {
                 const auto address = read(instruction.operands[0]);
                 const auto low = read(instruction.operands[1]);
-                const auto high = get_high_value(function, values, high_values, instruction.operands[1]);
+                const auto high = get_high_value(function, frame.values, frame.high_values, instruction.operands[1]);
                 if (!address || !low || !high)
                     return Result<runtime::ExecutionResult>::failure(!address ? address.error() : !low ? low.error() : high.error());
                 const runtime::Vector128 vector{low.value(), high.value()};
@@ -696,22 +772,22 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
         switch (terminator.kind)
         {
         case ir::TerminatorKind::Branch:
-            current = terminator.target;
+            frame.current_block = terminator.target;
             break;
         case ir::TerminatorKind::ConditionalBranch:
         {
-            const auto condition = get_value(function, values, terminator.condition);
+            const auto condition = get_value(function, frame.values, terminator.condition);
             if (!condition)
             {
                 return Result<runtime::ExecutionResult>::failure(condition.error());
             }
-            current = condition.value() != 0U ? terminator.target : terminator.false_target;
+            frame.current_block = condition.value() != 0U ? terminator.target : terminator.false_target;
             break;
         }
         case ir::TerminatorKind::Return:
             if (terminator.target_value != ir::invalid_value)
             {
-                const auto target = get_value(function, values, terminator.target_value);
+                const auto target = get_value(function, frame.values, terminator.target_value);
                 if (!target)
                 {
                     return Result<runtime::ExecutionResult>::failure(target.error());
@@ -722,25 +798,98 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
                 }
             }
             result.final_guest_pc = cpu.pc;
+            result.boundary = runtime::ExecutionBoundary{
+                runtime::ExecutionBoundaryKind::Return, terminator.source.guest_pc, cpu.pc,
+                cpu.pc != 0U, ir::invalid_block, 0U, function.guest_entry(), false, 0U, {}, {}};
             return Result<runtime::ExecutionResult>::success(result);
         case ir::TerminatorKind::DirectCall:
+        case ir::TerminatorKind::FunctionTransfer:
         case ir::TerminatorKind::IndirectBranch:
         case ir::TerminatorKind::IndirectCall:
         {
-            const auto target = get_value(function, values, terminator.target_value);
+            const auto target = get_value(function, frame.values, terminator.target_value);
             if (!target)
             {
                 return Result<runtime::ExecutionResult>::failure(target.error());
             }
             cpu.pc = target.value();
             result.final_guest_pc = cpu.pc;
+            const auto kind = terminator.kind == ir::TerminatorKind::DirectCall
+                                  ? runtime::ExecutionBoundaryKind::DirectCall
+                              : terminator.kind == ir::TerminatorKind::FunctionTransfer
+                                  ? runtime::ExecutionBoundaryKind::FunctionTransfer
+                              : terminator.kind == ir::TerminatorKind::IndirectCall
+                                  ? runtime::ExecutionBoundaryKind::IndirectCall
+                                  : runtime::ExecutionBoundaryKind::IndirectBranch;
+            const auto provenance = terminator.target_value < frame.provenance.size()
+                                        ? frame.provenance[terminator.target_value]
+                                        : InterpreterValueProvenance{};
+            std::string target_provenance;
+            if (provenance.kind == InterpreterValueProvenance::Kind::GuestLoad)
+            {
+                std::ostringstream provenance_text;
+                provenance_text << "guest_load:0x" << std::hex << std::setw(16)
+                                << std::setfill('0') << provenance.address;
+                target_provenance = provenance_text.str();
+                if (provenance.adjustment != 0)
+                {
+                    target_provenance += ",adjustment=" + std::to_string(provenance.adjustment);
+                }
+            }
+            result.status = runtime::ExecutionStatus::Boundary;
+            result.boundary = runtime::ExecutionBoundary{
+                kind, terminator.source.guest_pc, target.value(), true,
+                terminator.continuation, terminator.continuation_guest_pc,
+                function.guest_entry(),
+                provenance.kind == InterpreterValueProvenance::Kind::GuestLoad,
+                provenance.address, std::move(target_provenance),
+                terminator.target_register ? ir::register_name(terminator.target_register.value()) : ""};
             return Result<runtime::ExecutionResult>::success(result);
         }
         case ir::TerminatorKind::Trap:
             (void)runtime::switchrecomp_runtime_trap(&runtime, terminator.trap_reason.c_str());
+            if (runtime.has_error)
+            {
+                result.status = runtime::ExecutionStatus::Trapped;
+                result.boundary = runtime::ExecutionBoundary{
+                    runtime::ExecutionBoundaryKind::Trap, terminator.source.guest_pc, 0U, false,
+                    ir::invalid_block, 0U, function.guest_entry(), false, 0U,
+                    runtime.last_error.message, {}};
+                result.final_guest_pc = cpu.pc;
+                return Result<runtime::ExecutionResult>::success(std::move(result));
+            }
             return runtime_failure(runtime);
         }
     }
+}
+
+// Preserve the historical one-function API. M11 callers use
+// execute_until_boundary directly so a call boundary remains typed and
+// resumable; legacy callers still receive an error for operation exhaustion.
+Result<runtime::ExecutionResult> execute_legacy(const ir::Function& function,
+                                                runtime::CpuState& cpu,
+                                                runtime::RuntimeContext& runtime,
+                                                const runtime::ExecutionOptions& options)
+{
+    InterpreterFrame frame;
+    const auto result = execute_until_boundary(function, cpu, runtime, frame, options);
+    if (!result)
+    {
+        return result;
+    }
+    if (result.value().status == runtime::ExecutionStatus::LimitExceeded)
+    {
+        return Result<runtime::ExecutionResult>::failure(make_error(
+            ErrorCode::ExecutionLimitExceeded,
+            "interpreter exceeded the configured IR operation limit"));
+    }
+    if (result.value().status == runtime::ExecutionStatus::Trapped)
+    {
+        return Result<runtime::ExecutionResult>::failure(
+            runtime.has_error ? runtime.last_error
+                              : make_error(ErrorCode::ExecutionTrap, "guest execution trapped"));
+    }
+    return result;
 }
 
 } // namespace switchrecomp::interpreter

@@ -293,9 +293,25 @@ const char* execution_status_name(ExecutionStatus status) noexcept
 {
     switch (status) {
     case ExecutionStatus::Returned: return "returned";
+    case ExecutionStatus::Boundary: return "boundary";
     case ExecutionStatus::Trapped: return "trapped";
     case ExecutionStatus::Fault: return "fault";
     case ExecutionStatus::LimitExceeded: return "limit_exceeded";
+    }
+    return "unknown";
+}
+
+const char* execution_boundary_kind_name(ExecutionBoundaryKind kind) noexcept
+{
+    switch (kind) {
+    case ExecutionBoundaryKind::None: return "none";
+    case ExecutionBoundaryKind::Return: return "return";
+    case ExecutionBoundaryKind::DirectCall: return "direct_call";
+    case ExecutionBoundaryKind::IndirectCall: return "indirect_call";
+    case ExecutionBoundaryKind::FunctionTransfer: return "function_transfer";
+    case ExecutionBoundaryKind::IndirectBranch: return "indirect_branch";
+    case ExecutionBoundaryKind::Trap: return "trap";
+    case ExecutionBoundaryKind::BudgetExhaustion: return "budget_exhaustion";
     }
     return "unknown";
 }

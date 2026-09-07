@@ -864,12 +864,22 @@ Result<void> verify(const Function& function)
             break;
         }
         case TerminatorKind::DirectCall:
+        case TerminatorKind::FunctionTransfer:
         case TerminatorKind::IndirectBranch:
         case TerminatorKind::IndirectCall:
             if (terminator.target_value == invalid_value || function.value(terminator.target_value) == nullptr ||
                 function.value(terminator.target_value)->type != i64_type() ||
                 terminator.target != invalid_block || terminator.false_target != invalid_block ||
-                terminator.condition != invalid_value || !terminator.trap_reason.empty())
+                terminator.condition != invalid_value || !terminator.trap_reason.empty() ||
+                ((terminator.kind == TerminatorKind::DirectCall ||
+                  terminator.kind == TerminatorKind::IndirectCall) &&
+                 (terminator.continuation == invalid_block ||
+                  function.block(terminator.continuation) == nullptr ||
+                  terminator.continuation_guest_pc == 0U)) ||
+                ((terminator.kind == TerminatorKind::FunctionTransfer ||
+                  terminator.kind == TerminatorKind::IndirectBranch) &&
+                 (terminator.continuation != invalid_block ||
+                  terminator.continuation_guest_pc != 0U)))
             {
                 return invalid("call/indirect terminator has an invalid target value or carries extra data");
             }

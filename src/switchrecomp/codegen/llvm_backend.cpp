@@ -1009,6 +1009,7 @@ class ModuleLowerer
             return Result<void>::success();
         }
         case ir::TerminatorKind::DirectCall:
+        case ir::TerminatorKind::FunctionTransfer:
         case ir::TerminatorKind::IndirectBranch:
         case ir::TerminatorKind::IndirectCall:
         {

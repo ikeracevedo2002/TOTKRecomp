@@ -2498,6 +2498,12 @@ class FunctionLifter
             }
             terminator.kind = ir::TerminatorKind::IndirectBranch;
             terminator.target_value = target.value();
+            const auto target_register = to_ir_register(flow.register_target.value(), instruction);
+            if (!target_register)
+            {
+                return Result<void>::failure(target_register.error());
+            }
+            terminator.target_register = target_register.value();
             return builder_.set_terminator(std::move(terminator));
         }
         if (flow.kind == aarch64::ControlFlowKind::IndirectCall)
@@ -2515,6 +2521,28 @@ class FunctionLifter
             }
             terminator.kind = ir::TerminatorKind::IndirectCall;
             terminator.target_value = target.value();
+            const auto target_register = to_ir_register(flow.register_target.value(), instruction);
+            if (!target_register)
+            {
+                return Result<void>::failure(target_register.error());
+            }
+            terminator.target_register = target_register.value();
+            for (const auto& edge : block.successors)
+            {
+                if (edge.kind == analysis::EdgeKind::Fallthrough && edge.internal)
+                {
+                    const auto continuation = block_ids_.find(edge.target);
+                    if (continuation == block_ids_.end())
+                    {
+                        return Result<void>::failure(make_error(
+                            ErrorCode::InvalidControlFlow,
+                            "indirect call fallthrough is missing from lifted CFG"));
+                    }
+                    terminator.continuation = continuation->second;
+                    terminator.continuation_guest_pc = edge.target;
+                    break;
+                }
+            }
             return builder_.set_terminator(std::move(terminator));
         }
         if (flow.kind == aarch64::ControlFlowKind::DirectCall)
@@ -2530,10 +2558,40 @@ class FunctionLifter
             }
             terminator.kind = ir::TerminatorKind::DirectCall;
             terminator.target_value = target.value();
+            for (const auto& edge : block.successors)
+            {
+                if (edge.kind == analysis::EdgeKind::Fallthrough && edge.internal)
+                {
+                    const auto continuation = block_ids_.find(edge.target);
+                    if (continuation == block_ids_.end())
+                    {
+                        return Result<void>::failure(make_error(
+                            ErrorCode::InvalidControlFlow,
+                            "direct call fallthrough is missing from lifted CFG"));
+                    }
+                    terminator.continuation = continuation->second;
+                    terminator.continuation_guest_pc = edge.target;
+                    break;
+                }
+            }
             return builder_.set_terminator(std::move(terminator));
         }
         if (flow.kind == aarch64::ControlFlowKind::DirectBranch)
         {
+            for (const auto& edge : block.successors)
+            {
+                if (edge.kind == analysis::EdgeKind::FunctionTransfer)
+                {
+                    const auto target = constant(ir::i64_type(), edge.target, instruction);
+                    if (!target)
+                    {
+                        return Result<void>::failure(target.error());
+                    }
+                    terminator.kind = ir::TerminatorKind::FunctionTransfer;
+                    terminator.target_value = target.value();
+                    return builder_.set_terminator(std::move(terminator));
+                }
+            }
             const auto target = direct_target(block, analysis::EdgeKind::Branch);
             if (!target)
             {

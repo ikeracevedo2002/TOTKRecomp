@@ -192,6 +192,10 @@ std::string print(const Function& function)
             output << "direct_call ";
             print_value(output, block.terminator.target_value);
             break;
+        case TerminatorKind::FunctionTransfer:
+            output << "function_transfer ";
+            print_value(output, block.terminator.target_value);
+            break;
         case TerminatorKind::IndirectBranch:
             output << "indirect_branch ";
             print_value(output, block.terminator.target_value);

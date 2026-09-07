@@ -7,6 +7,7 @@
 #include "switchrecomp/ir/type.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,7 @@ enum class TerminatorKind : std::uint8_t
     Branch,
     ConditionalBranch,
     DirectCall,
+    FunctionTransfer,
     IndirectBranch,
     IndirectCall,
     Return,
@@ -65,6 +67,9 @@ struct Terminator
     SourceLocation source;
     std::string trap_reason;
     ValueId target_value = invalid_value;
+    BlockId continuation = invalid_block;
+    GuestAddress continuation_guest_pc = 0U;
+    std::optional<GuestRegister> target_register;
 };
 
 } // namespace switchrecomp::ir

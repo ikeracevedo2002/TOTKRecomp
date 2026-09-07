@@ -408,6 +408,7 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
             result.final_guest_pc = cpu.pc;
             return Result<runtime::ExecutionResult>::success(result);
         case ir::TerminatorKind::DirectCall:
+        case ir::TerminatorKind::FunctionTransfer:
         case ir::TerminatorKind::IndirectBranch:
         case ir::TerminatorKind::IndirectCall:
         {

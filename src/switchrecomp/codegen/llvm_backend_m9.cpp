@@ -394,6 +394,7 @@ class M9Lowerer
             }
             builder_.CreateRet(builder_.getInt32(0)); return Result<void>::success();
         case ir::TerminatorKind::DirectCall:
+        case ir::TerminatorKind::FunctionTransfer:
         case ir::TerminatorKind::IndirectBranch:
         case ir::TerminatorKind::IndirectCall:
             if (terminator.target_value == ir::invalid_value || value(terminator.target_value) == nullptr)
