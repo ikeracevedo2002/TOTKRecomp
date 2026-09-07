@@ -234,9 +234,21 @@ struct RuntimeExecutionSummary
     std::vector<RuntimeImportObservation> imports;
 };
 
+struct ExecutedGuestInstruction
+{
+    memory::GuestAddress guest_pc = 0U;
+    std::string module;
+    std::string mnemonic;
+    bool executed = false;
+    std::optional<memory::GuestAddress> next_guest_pc;
+    std::string destination_register;
+    std::vector<std::string> source_registers;
+    std::size_t call_depth = 0U;
+};
+
 struct ExecutionSessionResult
 {
-    static constexpr std::uint32_t schema_version = 4U;
+    static constexpr std::uint32_t schema_version = 5U;
 
     analysis::ModuleIdentity identity;
     EntrySelection entry;
@@ -255,6 +267,8 @@ struct ExecutionSessionResult
     ExecutionStopReason stop_reason = ExecutionStopReason::UnsupportedSemantic;
     memory::GuestAddress stop_pc = 0U;
     memory::GuestAddress current_function = 0U;
+    std::optional<memory::GuestAddress> source_pc;
+    std::optional<memory::GuestAddress> diagnostic_pc;
     std::optional<memory::GuestAddress> target;
     std::string target_register;
     std::string target_provenance;
@@ -274,6 +288,8 @@ struct ExecutionSessionResult
     std::size_t guest_blocks = 0U;
     std::size_t maximum_call_depth = 0U;
     std::vector<CallStackFrame> call_stack;
+    std::vector<memory::GuestAddress> observation_targets;
+    std::vector<ExecutedGuestInstruction> executed_guest_instructions;
     std::vector<ExecutionEvent> events;
     RuntimeExecutionSummary runtime;
 };
@@ -343,6 +359,9 @@ class ExecutionSession
     [[nodiscard]] const analysis::FinalizedFunctionMap* function_map_for(
         memory::GuestAddress entry) const noexcept;
     [[nodiscard]] std::string module_name_for(memory::GuestAddress entry) const;
+    void prepare_observation_targets();
+    [[nodiscard]] std::optional<ExecutedGuestInstruction> describe_observed_instruction(
+        memory::GuestAddress guest_pc, std::size_t call_depth) const;
 
     memory::GuestMemory* memory_ = nullptr;
     const analysis::FinalizedFunctionMap* function_map_ = nullptr;
@@ -356,6 +375,7 @@ class ExecutionSession
     ExecutionSessionOptions options_;
     ExecutionLoadSummary load_summary_;
     std::map<memory::GuestAddress, LiftCacheEntry> lift_cache_;
+    std::vector<memory::GuestAddress> observation_targets_;
     std::vector<SessionFrame> suspended_frames_;
     SessionFrame current_;
     runtime::CpuState cpu_{};

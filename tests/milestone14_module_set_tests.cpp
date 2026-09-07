@@ -272,6 +272,23 @@ TEST_CASE("M14 explicit inventory requires expected identities for manifest veri
     REQUIRE(conflicting.error().code == ErrorCode::ModuleManifestMismatch);
 }
 
+TEST_CASE("M17 identity preflight reports the exact deterministic mismatch category")
+{
+    const auto bytes = minimal_nso(12U);
+    const std::array<analysis::ModuleSetByteInput, 1> inputs{byte_input("main", bytes)};
+    analysis::ModuleSetIngestionOptions options;
+    options.expected_modules.push_back(analysis::ModuleSetIngestionOptions::ExpectedModule{
+        "main", "0000000000000000000000000000000000000000000000000000000000000000",
+        "expected-build-id", bytes.size()});
+    const auto result = analysis::validate_module_set(inputs, options);
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().code == ErrorCode::ModuleManifestMismatch);
+    REQUIRE(result.error().message.find("logical_module=main") != std::string::npos);
+    REQUIRE(result.error().message.find("category=build_id_mismatch") != std::string::npos);
+    REQUIRE(result.error().message.find("expected=expected-build-id") != std::string::npos);
+    REQUIRE(result.error().message.find("actual=") != std::string::npos);
+}
+
 TEST_CASE("M14 completeness keeps legacy incomplete and declared-complete provider outcomes distinct")
 {
     memory::GuestMemory memory;

@@ -310,6 +310,7 @@ const char* execution_boundary_kind_name(ExecutionBoundaryKind kind) noexcept
     case ExecutionBoundaryKind::IndirectCall: return "indirect_call";
     case ExecutionBoundaryKind::FunctionTransfer: return "function_transfer";
     case ExecutionBoundaryKind::IndirectBranch: return "indirect_branch";
+    case ExecutionBoundaryKind::UnsupportedInstruction: return "unsupported_instruction";
     case ExecutionBoundaryKind::Trap: return "trap";
     case ExecutionBoundaryKind::BudgetExhaustion: return "budget_exhaustion";
     }

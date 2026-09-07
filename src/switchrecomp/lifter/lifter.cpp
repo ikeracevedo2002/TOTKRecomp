@@ -34,9 +34,11 @@ using aarch64::GuestAddress;
 [[nodiscard]] std::string instruction_description(const DecodedInstruction& instruction)
 {
     std::ostringstream output;
+    // Reports may be produced from proprietary guest inputs. Keep the
+    // architectural identity and guest address, but never serialize the
+    // guest instruction word.
     output << "AArch64 " << aarch64::instruction_id_name(instruction.id) << " at "
-           << hex_address(instruction.address) << " (0x" << std::hex << std::setw(8)
-           << std::setfill('0') << instruction.opcode << ")";
+           << hex_address(instruction.address);
     if (!instruction.disassembly.empty())
     {
         output << ": " << instruction.disassembly;
@@ -163,6 +165,20 @@ class FunctionLifter
             {
                 return Result<ir::Function>::failure(set_block.error());
             }
+            if (stopped_at_unsupported_)
+            {
+                ir::Terminator trap;
+                trap.kind = ir::TerminatorKind::Trap;
+                trap.source = ir::SourceLocation{source_block.instructions.empty()
+                                                       ? address
+                                                       : source_block.instructions.front().address,
+                                                   0U, {}};
+                trap.trap_reason =
+                    "unsupported_instruction:unlifted CFG block after the first diagnostic boundary";
+                const auto stopped = builder_.set_terminator(std::move(trap));
+                if (!stopped) return Result<ir::Function>::failure(stopped.error());
+                continue;
+            }
             const auto lifted = lift_block(source_block);
             if (!lifted)
             {
@@ -182,6 +198,29 @@ class FunctionLifter
     }
 
   private:
+    [[nodiscard]] static bool is_unsupported_error(ErrorCode code) noexcept
+    {
+        return code == ErrorCode::Unsupported ||
+               code == ErrorCode::UnsupportedInstruction ||
+               code == ErrorCode::UnsupportedOperandForm;
+    }
+
+    [[nodiscard]] Result<void> stop_at_unsupported(
+        const DecodedInstruction& instruction, const Error& error)
+    {
+        if (!options_.stop_at_unsupported_instruction || !is_unsupported_error(error.code))
+        {
+            return Result<void>::failure(error);
+        }
+        ir::Terminator trap;
+        trap.kind = ir::TerminatorKind::Trap;
+        trap.source = source_location(instruction);
+        trap.trap_reason = "unsupported_instruction:" + error.message;
+        const auto stopped = builder_.set_terminator(std::move(trap));
+        if (stopped) stopped_at_unsupported_ = true;
+        return stopped;
+    }
+
     [[nodiscard]] static ir::Function make_function(const analysis::ControlFlowGraph& cfg)
     {
         std::ostringstream name;
@@ -2854,6 +2893,8 @@ class FunctionLifter
                 const auto end = terminate(block, instruction, indirect_call_target);
                 if (!end)
                 {
+                    const auto stopped = stop_at_unsupported(instruction, end.error());
+                    if (stopped) return stopped;
                     return end;
                 }
                 continue;
@@ -2861,6 +2902,8 @@ class FunctionLifter
             const auto lifted = lift_non_terminator(instruction);
             if (!lifted)
             {
+                const auto stopped = stop_at_unsupported(instruction, lifted.error());
+                if (stopped) return stopped;
                 return lifted;
             }
         }
@@ -3024,6 +3067,7 @@ class FunctionLifter
     ir::Builder builder_;
     std::map<GuestAddress, ir::BlockId> block_ids_;
     std::size_t operations_for_instruction_ = 0U;
+    bool stopped_at_unsupported_ = false;
 };
 
 } // namespace

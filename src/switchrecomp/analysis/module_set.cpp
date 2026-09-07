@@ -12,6 +12,7 @@
 #include <fstream>
 #include <limits>
 #include <new>
+#include <sstream>
 #include <set>
 #include <string>
 #include <string_view>
@@ -144,33 +145,66 @@ struct load_order_key
     const std::vector<ModuleSetIngestionOptions::ExpectedModule>& expected)
 {
     if (expected.empty()) return Result<void>::success();
+    const auto mismatch = [](std::string_view logical_name, std::string_view category,
+                             std::string expected_identity, std::string actual_identity) {
+        std::ostringstream message;
+        message << "module identity mismatch: logical_module=" << logical_name
+                << " category=" << category << " expected=" << expected_identity
+                << " actual=" << actual_identity;
+        return Result<void>::failure(
+            make_error(ErrorCode::ModuleManifestMismatch, message.str()));
+    };
     std::set<std::string> expected_names;
     for (const auto& item : expected)
     {
-        if (!safe_label(item.logical_name) || !expected_names.insert(item.logical_name).second ||
-            item.sha256.empty() || item.build_id.empty())
+        if (!safe_label(item.logical_name))
         {
-            return Result<void>::failure(make_error(
-                ErrorCode::ModuleManifestMismatch,
-                "expected module identity contains an empty or duplicate field"));
+            return mismatch(item.logical_name, "invalid_logical_name", "safe_label", "invalid");
+        }
+        if (!expected_names.insert(item.logical_name).second)
+        {
+            return mismatch(item.logical_name, "duplicate_expected_module", "unique", "duplicate");
+        }
+        if (item.sha256.empty() || item.build_id.empty())
+        {
+            return mismatch(item.logical_name, "invalid_expected_identity",
+                            "sha256_and_build_id", "missing_field");
         }
         const auto found = std::find_if(modules.begin(), modules.end(), [&](const auto& module) {
             return module.logical_name == item.logical_name;
         });
-        if (found == modules.end() || lower_ascii(found->sha256) != lower_ascii(item.sha256) ||
-            lower_ascii(found->build_id) != lower_ascii(item.build_id) ||
-            (item.input_size && found->input_size != item.input_size.value()))
+        if (found == modules.end())
         {
-            return Result<void>::failure(make_error(
-                ErrorCode::ModuleManifestMismatch,
-                "module inventory identity does not match the expected manifest"));
+            return mismatch(item.logical_name, "missing_module", "present", "missing");
+        }
+        if (found->input_size != item.input_size.value_or(found->input_size))
+        {
+            return mismatch(item.logical_name, "size_mismatch",
+                            std::to_string(item.input_size.value_or(found->input_size)),
+                            std::to_string(found->input_size));
+        }
+        if (lower_ascii(found->build_id) != lower_ascii(item.build_id))
+        {
+            return mismatch(item.logical_name, "build_id_mismatch", item.build_id,
+                            found->build_id);
+        }
+        if (lower_ascii(found->sha256) != lower_ascii(item.sha256))
+        {
+            return mismatch(item.logical_name, "sha256_mismatch", item.sha256, found->sha256);
         }
     }
     if (expected_names.size() != modules.size())
     {
-        return Result<void>::failure(make_error(
-            ErrorCode::ModuleManifestMismatch,
-            "module inventory does not contain exactly the expected manifest modules"));
+        std::ostringstream actual;
+        actual << "{";
+        for (std::size_t index = 0U; index < modules.size(); ++index)
+        {
+            if (index != 0U) actual << ",";
+            actual << modules[index].logical_name;
+        }
+        actual << "}";
+        return mismatch("<set>", "unexpected_module_set",
+                        std::to_string(expected_names.size()), actual.str());
     }
     return Result<void>::success();
 }

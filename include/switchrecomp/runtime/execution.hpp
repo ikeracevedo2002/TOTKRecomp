@@ -5,7 +5,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
+#include <vector>
 
 namespace switchrecomp::runtime
 {
@@ -27,6 +29,7 @@ enum class ExecutionBoundaryKind
     IndirectCall,
     FunctionTransfer,
     IndirectBranch,
+    UnsupportedInstruction,
     Trap,
     BudgetExhaustion,
 };
@@ -49,6 +52,8 @@ struct ExecutionBoundary
 struct ExecutionOptions
 {
     std::size_t max_ir_operations = 100'000U;
+    std::span<const std::uint64_t> observed_guest_pcs;
+    std::size_t max_observed_guest_pcs = 32U;
 };
 
 struct ExecutionResult
@@ -57,6 +62,7 @@ struct ExecutionResult
     std::size_t executed_operations = 0U;
     std::size_t executed_blocks = 0U;
     std::uint64_t final_guest_pc = 0U;
+    std::vector<std::uint64_t> observed_guest_pcs;
     ExecutionBoundary boundary;
 };
 

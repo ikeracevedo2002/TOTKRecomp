@@ -14,6 +14,10 @@ struct LiftOptions
 {
     bool verify_result = true;
     bool preserve_source_mapping = true;
+    // Execution may request a valid prefix of a function so a real guest run
+    // can stop at the first unsupported instruction with its exact PC. Strict
+    // translation keeps this disabled.
+    bool stop_at_unsupported_instruction = false;
     std::size_t max_basic_blocks = 16'384U;
     std::size_t max_ir_instructions = 1'000'000U;
     std::size_t max_values = 1'000'000U;

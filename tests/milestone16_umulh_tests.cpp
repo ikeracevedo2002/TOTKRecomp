@@ -341,6 +341,44 @@ TEST_CASE("M16 UMULH lifts to project IR, preserves NZCV, aliases operands, and 
     REQUIRE(same_cpu.x[0] == 1U);
 }
 
+TEST_CASE("M17 diagnostic lifting executes UMULH before a typed unsupported boundary")
+{
+    constexpr memory::GuestAddress address = 0x200000U;
+    const auto bytes = words({0x9bc97d49U, 0x7a400900U, 0xd65f03c0U});
+    memory::GuestMemory memory;
+    REQUIRE(memory.map(address, std::span<const std::byte>(bytes),
+                       memory::GuestMemoryPermissions::Read |
+                           memory::GuestMemoryPermissions::Execute,
+                       "m17.synthetic.text", memory::GuestRegionKind::Text));
+    analysis::AnalysisOptions analysis_options;
+    analysis_options.allowed_code_range = analysis::GuestAddressRange{
+        address, static_cast<memory::GuestSize>(bytes.size())};
+    const auto cfg = analysis::analyze_control_flow(memory, address, analysis_options);
+    REQUIRE(cfg);
+    lifter::LiftOptions lift_options;
+    lift_options.stop_at_unsupported_instruction = true;
+    const auto function = lifter::lift_function(cfg.value(), lift_options);
+    REQUIRE(function);
+
+    runtime::CpuState cpu;
+    cpu.x[9] = 0x100000000ULL;
+    cpu.x[10] = 0x100000000ULL;
+    const std::array<std::uint64_t, 1> observed_targets{address};
+    runtime::ExecutionOptions execution_options;
+    execution_options.observed_guest_pcs = observed_targets;
+    runtime::RuntimeContext context{&memory};
+    interpreter::InterpreterFrame frame;
+    const auto result = interpreter::execute_until_boundary(
+        function.value(), cpu, context, frame, execution_options);
+    REQUIRE(result);
+    REQUIRE(result.value().observed_guest_pcs == std::vector<std::uint64_t>{address});
+    REQUIRE(cpu.x[9] == 1U);
+    REQUIRE(result.value().boundary.kind == runtime::ExecutionBoundaryKind::UnsupportedInstruction);
+    REQUIRE(result.value().boundary.source_guest_pc == address + 4U);
+    REQUIRE(result.value().boundary.target_provenance.find("ccmp") != std::string::npos);
+    REQUIRE(result.value().boundary.target_provenance.find("0x7a400900") == std::string::npos);
+}
+
 TEST_CASE("M16 UMULH honors architecturally valid XZR source and destination aliases")
 {
     auto zero_source = make_fixture({0x9bc27fe0U, 0xd65f03c0U}); // umulh x0, xzr, x2; ret
@@ -483,6 +521,17 @@ TEST_CASE("M16 synthetic guest provider relocation enters UMULH code without run
     REQUIRE(provider_entry->guest_pc == 0x100040U);
     REQUIRE(provider_entry->function_entry == 0x100040U);
     REQUIRE(provider_entry->call_depth == 1U);
+    REQUIRE(result.value().observation_targets == std::vector<memory::GuestAddress>{0x100048U});
+    REQUIRE(result.value().executed_guest_instructions.size() == 1U);
+    REQUIRE(result.value().executed_guest_instructions.front().guest_pc == 0x100048U);
+    REQUIRE(result.value().executed_guest_instructions.front().module == "sdk");
+    REQUIRE(result.value().executed_guest_instructions.front().executed);
+    REQUIRE(result.value().executed_guest_instructions.front().next_guest_pc ==
+            std::optional<memory::GuestAddress>(0x10004cU));
+    REQUIRE(result.value().executed_guest_instructions.front().destination_register == "x0");
+    REQUIRE(result.value().executed_guest_instructions.front().source_registers ==
+            std::vector<std::string>{"x1", "x2"});
+    REQUIRE(result.value().executed_guest_instructions.front().call_depth == 1U);
 }
 
 #ifdef TOTKRECOMP_HAS_LLVM

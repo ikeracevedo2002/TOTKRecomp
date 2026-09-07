@@ -6,6 +6,7 @@
 #include "switchrecomp/runtime/fp.hpp"
 
 #include <cstdint>
+#include <algorithm>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -145,6 +146,15 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                 return Result<runtime::ExecutionResult>::success(std::move(result));
             }
             ++result.executed_operations;
+            if (instruction.opcode == ir::Opcode::SetPc &&
+                result.observed_guest_pcs.size() < options.max_observed_guest_pcs &&
+                std::find(options.observed_guest_pcs.begin(), options.observed_guest_pcs.end(),
+                          instruction.source.guest_pc) != options.observed_guest_pcs.end() &&
+                std::find(result.observed_guest_pcs.begin(), result.observed_guest_pcs.end(),
+                          instruction.source.guest_pc) == result.observed_guest_pcs.end())
+            {
+                result.observed_guest_pcs.push_back(instruction.source.guest_pc);
+            }
             const auto read = [&](ir::ValueId id) { return get_value(function, frame.values, id); };
             const auto store_result = [&](std::uint64_t value, std::uint64_t high = 0U,
                                           InterpreterValueProvenance value_provenance = {}) -> Result<void> {
@@ -864,6 +874,17 @@ Result<runtime::ExecutionResult> execute_until_boundary(
             return Result<runtime::ExecutionResult>::success(result);
         }
         case ir::TerminatorKind::Trap:
+            if (terminator.trap_reason.rfind("unsupported_instruction:", 0U) == 0U)
+            {
+                result.status = runtime::ExecutionStatus::Boundary;
+                result.boundary = runtime::ExecutionBoundary{
+                    runtime::ExecutionBoundaryKind::UnsupportedInstruction,
+                    terminator.source.guest_pc, 0U, false, ir::invalid_block, 0U,
+                    function.guest_entry(), false, 0U,
+                    terminator.trap_reason.substr(std::string("unsupported_instruction:").size()), {}};
+                result.final_guest_pc = cpu.pc;
+                return Result<runtime::ExecutionResult>::success(std::move(result));
+            }
             (void)runtime::switchrecomp_runtime_trap(&runtime, terminator.trap_reason.c_str());
             if (runtime.has_error)
             {
