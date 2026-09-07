@@ -1,6 +1,6 @@
 # TotkRecomp Architecture and Implementation Plan
 
-> Status: Proposed architecture with Milestones 0–10 implemented
+> Status: Proposed architecture with Milestones 0–11 implemented
 > Repository snapshot: 2026-09-06
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
 > Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, MOD0/dynamic/RELA metadata discovery, dynamic symbol/relocation application, expanded AArch64 Semantic IR and lifting, deterministic whole-module function discovery/translation reporting, synthetic tests, and deterministic inspection/coverage reports are committed; no supported game build has been committed.
@@ -37,7 +37,11 @@ validated direct-call targets, precise non-contiguous function ownership, exact
 ownership conflicts, boundary-aware function transfers, a deterministic
 finalized function map, per-function CFG/lift/verify orchestration, explicit
 strict/diagnostic translation states, guest-address dispatch validation, and
-versioned module coverage reports.
+  versioned module coverage reports. Milestone 11 adds a reference interpreter
+  boundary API, resumable function frames, an explicit guest call stack, exact
+  guest call/return and function-transfer orchestration, bounded synthetic
+  launch state, and deterministic controlled-entry reports. This remains a
+  single-module controlled execution path rather than a process launch.
 
 ### Proposed
 
@@ -173,6 +177,36 @@ TotkRecomp should own:
 - Build manifests and generated output for the exact target.
 
 A game-specific patch must not be added to SwitchRecomp merely because it makes TOTK boot.
+
+### 4.3 Controlled entry execution (Milestone 11)
+
+The M11 execution path is intentionally smaller than a Switch process launch:
+
+```text
+Semantic IR function
+        ↓
+interpreter boundary
+        ↓
+ExecutionSession
+        ↓
+guest call / return / FunctionTransfer
+        ↓
+GuestFunctionRegistry / precise FunctionMap
+        ↓
+runtime or import boundary
+```
+
+The interpreter owns one resumable function frame. `ExecutionSession` owns the
+explicit guest call stack, global budgets, synthetic stack, exact-entry
+dispatch, tail-transfer return contracts, and deterministic events. `BL`/`BLR`
+are calls with X30=`PC+4`; `B`/`BR` function transfers preserve X30 and do not
+push a call frame. Unresolved imports remain boundaries and are never replaced
+with host stubs.
+
+This controlled entry execution consumes a single prepared main module and a
+metadata-selected `DT_INIT` candidate. It is not full process launch: no rtld,
+SDK, Horizon, service bring-up, multi-module image, or verified process-entry
+model is constructed.
 
 ## 5. Why static recompilation is viable, and why this target is difficult
 
@@ -1911,11 +1945,15 @@ M11 initialization-path work; it does not execute the game entry path.
 
 **Roadmap numbering correction:** The future roadmap previously contained a numbering gap after Milestone 10. The affected future milestones have been renumbered to restore the intended continuous sequence from Milestone 11 through Milestone 20. No milestone scope was inserted or removed by this documentation correction.
 
-### Milestone 11 — Enter game initialization
+### Milestone 11 — Controlled entry-path execution
 
-**Goal:** Execute the recompiled entry path.
+**Goal:** Execute a metadata-selected main-module initialization candidate
+through supported Semantic IR guest function calls and transfers.
 
-**Success:** Execution reaches initialization and stops at a known unsupported dependency, with a useful diagnostic.
+**Success:** The bounded session resumes callers correctly and stops at the
+first genuine import, indirect-flow, runtime, memory, or semantic boundary
+with a deterministic auditable report. This is not game boot or full process
+startup.
 
 ### Milestone 12 — Runtime bring-up
 

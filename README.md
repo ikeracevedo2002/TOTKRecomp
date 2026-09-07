@@ -37,6 +37,12 @@ M10.2 tracks precise non-contiguous function ownership, exact ownership
 conflicts, boundary-aware function transfers, and honest startup-entry
 provenance. The main `.text` start is not treated as a verified process entry;
 rtld-led multi-module startup remains deferred.
+Milestone 11 adds bounded controlled execution of a metadata-selected main-module
+initialization candidate across supported guest function calls and function
+transfers. `run-entry` uses deterministic synthetic CPU/stack state, preserves
+unresolved imports as runtime boundaries, and reports the first honest stop.
+This is not full Switch process startup, does not model rtld or Horizon, and does
+not claim that TOTK boots.
 
 No supported TOTK build is committed. The repository contains no game binaries,
 keys, firmware, SDKs, or extracted game assets. The committed TOTK manifest is an
@@ -84,6 +90,8 @@ Inspect and materialize an NSO0 input:
 ./build/aarch64-analyze --coverage --json path/to/module.nso
 ./build/translate-module --diagnostic --json --module-base 0x7100000000 \
   --report build/reports/main.json path/to/prepared-main.nso
+./build/run-entry --entry dt-init --module-base 0x7100000000 \
+  --report build/reports/m11-dt-init.json path/to/prepared-main.nso
 ```
 
 `translate-module` consumes an already prepared, legally supplied NSO. It
@@ -102,6 +110,7 @@ On a multi-config generator, use `build/Debug/nso-inspect`.
 - [Milestone 8 FP/SIMD design and support boundary](docs/MILESTONE_8.md)
 - [Milestone 9 threads, TLS, atomics, and memory ordering](docs/MILESTONE_9.md)
 - [Milestone 10 whole-main translation](docs/MILESTONE_10.md)
+- [Milestone 11 controlled entry execution](docs/MILESTONE_11.md)
 - [AArch64 support matrix and coverage workflow](docs/AARCH64_SUPPORT.md)
 - [Build notes](docs/BUILD.md)
 - [Dependency policy](docs/DEPENDENCIES.md)
@@ -194,6 +203,9 @@ to inspect a ZBIC-marked header without claiming materialization succeeded.
 - Milestone 10 — Whole-main translation: implemented for prepared modules and
   exercised locally against one legally supplied prepared TOTK main NSO with
   bounded diagnostic reporting; real-game boot remains deferred.
+- Milestone 11 — Controlled entry-path execution: implemented for bounded
+  metadata-selected initialization targets across supported guest function
+  boundaries; full process startup and game boot remain deferred.
 
 Materialization consumes a legally obtained, already prepared local NSO. The
 repository does not decrypt, extract, or distribute Nintendo content.
