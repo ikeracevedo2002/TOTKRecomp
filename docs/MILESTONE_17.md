@@ -31,8 +31,11 @@ Milestones 15 and 16 established the following facts, which were preserved:
 * branch: `milestone-17-post-umulh-provider-frontier`
 * exact base SHA: `297768205e44c617b4eaf3f714ef30d2e97d733c`
 * exact implementation head SHA: `a9c79f25496a1cbe3159062c11f8914ea4f61ac2`
+* evidence handoff head before this final CI metadata update:
+  `6f60d466de3036636bb0488254277714d1dd6317`
 * commits: `a9c79f2` — M17 implementation, diagnostic execution, tests, and
-  evidence documentation; follow-up commits record PR/CI metadata
+  evidence documentation; `6f60d46` — PR/CI handoff metadata; final
+  documentation commit records the completed CI state
 * PR: [#22](https://github.com/ikeracevedo2002/TOTKRecomp/pull/22)
 
 ### Baseline and executable set
@@ -183,12 +186,11 @@ bytes.
 * ASan/UBSan: `211/211` passed in the existing `build-asan` configuration
 * TSan: `211/211` passed in the existing `build-tsan` configuration
 * local compiler: AppleClang via `/usr/bin/c++`; no local GCC claim
-* GCC CI: pending at this documentation snapshot; required by
-  `.github/workflows/ci.yml`
-* LLVM 18 CI: pending at this documentation snapshot; required by
-  `.github/workflows/ci.yml`
-* MSVC CI: pending at this documentation snapshot; required by
-  `.github/workflows/ci.yml`
+* GCC CI: passed in PR run `34169125254` and push run `34169120496`
+* LLVM 18 CI: passed in PR run `34169125254` and push run `34169120496`
+* ASan/UBSan CI: passed in PR run `34169125254` and push run `34169120496`
+* TSan CI: passed in PR run `34169125254` and push run `34169120496`
+* MSVC CI: passed in PR run `34169125254` and push run `34169120496`
 
 ## Dependencies
 
