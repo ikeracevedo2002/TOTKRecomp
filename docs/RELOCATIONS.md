@@ -91,6 +91,16 @@ and resolution basis. Unresolved or ambiguous symbols remain guest import
 boundaries and only then reach the runtime/HLE registry. This keeps guest
 linker accounting separate from runtime-import accounting.
 
+Milestone 14 obtains the namespace from `ModuleSetInventory` after every
+supplied prepared module has been validated. Completeness is typed and carries
+its basis; a directory scan is not a completeness attestation. The audited
+namespace retains every focus-symbol occurrence and its ineligibility reason,
+so `provider_not_found_complete` is distinguishable from
+`provider_search_incomplete` and from `provider_ambiguous`. A unique dynamic
+`FUNC` provider also seeds the existing function map with
+`dynamic_symbol_provider` evidence, allowing a valid cross-module JUMP_SLOT
+target to be executed without inventing a function boundary.
+
 ## Guest-memory write model and atomicity
 
 Normal `GuestMemory::write()` continues to enforce final R/W/X permissions.

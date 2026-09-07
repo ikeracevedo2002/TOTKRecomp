@@ -2020,7 +2020,24 @@ single-module run remains at M12's `runtime_import_unimplemented` boundary;
 no guessed host handler was added. See [MILESTONE_13.md](MILESTONE_13.md) for
 the inventory, public evidence, synthetic coverage, and exact blocker.
 
-### Milestone 14 — Filesystem and asset loading
+### Milestone 14 — Complete executable-set ingestion and provider closure
+
+**Implemented:** `analysis::ModuleSetInventory` provides bounded explicit-file
+and non-recursive prepared-directory ingestion, NSO identity/materialization
+validation, duplicate/collision rejection, target-coherence evidence, and
+typed completeness provenance. `process-inspect` reports schema-4 module-set
+inventory and process-wide dynamic-symbol evidence without execution. The
+existing `ProcessImage`, audited `ProcessSymbolNamespace`, transactional
+relocation planner, provider-base address calculation, dynamic-symbol function
+seeding, and process-aware execution remain the sole process pipeline.
+
+Directory discovery is not a completeness attestation. Manifest-verified
+completeness requires exact logical names, SHA-256 values, and Build IDs.
+`__nnmusl_init_dso` remains unresolved when the prepared exact-build module set
+is unavailable, and no runtime implementation is guessed. See
+[MILESTONE_14.md](MILESTONE_14.md).
+
+### Future milestone — Filesystem and asset loading
 
 **Goal:** Mount user-provided game data and implement the required streaming path.
 

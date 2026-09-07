@@ -57,6 +57,12 @@ after guest-module provider resolution. The available local executable set is
 currently one `main` NSO, so `__nnmusl_init_dso` remains an evidence-driven
 unresolved provider search and the real run still stops at the M12
 `runtime_import_unimplemented` boundary.
+Milestone 14 adds bounded executable-set ingestion, deterministic directory
+inventory, identity/coherence validation, provenance-aware completeness, and
+schema-4 process inspection. The inventory and synthetic cross-module
+execution tests are implemented; the real complete-set closure remains
+blocked because no prepared local executable-module set is available in this
+workspace. M14 does not implement `__nnmusl_init_dso` speculatively.
 
 No supported TOTK build is committed. The repository contains no game binaries,
 keys, firmware, SDKs, or extracted game assets. The committed TOTK manifest is an
@@ -110,6 +116,11 @@ Inspect and materialize an NSO0 input:
 # Multi-module process analysis; paths remain local-only.
 ./build/run-entry --local-config config/local.json --entry dt-init \
   --report build/reports/m13-process.json
+
+# Inspect every prepared module without guest execution; paths remain local-only.
+./build/process-inspect --local-config config/local.json --json \
+  --report build/reports/m14-process-inventory.json
+./build/process-inspect --directory /path/to/prepared-exefs --json
 ```
 
 `translate-module` consumes an already prepared, legally supplied NSO. It
@@ -131,6 +142,7 @@ On a multi-config generator, use `build/Debug/nso-inspect`.
 - [Milestone 11 controlled entry execution](docs/MILESTONE_11.md)
 - [Milestone 12 runtime import boundary](docs/MILESTONE_12.md)
 - [Milestone 13 multi-module provider resolution](docs/MILESTONE_13.md)
+- [Milestone 14 complete executable-set ingestion and provider closure](docs/MILESTONE_14.md)
 - [AArch64 support matrix and coverage workflow](docs/AARCH64_SUPPORT.md)
 - [Build notes](docs/BUILD.md)
 - [Dependency policy](docs/DEPENDENCIES.md)
@@ -235,6 +247,11 @@ to inspect a ZBIC-marked header without claiming materialization succeeded.
   schema-3 reports. The currently supplied one-module local set is explicitly
   incomplete for real `__nnmusl_init_dso` provider discovery, so the M12
   runtime boundary remains the honest next stop.
+- Milestone 14 — Complete executable-set ingestion and provider closure:
+  infrastructure implemented with schema-4 inventory/inspection, explicit
+  completeness provenance, and synthetic cross-module execution coverage.
+  Real executable-set closure is blocked by unavailable legally supplied local
+  modules; no provider or runtime contract is fabricated.
 
 Materialization consumes a legally obtained, already prepared local NSO. The
 repository does not decrypt, extract, or distribute Nintendo content.
