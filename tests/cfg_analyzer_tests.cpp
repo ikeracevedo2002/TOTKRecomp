@@ -1,6 +1,8 @@
 #include "switchrecomp/analysis/cfg_analyzer.hpp"
 
 #include <cstdint>
+#include <set>
+#include <string>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -83,6 +85,42 @@ TEST_CASE("CFG does not follow an unconditional branch fallthrough")
     REQUIRE(block.successors.size() == 1U);
     REQUIRE(block.successors.front().kind == EdgeKind::Branch);
     REQUIRE(block.successors.front().target == 0x1008U);
+}
+
+TEST_CASE("CFG records a known unconditional function transfer without crossing it")
+{
+    // b known_function; the target is executable but outside this function's
+    // finalized ownership because it is a strong known entry.
+    const auto memory = make_code(0x1000U, {0x14000004U, 0xd503201fU, 0xd503201fU,
+                                           0xd503201fU, 0xd65f03c0U});
+    AnalysisOptions options;
+    options.known_function_entries.insert(0x1010U);
+    const auto graph = analyze_control_flow(memory, 0x1000U, options);
+    REQUIRE(graph);
+    REQUIRE(graph.value().blocks.size() == 1U);
+    REQUIRE_FALSE(graph.value().blocks.contains(0x1010U));
+    REQUIRE(graph.value().blocks.at(0x1000U).successors.size() == 1U);
+    REQUIRE(graph.value().blocks.at(0x1000U).successors.front().kind ==
+            EdgeKind::FunctionTransfer);
+    REQUIRE_FALSE(graph.value().blocks.at(0x1000U).successors.front().internal);
+    REQUIRE(validate_control_flow_graph(graph.value()));
+    REQUIRE(switchrecomp::analysis::render_control_flow_graph(graph.value()).find(
+                "function_transfer") != std::string::npos);
+}
+
+TEST_CASE("CFG keeps a conditional branch to a known entry as conditional flow")
+{
+    // cmp x0, #0; b.eq 0x1010; nop; ret
+    const auto memory = make_code(0x1000U, {0xf100001fU, 0x54000060U, 0xd503201fU,
+                                           0xd65f03c0U, 0xd65f03c0U});
+    AnalysisOptions options;
+    options.known_function_entries.insert(0x1010U);
+    const auto graph = analyze_control_flow(memory, 0x1000U, options);
+    REQUIRE(graph);
+    REQUIRE(graph.value().blocks.contains(0x1010U));
+    REQUIRE(find_edge(graph.value().blocks.at(0x1000U), EdgeKind::ConditionalTaken) != nullptr);
+    REQUIRE(find_edge(graph.value().blocks.at(0x1000U), EdgeKind::ConditionalTaken)->internal);
+    REQUIRE(validate_control_flow_graph(graph.value()));
 }
 
 TEST_CASE("CFG handles conditional diamonds and converging leaders")

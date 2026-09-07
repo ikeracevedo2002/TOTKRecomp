@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <limits>
 #include <span>
 #include <string>
 #include <thread>
@@ -218,11 +219,7 @@ TEST_CASE("M10 conflicts normalize canonical identity when range order is revers
     const auto reversed_map = analysis::FunctionMapBuilder::build(reversed);
     REQUIRE(first_map);
     REQUIRE(reversed_map);
-    REQUIRE(first_map.value().conflicts().size() == 1U);
-    REQUIRE(first_map.value().conflicts().front().first_function == 0x6004U);
-    REQUIRE(first_map.value().conflicts().front().second_function == 0x6008U);
-    REQUIRE(first_map.value().conflicts().front().first_range.base == 0x6004U);
-    REQUIRE(first_map.value().conflicts().front().second_range.base == 0x6000U);
+    REQUIRE(first_map.value().conflicts().empty());
     REQUIRE(analysis::render_function_map_json(first_map.value()) ==
             analysis::render_function_map_json(reversed_map.value()));
 }
@@ -286,11 +283,9 @@ TEST_CASE("M10 conflict calculation emits complete three-way and chain overlap s
          seed(0xa018U, FunctionDiscoverySource::Heuristic, FunctionConfidence::Low)});
     const auto chain_map = analysis::FunctionMapBuilder::build(chain);
     REQUIRE(chain_map);
-    REQUIRE(chain_map.value().conflicts().size() == 2U);
+    REQUIRE(chain_map.value().conflicts().size() == 1U);
     REQUIRE(chain_map.value().conflicts()[0].first_function == 0xa000U);
     REQUIRE(chain_map.value().conflicts()[0].second_function == 0xa018U);
-    REQUIRE(chain_map.value().conflicts()[1].first_function == 0xa010U);
-    REQUIRE(chain_map.value().conflicts()[1].second_function == 0xa018U);
 }
 
 TEST_CASE("M10 late direct-call discovery contributes final boundary conflicts")
@@ -303,12 +298,208 @@ TEST_CASE("M10 late direct-call discovery contributes final boundary conflicts")
     const auto map = analysis::FunctionMapBuilder::build(input);
     REQUIRE(map);
     REQUIRE(map.value().find(0xb008U) != nullptr);
-    REQUIRE(map.value().find(0xb008U)->translation_status == analysis::TranslationStatus::Conflict);
+    REQUIRE(map.value().find(0xb008U)->translation_status == analysis::TranslationStatus::Analyzed);
     REQUIRE(std::any_of(map.value().find(0xb008U)->evidence.begin(),
                         map.value().find(0xb008U)->evidence.end(), [](const auto& evidence) {
                             return evidence.source == FunctionDiscoverySource::DirectCall;
                         }));
+    REQUIRE(map.value().conflicts().empty());
+}
+
+TEST_CASE("M10.2 precise ownership normalizes decoded instruction spans")
+{
+    const auto contiguous = analysis::normalize_code_ranges(
+        std::vector<memory::GuestAddress>{0x1008U, 0x1000U, 0x1004U, 0x1004U});
+    REQUIRE(contiguous);
+    REQUIRE(contiguous.value() ==
+            std::vector<analysis::GuestAddressRange>{{0x1000U, 0x0cU}});
+
+    const auto disconnected = analysis::normalize_code_ranges(
+        std::vector<memory::GuestAddress>{0x5004U, 0x1000U, 0x5000U, 0x1004U});
+    REQUIRE(disconnected);
+    REQUIRE(disconnected.value() ==
+            std::vector<analysis::GuestAddressRange>{{0x1000U, 0x08U}, {0x5000U, 0x08U}});
+
+    const auto gap = analysis::normalize_code_ranges(
+        std::vector<memory::GuestAddress>{0x1000U, 0x1008U});
+    REQUIRE(gap);
+    REQUIRE(gap.value() ==
+            std::vector<analysis::GuestAddressRange>{{0x1000U, 0x04U}, {0x1008U, 0x04U}});
+
+    const auto adjacent = analysis::normalize_code_ranges(
+        std::vector<analysis::GuestAddressRange>{{0x1000U, 0x04U}, {0x1004U, 0x04U}});
+    REQUIRE(adjacent);
+    REQUIRE(adjacent.value() ==
+            std::vector<analysis::GuestAddressRange>{{0x1000U, 0x08U}});
+
+    const auto overflow = analysis::normalize_code_ranges(
+        std::vector<memory::GuestAddress>{std::numeric_limits<memory::GuestAddress>::max() - 3U});
+    REQUIRE_FALSE(overflow);
+    REQUIRE(overflow.error().code == ErrorCode::InvalidGuestAddress);
+}
+
+TEST_CASE("M10.2 exact ownership conflicts preserve islands and reject envelope overlap")
+{
+    const auto disjoint = analysis::intersect_owned_ranges(
+        std::vector<analysis::GuestAddressRange>{{0x1000U, 0x10U}, {0x5000U, 0x10U}},
+        std::vector<analysis::GuestAddressRange>{{0x3000U, 0x10U}});
+    REQUIRE(disjoint);
+    REQUIRE(disjoint.value().empty());
+    REQUIRE_FALSE(analysis::owned_ranges_overlap(
+        std::vector<analysis::GuestAddressRange>{{0x1000U, 0x10U}},
+        std::vector<analysis::GuestAddressRange>{{0x1010U, 0x10U}}));
+
+    const auto islands = analysis::intersect_owned_ranges(
+        std::vector<analysis::GuestAddressRange>{{0x1000U, 0x20U}, {0x2000U, 0x20U}},
+        std::vector<analysis::GuestAddressRange>{{0x1010U, 0x20U}, {0x2010U, 0x20U}});
+    REQUIRE(islands);
+    REQUIRE(islands.value() ==
+            std::vector<analysis::GuestAddressRange>{{0x1010U, 0x10U}, {0x2010U, 0x10U}});
+
+    const auto true_overlap = analysis::intersect_owned_ranges(
+        std::vector<analysis::GuestAddressRange>{{0x1000U, 0x20U}},
+        std::vector<analysis::GuestAddressRange>{{0x1010U, 0x20U}});
+    REQUIRE(true_overlap);
+    REQUIRE(true_overlap.value() ==
+            std::vector<analysis::GuestAddressRange>{{0x1010U, 0x10U}});
+}
+
+TEST_CASE("M10.2 convex envelope overlap does not create a function conflict")
+{
+    std::vector<std::byte> code(0x4004U, std::byte{0});
+    write_u32(code, 0x0000U, 0x14000800U); // 0x1000 -> 0x3000
+    write_u32(code, 0x1000U, 0xd65f03c0U); // gap function at 0x2000
+    write_u32(code, 0x2000U, 0xd65f03c0U); // disconnected high block
+    const auto memory = make_code(0x1000U, code);
+    const auto input = input_for(
+        memory, 0x1000U, code.size(),
+        {seed(0x1000U, FunctionDiscoverySource::ManualOverride, FunctionConfidence::Manual),
+         seed(0x2000U, FunctionDiscoverySource::ManualOverride, FunctionConfidence::Manual)});
+    const auto map = analysis::FunctionMapBuilder::build(input);
+    REQUIRE(map);
+    const auto* first = map.value().find(0x1000U);
+    const auto* second = map.value().find(0x2000U);
+    REQUIRE(first != nullptr);
+    REQUIRE(second != nullptr);
+    REQUIRE(first->owned_code_ranges ==
+            std::vector<analysis::GuestAddressRange>{{0x1000U, 0x04U}, {0x3000U, 0x04U}});
+    REQUIRE(second->owned_code_ranges ==
+            std::vector<analysis::GuestAddressRange>{{0x2000U, 0x04U}});
+    REQUIRE((first->range_begin < second->range_end &&
+             second->range_begin < first->range_end));
+    REQUIRE(map.value().conflicts().empty());
+    REQUIRE_FALSE(analysis::function_owns_address(*first, 0x2000U));
+    REQUIRE(map.value().find_owners(0x2000U).size() == 1U);
+}
+
+TEST_CASE("M10.2 precise conflict records contain all overlap islands")
+{
+    std::vector<std::byte> code(0x4004U, std::byte{0});
+    write_u32(code, 0x0000U, 0x14000800U); // 0x1000 -> 0x3000
+    write_u32(code, 0x1000U, 0x14000400U); // 0x2000 -> 0x3000
+    write_u32(code, 0x2000U, 0x14000800U); // 0x3000 -> 0x5000
+    write_u32(code, 0x4000U, 0xd65f03c0U); // 0x5000
+    const auto memory = make_code(0x1000U, code);
+    const auto input = input_for(
+        memory, 0x1000U, code.size(),
+        {seed(0x1000U, FunctionDiscoverySource::ManualOverride, FunctionConfidence::Manual),
+         seed(0x2000U, FunctionDiscoverySource::ManualOverride, FunctionConfidence::Manual)});
+    const auto map = analysis::FunctionMapBuilder::build(input);
+    REQUIRE(map);
     REQUIRE(map.value().conflicts().size() == 1U);
+    REQUIRE(map.value().conflicts().front().overlap_ranges ==
+            std::vector<analysis::GuestAddressRange>{{0x3000U, 0x04U}, {0x5000U, 0x04U}});
+    REQUIRE(map.value().find_owners(0x3000U).size() == 2U);
+    REQUIRE(map.value().find_owners(0x4000U).empty());
+}
+
+TEST_CASE("M10.2 known unconditional branches become function transfers")
+{
+    std::vector<std::byte> code(0x14U, std::byte{0});
+    write_u32(code, 0x0000U, 0x14000004U); // 0x1000 -> 0x1010
+    write_u32(code, 0x0010U, 0xd65f03c0U);
+    const auto memory = make_code(0x1000U, code);
+
+    const auto internal = analysis::FunctionMapBuilder::build(input_for(
+        memory, 0x1000U, code.size(),
+        {seed(0x1000U, FunctionDiscoverySource::ManualOverride, FunctionConfidence::Manual)}));
+    REQUIRE(internal);
+    REQUIRE(internal.value().find(0x1000U)->cfg->blocks.contains(0x1010U));
+    REQUIRE(internal.value().find(0x1000U)->cfg->blocks.at(0x1000U).successors.front().kind ==
+            analysis::EdgeKind::Branch);
+
+    const auto external_input = input_for(
+        memory, 0x1000U, code.size(),
+        {seed(0x1000U, FunctionDiscoverySource::ManualOverride, FunctionConfidence::Manual),
+         seed(0x1010U, FunctionDiscoverySource::DynamicSymbol, FunctionConfidence::Confirmed)});
+    const auto external = analysis::FunctionMapBuilder::build(external_input);
+    REQUIRE(external);
+    const auto& transfer = external.value().find(0x1000U)->cfg->blocks.at(0x1000U).successors.front();
+    REQUIRE(transfer.kind == analysis::EdgeKind::FunctionTransfer);
+    REQUIRE_FALSE(transfer.internal);
+    REQUIRE_FALSE(external.value().find(0x1000U)->cfg->blocks.contains(0x1010U));
+    REQUIRE(analysis::render_function_map_json(external.value()).find("function_transfer") !=
+            std::string::npos);
+
+    const auto self_code = make_code(0x2000U, words({0x14000000U}));
+    const auto self = analysis::FunctionMapBuilder::build(input_for(
+        self_code, 0x2000U, 4U,
+        {seed(0x2000U, FunctionDiscoverySource::ManualOverride, FunctionConfidence::Manual)}));
+    REQUIRE(self);
+    REQUIRE(self.value().find(0x2000U)->cfg->blocks.at(0x2000U).successors.front().kind ==
+            analysis::EdgeKind::Branch);
+    REQUIRE(self.value().find(0x2000U)->cfg->blocks.at(0x2000U).successors.front().internal);
+}
+
+TEST_CASE("M10.2 late strong entries trigger boundary-aware re-analysis")
+{
+    std::vector<std::byte> code(0x38U, std::byte{0});
+    write_u32(code, 0x0000U, 0x14000004U); // 0x1000 -> 0x1010
+    write_u32(code, 0x0010U, 0xd65f03c0U); // weak seed target
+    write_u32(code, 0x0030U, 0x97fffff8U); // 0x1030 BL 0x1010
+    write_u32(code, 0x0034U, 0xd65f03c0U);
+    const auto memory = make_code(0x1000U, code);
+    const auto input = input_for(
+        memory, 0x1000U, code.size(),
+        {seed(0x1000U, FunctionDiscoverySource::ManualOverride, FunctionConfidence::Manual),
+         seed(0x1010U, FunctionDiscoverySource::Heuristic, FunctionConfidence::Low),
+         seed(0x1030U, FunctionDiscoverySource::ManualOverride, FunctionConfidence::Manual)});
+    const auto map = analysis::FunctionMapBuilder::build(input);
+    REQUIRE(map);
+    const auto* caller = map.value().find(0x1000U);
+    REQUIRE(caller != nullptr);
+    REQUIRE_FALSE(caller->cfg->blocks.contains(0x1010U));
+    REQUIRE(caller->cfg->blocks.at(0x1000U).successors.front().kind ==
+            analysis::EdgeKind::FunctionTransfer);
+    REQUIRE(std::any_of(map.value().find(0x1010U)->evidence.begin(),
+                        map.value().find(0x1010U)->evidence.end(), [](const auto& evidence) {
+                            return evidence.source == FunctionDiscoverySource::DirectCall;
+                        }));
+}
+
+TEST_CASE("M10.2 text start remains an unverified entry candidate")
+{
+    analysis::PreparedModuleOptions options;
+    options.module_name = "synthetic-main.nso";
+    options.module_base = 0x100000U;
+    const auto loaded = analysis::load_prepared_nso(make_synthetic_nso(), options);
+    REQUIRE(loaded);
+    REQUIRE(loaded.value().identity.metadata_schema_version == 2U);
+    REQUIRE(loaded.value().identity.entry_points.size() == 1U);
+    REQUIRE(loaded.value().identity.entry_points.front().kind ==
+            analysis::EntryPointKind::TextStartCandidate);
+    REQUIRE_FALSE(loaded.value().identity.entry_points.front().verified_runtime_entry);
+    REQUIRE(loaded.value().seeds.front().source == FunctionDiscoverySource::TextStartCandidate);
+    REQUIRE(loaded.value().seeds.front().confidence == FunctionConfidence::Low);
+
+    analysis::TranslationOptions translation_options;
+    translation_options.mode = analysis::TranslationMode::Diagnostic;
+    const auto translated = analysis::translate_module(loaded.value(), translation_options);
+    REQUIRE(translated);
+    const auto report = analysis::render_translation_report_json(translated.value());
+    REQUIRE(report.find("\"verified_process_entry\": null") != std::string::npos);
+    REQUIRE(report.find("text_start_candidate") != std::string::npos);
+    REQUIRE(report.find("\"verified_runtime_entry\": false") != std::string::npos);
 }
 
 TEST_CASE("M10 discovery rejects invalid seeds and enforces bounded fixed-point growth")
