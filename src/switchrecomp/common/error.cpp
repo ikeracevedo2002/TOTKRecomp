@@ -35,6 +35,10 @@ std::string_view error_code_name(ErrorCode code) noexcept
     case ErrorCode::AnalysisBlockLimitExceeded: return "analysis_block_limit_exceeded";
     case ErrorCode::AnalysisWorklistLimitExceeded: return "analysis_worklist_limit_exceeded";
     case ErrorCode::AnalysisScopeViolation: return "analysis_scope_violation";
+    case ErrorCode::AnalysisBudgetExceeded: return "analysis_budget_exceeded";
+    case ErrorCode::FunctionBoundaryConflict: return "function_boundary_conflict";
+    case ErrorCode::InvalidGuestAddress: return "invalid_guest_address";
+    case ErrorCode::UnresolvedIndirectFlow: return "unresolved_indirect_flow";
     case ErrorCode::InvalidRelocationEntrySize: return "invalid_relocation_entry_size";
     case ErrorCode::InvalidSymbolEntrySize: return "invalid_symbol_entry_size";
     case ErrorCode::RelocationTableOutOfBounds: return "relocation_table_out_of_bounds";
@@ -67,6 +71,11 @@ std::string_view error_code_name(ErrorCode code) noexcept
     case ErrorCode::ThreadCreationFailed: return "thread_creation_failed";
     case ErrorCode::InvalidThreadState: return "invalid_thread_state";
     case ErrorCode::InvalidThreadId: return "invalid_thread_id";
+    case ErrorCode::FunctionRegistryFrozen: return "function_registry_frozen";
+    case ErrorCode::UnknownGuestFunction: return "unknown_guest_function";
+    case ErrorCode::RuntimeBoundary: return "runtime_boundary";
+    case ErrorCode::MissingImportBinding: return "missing_import_binding";
+    case ErrorCode::CodegenFailure: return "codegen_failure";
     case ErrorCode::LlvmVerificationFailed: return "llvm_verification_failed";
     case ErrorCode::JitCompilationFailed: return "jit_compilation_failed";
     }

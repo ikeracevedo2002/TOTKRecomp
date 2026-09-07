@@ -213,6 +213,7 @@ add_library(switchrecomp-analysis
     src/switchrecomp/analysis/control_flow_graph.cpp
     src/switchrecomp/analysis/cfg_analyzer.cpp
     src/switchrecomp/analysis/coverage.cpp
+    src/switchrecomp/analysis/function_map.cpp
 )
 target_include_directories(switchrecomp-analysis
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -251,6 +252,7 @@ add_library(switchrecomp-runtime-core
     src/switchrecomp/runtime/fp.cpp
     src/switchrecomp/runtime/atomic_memory.cpp
     src/switchrecomp/runtime/thread.cpp
+    src/switchrecomp/runtime/dispatcher.cpp
 )
 target_include_directories(switchrecomp-runtime-core
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -330,6 +332,24 @@ if(TOTKRECOMP_ENABLE_LLVM)
     endif()
 endif()
 
+add_library(switchrecomp-module-translation
+    src/switchrecomp/analysis/whole_module.cpp
+)
+target_include_directories(switchrecomp-module-translation
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-module-translation
+    PUBLIC switchrecomp-common switchrecomp-memory switchrecomp-analysis
+           switchrecomp-ir switchrecomp-lifter switchrecomp-interpreter
+           switchrecomp-runtime-core switchrecomp-target nlohmann_json::nlohmann_json
+)
+if(TOTKRECOMP_HAS_LLVM)
+    target_link_libraries(switchrecomp-module-translation PUBLIC switchrecomp-codegen-llvm)
+    target_compile_definitions(switchrecomp-module-translation PRIVATE TOTKRECOMP_HAS_LLVM=1)
+endif()
+totkrecomp_enable_project_warnings(switchrecomp-module-translation)
+totkrecomp_enable_sanitizers(switchrecomp-module-translation)
+
 add_executable(nso-inspect tools/nso-inspect/main.cpp)
 target_link_libraries(nso-inspect PRIVATE switchrecomp-memory)
 target_compile_definitions(nso-inspect PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
@@ -362,6 +382,15 @@ target_compile_definitions(nso-dynamic-inspect PRIVATE SWITCHRECOMP_VERSION="${P
 totkrecomp_enable_project_warnings(nso-dynamic-inspect)
 totkrecomp_enable_sanitizers(nso-dynamic-inspect)
 
+add_executable(translate-module tools/translate-module/main.cpp)
+target_link_libraries(translate-module PRIVATE switchrecomp-module-translation)
+if(TOTKRECOMP_HAS_LLVM)
+    target_compile_definitions(translate-module PRIVATE TOTKRECOMP_HAS_LLVM=1)
+endif()
+target_compile_definitions(translate-module PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
+totkrecomp_enable_project_warnings(translate-module)
+totkrecomp_enable_sanitizers(translate-module)
+
 if(TOTKRECOMP_BUILD_TESTS)
     add_executable(switchrecomp-tests
         tests/common_tests.cpp
@@ -379,6 +408,7 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/milestone7_semantics_tests.cpp
         tests/milestone8_fp_simd_tests.cpp
         tests/milestone9_threads_atomics_tests.cpp
+        tests/milestone10_whole_main_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE
@@ -392,6 +422,7 @@ if(TOTKRECOMP_BUILD_TESTS)
             switchrecomp-lifter
             switchrecomp-interpreter
             switchrecomp-target
+            switchrecomp-module-translation
             lz4_static
             Catch2::Catch2WithMain
     )
@@ -408,4 +439,5 @@ if(TOTKRECOMP_BUILD_TESTS)
     catch_discover_tests(switchrecomp-tests)
 endif()
 
-install(TARGETS nso-inspect nso-dynamic-inspect aarch64-analyze aarch64-lift RUNTIME DESTINATION bin)
+install(TARGETS nso-inspect nso-dynamic-inspect aarch64-analyze aarch64-lift translate-module
+        RUNTIME DESTINATION bin)
