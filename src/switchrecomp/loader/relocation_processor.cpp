@@ -6,29 +6,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <string>
-#include <vector>
+#include <utility>
 
 namespace switchrecomp::loader
 {
 
 namespace
 {
-
-struct PendingWrite
-{
-    memory::GuestAddress address;
-    std::array<std::byte, sizeof(std::uint64_t)> bytes;
-};
-
-void encode_u64_le(std::uint64_t value, std::array<std::byte, sizeof(std::uint64_t)>& bytes) noexcept
-{
-    for (std::size_t index = 0U; index < bytes.size(); ++index)
-    {
-        bytes[index] = static_cast<std::byte>((value >> (index * 8U)) & 0xffU);
-    }
-}
 
 [[nodiscard]] Result<std::uint64_t> addend_result(std::uint64_t value, std::int64_t addend,
                                                    std::size_t index)
@@ -44,17 +31,89 @@ void encode_u64_le(std::uint64_t value, std::array<std::byte, sizeof(std::uint64
     return result;
 }
 
+[[nodiscard]] Result<void> validate_target(const memory::GuestMemory& guest_memory,
+                                            const format::Relocation& relocation,
+                                            std::size_t index,
+                                            const RelocationProcessorOptions& options)
+{
+    if ((relocation.target_address % sizeof(std::uint64_t)) != 0U)
+    {
+        return Result<void>::failure(make_error(
+            ErrorCode::MisalignedRelocationTarget,
+            "relocation[" + std::to_string(index) + "] target is not 8-byte aligned"));
+    }
+
+    const auto target_end = checked_add_u64(relocation.target_address, sizeof(std::uint64_t));
+    if (!target_end)
+    {
+        return Result<void>::failure(make_error(
+            target_end.error().code,
+            "relocation[" + std::to_string(index) + "] target range overflows"));
+    }
+
+    if (options.use_loader_write)
+    {
+        const auto valid_target = guest_memory.validate_loader_write(
+            relocation.target_address, sizeof(std::uint64_t));
+        if (!valid_target)
+        {
+            return Result<void>::failure(make_error(
+                valid_target.error().code,
+                "relocation[" + std::to_string(index) + "] target " +
+                    std::to_string(relocation.target_address) + ": " +
+                    valid_target.error().message));
+        }
+    }
+    else
+    {
+        const auto permissions = guest_memory.permissions_at(
+            relocation.target_address, sizeof(std::uint64_t));
+        if (!permissions)
+        {
+            return Result<void>::failure(make_error(
+                permissions.error().code,
+                "relocation[" + std::to_string(index) + "] target " +
+                    std::to_string(relocation.target_address) + ": " +
+                    permissions.error().message));
+        }
+        if (!memory::has_permission(permissions.value(), memory::GuestMemoryPermissions::Write))
+        {
+            return Result<void>::failure(make_error(
+                ErrorCode::PermissionDenied,
+                "relocation[" + std::to_string(index) +
+                    "] target mapping does not grant write permission"));
+        }
+    }
+    return Result<void>::success();
+}
+
+[[nodiscard]] format::ImportSymbol import_from(const ResolvedSymbol& symbol)
+{
+    return format::ImportSymbol{symbol.symbol_index, symbol.name, symbol.binding, symbol.type,
+                                symbol.visibility};
+}
+
+void encode_u64_le(std::uint64_t value,
+                   std::array<std::byte, sizeof(std::uint64_t)>& bytes) noexcept
+{
+    for (std::size_t index = 0U; index < bytes.size(); ++index)
+    {
+        bytes[index] = static_cast<std::byte>((value >> (index * 8U)) & 0xffU);
+    }
+}
+
 } // namespace
 
-Result<void> apply_relocations(memory::GuestMemory& guest_memory,
-                               std::span<const format::Relocation> relocations,
-                               const SymbolResolver& resolver,
-                               const RelocationProcessorOptions& options)
+Result<RelocationPlan> plan_relocations(const memory::GuestMemory& guest_memory,
+                                        std::span<const format::Relocation> relocations,
+                                        const SymbolResolver& resolver,
+                                        const RelocationProcessorOptions& options)
 {
     try
     {
-        std::vector<PendingWrite> staged;
-        staged.reserve(relocations.size());
+        RelocationPlan plan;
+        plan.relocation_count = relocations.size();
+        plan.applied.reserve(relocations.size());
 
         for (std::size_t index = 0U; index < relocations.size(); ++index)
         {
@@ -65,102 +124,100 @@ Result<void> apply_relocations(memory::GuestMemory& guest_memory,
             }
             if (relocation.type == format::AArch64RelocationType::Unknown)
             {
-                return Result<void>::failure(make_error(
+                return Result<RelocationPlan>::failure(make_error(
                     ErrorCode::UnsupportedRelocationType,
                     "relocation[" + std::to_string(index) + "] has unsupported AArch64 type " +
                         std::to_string(relocation.raw_type)));
             }
 
-            if ((relocation.target_address % sizeof(std::uint64_t)) != 0U)
-            {
-                return Result<void>::failure(make_error(
-                    ErrorCode::MisalignedRelocationTarget,
-                    "relocation[" + std::to_string(index) + "] target is not 8-byte aligned"));
-            }
-
-            std::uint64_t value = 0U;
+            std::optional<std::uint64_t> value;
             if (relocation.type == format::AArch64RelocationType::Relative)
             {
-                // R_AARCH64_RELATIVE: B + A. The module base is retained by
-                const auto relative = resolver.module_base_for_relocation();
-                const auto calculated = addend_result(relative, relocation.addend, index);
+                const auto calculated = addend_result(resolver.module_base_for_relocation(),
+                                                      relocation.addend, index);
                 if (!calculated)
                 {
-                    return Result<void>::failure(calculated.error());
+                    return Result<RelocationPlan>::failure(calculated.error());
                 }
                 value = calculated.value();
             }
             else
             {
-                const auto symbol = resolver.resolve(relocation.symbol_index);
-                if (!symbol)
+                const auto resolved = resolver.resolve_for_relocation(relocation.symbol_index);
+                if (!resolved)
                 {
-                    return Result<void>::failure(make_error(
-                        symbol.error().code,
+                    return Result<RelocationPlan>::failure(make_error(
+                        resolved.error().code,
                         "relocation[" + std::to_string(index) + "] symbol " +
                             std::to_string(relocation.symbol_index) + ": " +
-                            symbol.error().message));
+                            resolved.error().message));
                 }
-                const auto calculated = addend_result(symbol.value().address, relocation.addend, index);
+                if (!resolved.value().resolved)
+                {
+                    const auto target = validate_target(guest_memory, relocation, index, options);
+                    if (!target)
+                    {
+                        return Result<RelocationPlan>::failure(target.error());
+                    }
+                    plan.unresolved.push_back(UnresolvedRelocation{
+                        index, relocation, import_from(resolved.value())});
+                    continue;
+                }
+                const auto calculated = addend_result(resolved.value().address,
+                                                      relocation.addend, index);
                 if (!calculated)
                 {
-                    return Result<void>::failure(calculated.error());
+                    return Result<RelocationPlan>::failure(calculated.error());
                 }
                 value = calculated.value();
             }
 
-            const auto target_end = checked_add_u64(relocation.target_address, sizeof(value));
-            if (!target_end)
+            const auto target = validate_target(guest_memory, relocation, index, options);
+            if (!target)
             {
-                return Result<void>::failure(make_error(
-                    target_end.error().code,
-                    "relocation[" + std::to_string(index) + "] target range overflows"));
+                return Result<RelocationPlan>::failure(target.error());
             }
-            if (options.use_loader_write)
-            {
-                const auto valid_target = guest_memory.validate_loader_write(
-                    relocation.target_address, sizeof(value));
-                if (!valid_target)
-                {
-                    return Result<void>::failure(make_error(
-                        valid_target.error().code,
-                        "relocation[" + std::to_string(index) + "] target " +
-                            std::to_string(relocation.target_address) + ": " +
-                            valid_target.error().message));
-                }
-            }
-            else
-            {
-                const auto permissions = guest_memory.permissions_at(
-                    relocation.target_address, sizeof(value));
-                if (!permissions)
-                {
-                    return Result<void>::failure(make_error(
-                        permissions.error().code,
-                        "relocation[" + std::to_string(index) + "] target " +
-                            std::to_string(relocation.target_address) + ": " +
-                            permissions.error().message));
-                }
-                if (!memory::has_permission(permissions.value(),
-                                            memory::GuestMemoryPermissions::Write))
-                {
-                    return Result<void>::failure(make_error(
-                        ErrorCode::PermissionDenied,
-                        "relocation[" + std::to_string(index) +
-                            "] target mapping does not grant write permission"));
-                }
-            }
+            plan.applied.push_back(AppliedRelocation{index, relocation, value.value()});
+        }
+        return Result<RelocationPlan>::success(std::move(plan));
+    }
+    catch (const std::bad_alloc&)
+    {
+        return Result<RelocationPlan>::failure(
+            make_error(ErrorCode::ResourceLimit, "relocation planning allocation failed"));
+    }
+    catch (const std::length_error&)
+    {
+        return Result<RelocationPlan>::failure(
+            make_error(ErrorCode::ResourceLimit, "relocation plan exceeds host limits"));
+    }
+}
 
-            PendingWrite write{relocation.target_address, {}};
-            encode_u64_le(value, write.bytes);
-            staged.push_back(write);
+Result<void> apply_relocation_plan(memory::GuestMemory& guest_memory, const RelocationPlan& plan,
+                                   const RelocationProcessorOptions& options)
+{
+    try
+    {
+        // Revalidate the complete write set before committing any bytes. This
+        // keeps a retained plan safe even if its memory was changed meanwhile.
+        for (const auto& entry : plan.applied)
+        {
+            const auto target = validate_target(guest_memory, entry.relocation,
+                                                entry.relocation_index, options);
+            if (!target)
+            {
+                return target;
+            }
         }
 
-        for (const auto& write : staged)
+        for (const auto& entry : plan.applied)
         {
+            std::array<std::byte, sizeof(std::uint64_t)> bytes{};
+            encode_u64_le(entry.value, bytes);
             const auto result = options.use_loader_write
-                                    ? guest_memory.loader_write(write.address, write.bytes)
-                                    : guest_memory.write(write.address, write.bytes);
+                                    ? guest_memory.loader_write(entry.relocation.target_address,
+                                                                bytes)
+                                    : guest_memory.write(entry.relocation.target_address, bytes);
             if (!result)
             {
                 return Result<void>::failure(result.error());
@@ -171,13 +228,32 @@ Result<void> apply_relocations(memory::GuestMemory& guest_memory,
     catch (const std::bad_alloc&)
     {
         return Result<void>::failure(
-            make_error(ErrorCode::ResourceLimit, "relocation staging allocation failed"));
+            make_error(ErrorCode::ResourceLimit, "relocation application allocation failed"));
     }
-    catch (const std::length_error&)
+}
+
+Result<void> apply_relocations(memory::GuestMemory& guest_memory,
+                               std::span<const format::Relocation> relocations,
+                               const SymbolResolver& resolver,
+                               const RelocationProcessorOptions& options)
+{
+    const auto plan = plan_relocations(guest_memory, relocations, resolver, options);
+    if (!plan)
     {
-        return Result<void>::failure(
-            make_error(ErrorCode::ResourceLimit, "relocation staging exceeds host limits"));
+        return Result<void>::failure(plan.error());
     }
+    if (!plan.value().unresolved.empty())
+    {
+        const auto& unresolved = plan.value().unresolved.front();
+        const auto code = unresolved.symbol.binding == format::SymbolBinding::Weak
+                              ? ErrorCode::MissingImportBinding
+                              : ErrorCode::UndefinedStrongSymbol;
+        return Result<void>::failure(make_error(
+            code, "relocation[" + std::to_string(unresolved.relocation_index) + "] symbol " +
+                     std::to_string(unresolved.symbol.symbol_index) + ": unresolved external '" +
+                     unresolved.symbol.name + "'"));
+    }
+    return apply_relocation_plan(guest_memory, plan.value(), options);
 }
 
 } // namespace switchrecomp::loader

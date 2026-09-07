@@ -18,6 +18,9 @@ struct ResolvedSymbol
     memory::GuestAddress address;
     bool resolved;
     bool weak;
+    format::SymbolBinding binding;
+    format::SymbolType type;
+    format::SymbolVisibility visibility;
 };
 
 class SymbolResolver
@@ -31,6 +34,11 @@ class SymbolResolver
 
     [[nodiscard]] Result<void> add_external(std::string name, memory::GuestAddress address);
     [[nodiscard]] Result<ResolvedSymbol> resolve(std::uint32_t symbol_index) const;
+    // Resolve a relocation symbol without turning a valid undefined external
+    // binding into a loader error. Invalid symbol indices and malformed symbol
+    // bindings remain errors.
+    [[nodiscard]] Result<ResolvedSymbol> resolve_for_relocation(
+        std::uint32_t symbol_index) const;
     [[nodiscard]] std::vector<format::ImportSymbol> unresolved_imports() const;
     [[nodiscard]] memory::GuestAddress module_base_for_relocation() const noexcept
     {

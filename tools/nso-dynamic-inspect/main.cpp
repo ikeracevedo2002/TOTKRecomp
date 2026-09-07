@@ -74,6 +74,7 @@ void print_help(std::ostream& output)
     return { {"offset", hex_value(relocation.offset)},
              {"target", hex_value(relocation.target_address)},
              {"type", relocation_name(relocation)},
+             {"source", switchrecomp::format::relocation_source_name(relocation.source)},
              {"raw_type", relocation.raw_type},
              {"symbol_index", relocation.symbol_index},
              {"addend", relocation.addend} };
@@ -216,13 +217,21 @@ int main(int argc, char** argv)
     {
         return report_error(jmprel);
     }
-    std::vector<switchrecomp::format::RelaEntry> binary_relocations = rela.value();
-    binary_relocations.insert(binary_relocations.end(), jmprel.value().begin(), jmprel.value().end());
-    const auto relocations = switchrecomp::format::make_relocations(binary_relocations);
-    if (!relocations)
+    const auto rela_relocations = switchrecomp::format::make_relocations(
+        rela.value(), switchrecomp::format::RelocationSource::Rela);
+    if (!rela_relocations)
     {
-        return report_error(relocations);
+        return report_error(rela_relocations);
     }
+    const auto jmprel_relocations = switchrecomp::format::make_relocations(
+        jmprel.value(), switchrecomp::format::RelocationSource::JmpRel);
+    if (!jmprel_relocations)
+    {
+        return report_error(jmprel_relocations);
+    }
+    std::vector<Relocation> relocations = rela_relocations.value();
+    relocations.insert(relocations.end(), jmprel_relocations.value().begin(),
+                       jmprel_relocations.value().end());
 
     if (json_output)
     {
@@ -250,7 +259,7 @@ int main(int argc, char** argv)
         if (show_relocations)
         {
             result["relocations"] = nlohmann::json::array();
-            for (const auto& relocation : relocations.value())
+            for (const auto& relocation : relocations)
             {
                 result["relocations"].push_back(relocation_json(relocation));
             }
@@ -287,10 +296,12 @@ int main(int argc, char** argv)
     if (show_relocations)
     {
         std::cout << "Relocations:\n";
-        for (std::size_t index = 0U; index < relocations.value().size(); ++index)
+        for (std::size_t index = 0U; index < relocations.size(); ++index)
         {
-            const auto& relocation = relocations.value()[index];
-            std::cout << "  [" << index << "] type=" << relocation_name(relocation)
+            const auto& relocation = relocations[index];
+            std::cout << "  [" << index << "] source="
+                      << switchrecomp::format::relocation_source_name(relocation.source)
+                      << " type=" << relocation_name(relocation)
                       << " target=" << hex_value(relocation.target_address)
                       << " symbol=" << relocation.symbol_index
                       << " addend=" << relocation.addend << '\n';

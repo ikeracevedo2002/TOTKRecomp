@@ -155,7 +155,18 @@ std::string_view aarch64_relocation_type_name(AArch64RelocationType type) noexce
     return "R_AARCH64_UNKNOWN";
 }
 
-Result<std::vector<Relocation>> make_relocations(std::span<const RelaEntry> entries)
+std::string_view relocation_source_name(RelocationSource source) noexcept
+{
+    switch (source)
+    {
+    case RelocationSource::Rela: return "RELA";
+    case RelocationSource::JmpRel: return "JMPREL";
+    }
+    return "unknown";
+}
+
+Result<std::vector<Relocation>> make_relocations(std::span<const RelaEntry> entries,
+                                                  RelocationSource source)
 {
     try
     {
@@ -166,7 +177,7 @@ Result<std::vector<Relocation>> make_relocations(std::span<const RelaEntry> entr
             result.push_back(Relocation{entry.offset, entry.target_address,
                                         entry.relocation_type(),
                                         aarch64_relocation_type(entry.relocation_type()),
-                                        entry.symbol_index(), entry.addend});
+                                        entry.symbol_index(), entry.addend, source});
         }
         return Result<std::vector<Relocation>>::success(std::move(result));
     }

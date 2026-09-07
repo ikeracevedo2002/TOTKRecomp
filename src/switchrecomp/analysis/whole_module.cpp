@@ -157,6 +157,8 @@ using json = nlohmann::json;
                 {"build_id", identity.build_id},
                 {"sha256", identity.input_sha256},
                 {"guest_base", hex_address(identity.guest_base)},
+                {"guest_base_verified", identity.guest_base_verified},
+                {"guest_base_source", "analysis_selected"},
                 {"executable_ranges", std::move(ranges)},
                 {"translator_version", identity.translator_version},
                 {"metadata_schema_version", identity.metadata_schema_version},
@@ -323,7 +325,13 @@ using json = nlohmann::json;
                            {"functions", item.functions},
                            {"example_pcs", std::move(examples)}});
     }
-    return json{{"executable_bytes", coverage.executable_bytes},
+    return json{{"budgets", json{{"max_functions", coverage.budgets.max_functions},
+                                  {"max_instructions", coverage.budgets.max_instructions},
+                                  {"max_blocks", coverage.budgets.max_blocks},
+                                  {"max_edges", coverage.budgets.max_edges},
+                                  {"max_seeds", coverage.budgets.max_seeds},
+                                  {"max_bytes_analyzed", coverage.budgets.max_bytes_analyzed}}},
+                {"executable_bytes", coverage.executable_bytes},
                 {"decoded_instructions", coverage.decoded_instructions},
                 {"supported_instructions", coverage.supported_instructions},
                 {"unsupported_instructions", coverage.unsupported_instructions},
@@ -336,6 +344,7 @@ using json = nlohmann::json;
                 {"functions_translated", coverage.functions_translated},
                 {"functions_unsupported", coverage.functions_unsupported},
                 {"functions_failed", coverage.functions_failed},
+                {"conflicting_functions", coverage.conflicting_functions},
                 {"basic_blocks", coverage.basic_blocks},
                 {"cfg_edges", coverage.cfg_edges},
                 {"direct_calls", coverage.direct_calls},
@@ -344,6 +353,12 @@ using json = nlohmann::json;
                 {"unresolved_indirect_calls", coverage.unresolved_indirect_calls},
                 {"ir_verification_failures", coverage.ir_verification_failures},
                 {"runtime_import_boundaries", coverage.runtime_import_boundaries},
+                {"unresolved_imports", coverage.unresolved_imports},
+                {"unresolved_relocation_bindings", coverage.unresolved_relocation_bindings},
+                {"unresolved_plt_relocations", coverage.unresolved_plt_relocations},
+                {"unresolved_non_plt_relocations", coverage.unresolved_non_plt_relocations},
+                {"lifted_instructions", coverage.lifted_instructions},
+                {"analysis_budget_exhausted", coverage.analysis_budget_exhausted},
                 {"families", std::move(families)},
                 {"top_unsupported", std::move(top)}};
 }
@@ -386,7 +401,9 @@ using json = nlohmann::json;
     const FinalizedFunctionMap& map, const TranslationOptions& options,
     std::vector<format::ImportSymbol> imports = {},
     std::vector<format::Relocation> relocations = {},
-    std::vector<format::DynamicSymbol> symbols = {})
+    std::vector<format::DynamicSymbol> symbols = {},
+    std::size_t applied_relocations = 0U,
+    std::vector<loader::UnresolvedRelocation> unresolved_relocations = {})
 {
     WholeModuleTranslationResult result;
     result.identity = map.identity();
@@ -395,7 +412,10 @@ using json = nlohmann::json;
     result.symbols = std::move(symbols);
     result.unresolved_imports = std::move(imports);
     result.relocations = std::move(relocations);
+    result.applied_relocations = applied_relocations;
+    result.unresolved_relocations = std::move(unresolved_relocations);
     result.functions.reserve(map.functions().size());
+    result.coverage.budgets = options.function_map.budgets;
     result.coverage.executable_bytes = 0U;
     for (const auto& range : map.identity().executable_ranges)
     {
@@ -408,6 +428,10 @@ using json = nlohmann::json;
         result.coverage.executable_bytes += static_cast<std::size_t>(range.size);
     }
     result.coverage.functions_discovered = map.functions().size();
+    result.coverage.conflicting_functions = static_cast<std::size_t>(std::count_if(
+        map.functions().begin(), map.functions().end(), [](const auto& function) {
+            return function.translation_status == TranslationStatus::Conflict;
+        }));
     for (const auto& function : map.functions())
     {
         result.coverage.function_seeds += function.entries.size();
@@ -419,7 +443,20 @@ using json = nlohmann::json;
             }
         }
     }
-    result.coverage.runtime_import_boundaries = result.unresolved_imports.size();
+    result.coverage.runtime_import_boundaries = result.unresolved_relocations.size();
+    result.coverage.unresolved_imports = result.unresolved_imports.size();
+    result.coverage.unresolved_relocation_bindings = result.unresolved_relocations.size();
+    for (const auto& unresolved : result.unresolved_relocations)
+    {
+        if (unresolved.relocation.source == format::RelocationSource::JmpRel)
+        {
+            ++result.coverage.unresolved_plt_relocations;
+        }
+        else
+        {
+            ++result.coverage.unresolved_non_plt_relocations;
+        }
+    }
     result.strict_success = map.conflicts().empty() && result.unresolved_imports.empty();
     for (const auto& function : map.functions())
     {
@@ -590,6 +627,7 @@ using json = nlohmann::json;
         translated.ir = std::move(lifted.value());
         translated.status = TranslationStatus::Verified;
         ++result.coverage.functions_verified;
+        result.coverage.lifted_instructions += function.cfg->instruction_count;
 
         if (options.lower_llvm)
         {
@@ -708,6 +746,8 @@ Result<LoadedModule> load_prepared_nso(std::span<const std::byte> file_bytes,
 
     std::optional<format::DynamicSymbolTable> symbols;
     std::vector<format::Relocation> relocations;
+    std::size_t applied_relocations = 0U;
+    std::vector<loader::UnresolvedRelocation> unresolved_relocations;
     if (metadata.value().dynamic)
     {
         if (metadata.value().dynamic->symtab)
@@ -727,7 +767,8 @@ Result<LoadedModule> load_prepared_nso(std::span<const std::byte> file_bytes,
         {
             return Result<LoadedModule>::failure(rela_entries.error());
         }
-        const auto rela = format::make_relocations(rela_entries.value());
+        const auto rela = format::make_relocations(rela_entries.value(),
+                                                   format::RelocationSource::Rela);
         if (!rela)
         {
             return Result<LoadedModule>::failure(rela.error());
@@ -740,7 +781,8 @@ Result<LoadedModule> load_prepared_nso(std::span<const std::byte> file_bytes,
         {
             return Result<LoadedModule>::failure(jmprel_entries.error());
         }
-        const auto jmprel = format::make_relocations(jmprel_entries.value());
+        const auto jmprel = format::make_relocations(jmprel_entries.value(),
+                                                     format::RelocationSource::JmpRel);
         if (!jmprel)
         {
             return Result<LoadedModule>::failure(jmprel.error());
@@ -755,12 +797,26 @@ Result<LoadedModule> load_prepared_nso(std::span<const std::byte> file_bytes,
         if (options.apply_relocations && !relocations.empty())
         {
             loader::SymbolResolver resolver(symbols.value(), options.module_base);
-            const auto applied = loader::apply_relocations(guest_memory, relocations, resolver,
-                                                            options.relocation_options);
+            // Planning retains valid undefined external bindings as explicit
+            // boundaries. Hard metadata, relocation, arithmetic, and memory
+            // errors still abort loading before any write is committed.
+            const auto plan = loader::plan_relocations(guest_memory, relocations, resolver,
+                                                        options.relocation_options);
+            if (!plan)
+            {
+                return Result<LoadedModule>::failure(plan.error());
+            }
+            const auto applied = loader::apply_relocation_plan(
+                guest_memory, plan.value(), options.relocation_options);
             if (!applied)
             {
                 return Result<LoadedModule>::failure(applied.error());
             }
+
+            // The plan's resolved writes have already been committed; retain
+            // only the auditable result data needed by later reporting.
+            applied_relocations = plan.value().applied.size();
+            unresolved_relocations = std::move(plan.value().unresolved);
         }
     }
 
@@ -786,7 +842,8 @@ Result<LoadedModule> load_prepared_nso(std::span<const std::byte> file_bytes,
     identity.feature_flags = {"whole_module_analysis", "semantic_ir", "strict_unsupported"};
 
     LoadedModule result{std::move(identity), std::move(image).value(), std::move(guest_memory),
-                        std::move(metadata).value(), std::move(symbols), std::move(relocations), {}, {}};
+                        std::move(metadata).value(), std::move(symbols), std::move(relocations),
+                        applied_relocations, std::move(unresolved_relocations), {}, {}};
     if (result.symbols)
     {
         result.unresolved_imports = result.symbols->imports();
@@ -884,7 +941,18 @@ Result<WholeModuleTranslationResult> translate_module(const LoadedModule& module
     result.symbols = module.symbols ? module.symbols->symbols : std::vector<format::DynamicSymbol>{};
     result.unresolved_imports = module.unresolved_imports;
     result.relocations = module.relocations;
-    result.coverage.runtime_import_boundaries = result.unresolved_imports.size();
+    result.applied_relocations = module.applied_relocations;
+    result.unresolved_relocations = module.unresolved_relocations;
+    result.coverage.runtime_import_boundaries = result.unresolved_relocations.size();
+    result.coverage.unresolved_imports = result.unresolved_imports.size();
+    result.coverage.unresolved_relocation_bindings = result.unresolved_relocations.size();
+    result.coverage.unresolved_plt_relocations = static_cast<std::size_t>(std::count_if(
+        result.unresolved_relocations.begin(), result.unresolved_relocations.end(),
+        [](const auto& relocation) {
+            return relocation.relocation.source == format::RelocationSource::JmpRel;
+        }));
+    result.coverage.unresolved_non_plt_relocations =
+        result.unresolved_relocations.size() - result.coverage.unresolved_plt_relocations;
     result.strict_success = result.strict_success && result.unresolved_imports.empty();
     return Result<WholeModuleTranslationResult>::success(std::move(result));
 }
@@ -958,6 +1026,26 @@ std::string render_translation_report_json(const WholeModuleTranslationResult& r
             unsupported.push_back(unsupported_json(record));
         }
     }
+    json unresolved_relocations = json::array();
+    for (const auto& unresolved : result.unresolved_relocations)
+    {
+        unresolved_relocations.push_back(
+            json{{"relocation_index", unresolved.relocation_index},
+                 {"source", format::relocation_source_name(unresolved.relocation.source)},
+                 {"offset", hex_address(unresolved.relocation.offset)},
+                 {"target", hex_address(unresolved.relocation.target_address)},
+                 {"raw_type", unresolved.relocation.raw_type},
+                 {"type", format::aarch64_relocation_type_name(unresolved.relocation.type)},
+                 {"symbol_index", unresolved.symbol.symbol_index},
+                 {"symbol_name", unresolved.symbol.name},
+                 {"binding", format::symbol_binding_name(unresolved.symbol.binding)},
+                 {"symbol_type", format::symbol_type_name(unresolved.symbol.type)},
+                 {"addend", unresolved.relocation.addend},
+                 {"resolution", "unresolved_external"}});
+    }
+    const auto unresolved_plt = static_cast<std::size_t>(std::count_if(
+        result.unresolved_relocations.begin(), result.unresolved_relocations.end(),
+        [](const auto& item) { return item.relocation.source == format::RelocationSource::JmpRel; }));
     return json{{"schema_version", 1U},
                 {"input", identity_json(result.identity)},
                 {"module", result.identity.module},
@@ -988,11 +1076,19 @@ std::string render_translation_report_json(const WholeModuleTranslationResult& r
                                               {"target", hex_address(relocation.target_address)},
                                               {"raw_type", relocation.raw_type},
                                               {"type", format::aarch64_relocation_type_name(relocation.type)},
+                                              {"source", format::relocation_source_name(relocation.source)},
                                               {"symbol_index", relocation.symbol_index},
                                               {"addend", relocation.addend}});
                     }
                     return values;
                 }()},
+                {"relocation_summary",
+                 json{{"parsed", result.relocations.size()},
+                      {"applied", result.applied_relocations},
+                      {"unresolved", result.unresolved_relocations.size()},
+                      {"unresolved_plt", unresolved_plt},
+                      {"unresolved_non_plt", result.unresolved_relocations.size() - unresolved_plt}}},
+                {"unresolved_relocations", std::move(unresolved_relocations)},
                 {"coverage", coverage_json(result.coverage)}}
         .dump(2);
 }
@@ -1009,6 +1105,7 @@ std::string render_translation_report(const WholeModuleTranslationResult& result
            << "Executable bytes: " << result.coverage.executable_bytes << '\n'
            << "Functions discovered: " << result.coverage.functions_discovered << '\n'
            << "Functions analyzed: " << result.coverage.functions_analyzed << '\n'
+           << "Conflicting functions: " << result.coverage.conflicting_functions << '\n'
            << "Basic blocks: " << result.coverage.basic_blocks << '\n'
            << "Decoded instructions: " << result.coverage.decoded_instructions << '\n'
            << "Supported instructions: " << result.coverage.supported_instructions << '\n'
@@ -1027,6 +1124,9 @@ std::string render_translation_report(const WholeModuleTranslationResult& result
            << "Boundaries\n----------\n"
            << "Unresolved imports/runtime boundaries: " << result.coverage.runtime_import_boundaries << '\n'
            << "Function boundary conflicts: " << result.function_map.conflicts().size() << '\n'
+           << "Parsed relocations: " << result.relocations.size() << '\n'
+           << "Applied relocations: " << result.applied_relocations << '\n'
+           << "Unresolved relocation bindings: " << result.unresolved_relocations.size() << '\n'
            << "IR verification failures: " << result.coverage.ir_verification_failures << "\n\n"
            << "Top unsupported\n----------------\n";
     if (result.coverage.top_unsupported.empty())

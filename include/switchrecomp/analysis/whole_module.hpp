@@ -41,6 +41,8 @@ struct LoadedModule
     format::ModuleMetadata metadata;
     std::optional<format::DynamicSymbolTable> symbols;
     std::vector<format::Relocation> relocations;
+    std::size_t applied_relocations = 0U;
+    std::vector<loader::UnresolvedRelocation> unresolved_relocations;
     std::vector<format::ImportSymbol> unresolved_imports;
     std::vector<FunctionSeed> seeds;
 };
@@ -97,6 +99,7 @@ struct UnsupportedSummary
 
 struct ModuleCoverage
 {
+    AnalysisBudgets budgets;
     std::size_t executable_bytes = 0U;
     std::size_t decoded_instructions = 0U;
     std::size_t supported_instructions = 0U;
@@ -111,6 +114,7 @@ struct ModuleCoverage
     std::size_t functions_translated = 0U;
     std::size_t functions_unsupported = 0U;
     std::size_t functions_failed = 0U;
+    std::size_t conflicting_functions = 0U;
 
     std::size_t basic_blocks = 0U;
     std::size_t cfg_edges = 0U;
@@ -120,6 +124,12 @@ struct ModuleCoverage
     std::size_t unresolved_indirect_calls = 0U;
     std::size_t ir_verification_failures = 0U;
     std::size_t runtime_import_boundaries = 0U;
+    std::size_t unresolved_imports = 0U;
+    std::size_t unresolved_relocation_bindings = 0U;
+    std::size_t unresolved_plt_relocations = 0U;
+    std::size_t unresolved_non_plt_relocations = 0U;
+    std::size_t lifted_instructions = 0U;
+    bool analysis_budget_exhausted = false;
 
     std::vector<CoverageFamily> families;
     std::vector<UnsupportedSummary> top_unsupported;
@@ -135,6 +145,8 @@ struct WholeModuleTranslationResult
     std::vector<format::DynamicSymbol> symbols;
     std::vector<format::ImportSymbol> unresolved_imports;
     std::vector<format::Relocation> relocations;
+    std::size_t applied_relocations = 0U;
+    std::vector<loader::UnresolvedRelocation> unresolved_relocations;
     bool strict_success = false;
 
     [[nodiscard]] bool succeeded() const noexcept { return strict_success; }

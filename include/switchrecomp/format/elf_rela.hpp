@@ -45,6 +45,14 @@ enum class AArch64RelocationType
 [[nodiscard]] std::string_view aarch64_relocation_type_name(
     AArch64RelocationType type) noexcept;
 
+enum class RelocationSource
+{
+    Rela,
+    JmpRel,
+};
+
+[[nodiscard]] std::string_view relocation_source_name(RelocationSource source) noexcept;
+
 struct Relocation
 {
     std::uint64_t offset;
@@ -53,12 +61,13 @@ struct Relocation
     AArch64RelocationType type;
     std::uint32_t symbol_index;
     std::int64_t addend;
+    RelocationSource source = RelocationSource::Rela;
 };
 
 // Convert binary Elf64_Rela fields into the project-owned semantic form. Unknown
 // numeric types remain representable and are rejected by the application layer.
 [[nodiscard]] Result<std::vector<Relocation>> make_relocations(
-    std::span<const RelaEntry> entries);
+    std::span<const RelaEntry> entries, RelocationSource source = RelocationSource::Rela);
 
 // Parse the RELA table described by DT_RELA/DT_RELASZ/DT_RELAENT. This only
 // reads and validates metadata; it never writes the relocation result back to

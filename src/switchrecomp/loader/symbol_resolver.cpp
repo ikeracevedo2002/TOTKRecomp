@@ -30,6 +30,23 @@ Result<void> SymbolResolver::add_external(std::string name, memory::GuestAddress
 
 Result<ResolvedSymbol> SymbolResolver::resolve(std::uint32_t symbol_index) const
 {
+    const auto resolved = resolve_for_relocation(symbol_index);
+    if (!resolved)
+    {
+        return resolved;
+    }
+    if (!resolved.value().resolved && !resolved.value().weak)
+    {
+        return Result<ResolvedSymbol>::failure(make_error(
+            ErrorCode::UndefinedStrongSymbol,
+            "undefined strong symbol[" + std::to_string(symbol_index) + "] '" +
+                resolved.value().name + "'"));
+    }
+    return resolved;
+}
+
+Result<ResolvedSymbol> SymbolResolver::resolve_for_relocation(std::uint32_t symbol_index) const
+{
     const auto* symbol = symbols_.at(symbol_index);
     if (symbol == nullptr)
     {
@@ -54,7 +71,8 @@ Result<ResolvedSymbol> SymbolResolver::resolve(std::uint32_t symbol_index) const
                 "symbol[" + std::to_string(symbol_index) + "] value plus module base overflows"));
         }
         return Result<ResolvedSymbol>::success(
-            ResolvedSymbol{symbol_index, symbol->name, address.value(), true, false});
+            ResolvedSymbol{symbol_index, symbol->name, address.value(), true, false,
+                           symbol->binding, symbol->type, symbol->visibility});
     }
 
     const auto external = external_symbols_.find(symbol->name);
@@ -62,20 +80,24 @@ Result<ResolvedSymbol> SymbolResolver::resolve(std::uint32_t symbol_index) const
     {
         return Result<ResolvedSymbol>::success(
             ResolvedSymbol{symbol_index, symbol->name, external->second, true,
-                           symbol->binding == format::SymbolBinding::Weak});
+                           symbol->binding == format::SymbolBinding::Weak, symbol->binding,
+                           symbol->type, symbol->visibility});
     }
 
-    if (symbol->binding == format::SymbolBinding::Weak)
+    if (symbol->binding == format::SymbolBinding::Global ||
+        symbol->binding == format::SymbolBinding::Weak)
     {
-        // ELF weak undefined references resolve to the null address when no
-        // provider exists. The result remains marked unresolved so diagnostics
-        // can expose the missing import rather than hiding it.
+        // The zero address is a sentinel in this typed result only. Relocation
+        // planning must never use it as a relocation value.
         return Result<ResolvedSymbol>::success(
-            ResolvedSymbol{symbol_index, symbol->name, 0U, false, true});
+            ResolvedSymbol{symbol_index, symbol->name, 0U, false,
+                           symbol->binding == format::SymbolBinding::Weak, symbol->binding,
+                           symbol->type, symbol->visibility});
     }
     return Result<ResolvedSymbol>::failure(make_error(
         ErrorCode::UndefinedStrongSymbol,
-        "undefined strong symbol[" + std::to_string(symbol_index) + "] '" + symbol->name + "'"));
+        "undefined non-global symbol[" + std::to_string(symbol_index) + "] '" + symbol->name +
+            "'"));
 }
 
 std::vector<format::ImportSymbol> SymbolResolver::unresolved_imports() const
