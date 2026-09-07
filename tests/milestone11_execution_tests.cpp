@@ -167,6 +167,27 @@ TEST_CASE("M11 nested calls retain continuations in guest frames")
     REQUIRE(result.value().returns == 3U);
 }
 
+TEST_CASE("M11 tail transfer preserves the inherited caller return contract")
+{
+    constexpr memory::GuestAddress base = 0x11000U;
+    const auto code = words({0xaa1e03f3U, bl(base + 4U, base + 0x14U), 0xaa1303feU,
+                             0x91000400U, 0xd65f03c0U,
+                             branch(base + 0x14U, base + 0x24U), 0xd503201fU,
+                             0xd503201fU, 0xd503201fU,
+                             movz(0U, 5U), 0xd65f03c0U});
+    auto fixture = make_fixture(base, code,
+                                {seed(base), seed(base + 0x14U), seed(base + 0x24U)});
+    REQUIRE(fixture);
+    const auto result = run_fixture(fixture.value(), base);
+    REQUIRE(result);
+    REQUIRE(result.value().stop_reason == execution::ExecutionStopReason::EntryReturned);
+    REQUIRE(result.value().final_cpu.x[0] == 6U);
+    REQUIRE(result.value().function_transfers == 1U);
+    REQUIRE(result.value().maximum_call_depth == 1U);
+    REQUIRE(result.value().returns == 2U);
+    REQUIRE(result.value().final_cpu.x[30U] == result.value().synthetic_lr_sentinel);
+}
+
 TEST_CASE("M11 recursion is bounded by guest call depth, not host recursion")
 {
     constexpr memory::GuestAddress base = 0x4000U;
