@@ -17,8 +17,8 @@ prepared NSO
   → MOD0/dynamic metadata, symbols, imports, and RELA
   → executable ranges and initial seeds
   → bounded fixed-point function discovery
-  → finalized canonical function map
-  → CFG per function
+  → boundary-aware CFG re-analysis and precise ownership
+  → finalized canonical function map and exact conflicts
   → AArch64 decode and Semantic IR lifting
   → IR verification
   → optional LLVM 18 lowering
@@ -36,11 +36,16 @@ M10 adds:
 
 - `analysis::FunctionMapBuilder` and an immutable `FinalizedFunctionMap`;
 - provenance and confidence for function seeds and evidence;
+- an explicit `TextStartCandidate` provenance that is not a verified runtime
+  entry;
 - deterministic fixed-point discovery from module entry, dynamic symbols,
   relocation references, analyst seeds, and validated direct `BL` targets;
 - checked analysis budgets for functions, blocks, instructions, edges, seeds,
-  and analyzed bytes;
-- explicit overlapping-boundary conflicts and per-function diagnostics;
+  analyzed bytes, and bounded boundary-finalization passes;
+- precise non-contiguous function ownership and exact overlapping-boundary
+  conflicts with normalized overlap ranges;
+- boundary-aware external function transfers for strong-entry unconditional
+  `B` targets, kept distinct from `BL` calls;
 - `analysis::translate_module` orchestration over the existing CFG, lifter,
   Semantic IR, verifier, and optional LLVM backend;
 - strict and diagnostic translation modes;
@@ -67,6 +72,21 @@ Milestone 11 is the first milestone whose goal is entering game initialization.
 M10 prepares the function and reporting boundaries needed by M11 but does not
 attempt that entry path.
 
+## Startup provenance boundary
+
+The start of a main NSO `.text` segment is an analysis candidate only. It is not
+automatically a process entrypoint or a verified module runtime entry. In a
+standard retail Switch launch, `rtld` is the first program-owned executable
+module and leads relocation, symbol resolution, runtime initialization, module
+initialization, and eventual `main()` invocation. This single-main milestone
+does not require or execute `rtld`, so its report states that no verified process
+entry is modeled.
+
+`DT_INIT` and `DT_FINI` are reported as code-bearing main-module initialization
+and finalization candidates. They are not process-entry evidence. A genuine
+`ModuleEntry` seed remains available for a future launch model only when its
+runtime provenance is externally verified.
+
 ## Architecture
 
 `load_prepared_nso` composes the existing NSO parser, materializer, guest
@@ -87,7 +107,7 @@ action.
 The supported seed sources are represented by `FunctionDiscoverySource`:
 
 ```text
-module_entry, dynamic_symbol, export, direct_call,
+module_entry, text_start_candidate, dynamic_symbol, export, direct_call,
 relocation_reference, analyst_seed, manual_override,
 jump_table, heuristic
 ```
@@ -100,10 +120,19 @@ overwriting evidence.
 The current automatic fixed point is intentionally conservative:
 
 1. validate initial seeds against aligned executable GuestMemory ranges;
-2. analyze one seed with the existing bounded CFG analyzer;
+2. analyze one seed with the bounded CFG analyzer;
 3. record direct `BL` calls and unresolved/indirect call sites;
 4. add only aligned, executable direct targets as new seeds;
-5. repeat until the pending set is empty or a configured budget is reached.
+5. repeat until the pending set is empty or a configured budget is reached;
+6. freeze the strong-entry set and re-analyze successful functions with
+   boundary-aware unconditional `B` handling, within an explicit pass budget.
+
+The single boundary policy is `is_boundary_worthy_function_seed`: confirmed or
+high-confidence explicit symbol, export, relocation, analyst, manual, module,
+or direct-call evidence can define a boundary. Weak heuristic candidates and
+the text-start candidate cannot. Discovery and finalization share aggregate
+function, block, instruction, edge, seed, and byte budgets, so re-analysis
+cannot silently multiply work.
 
 Executable bytes are not scanned as functions merely because they decode as
 valid AArch64. Jump-table and heuristic sources are represented for future
@@ -119,15 +148,36 @@ and safe for concurrent read-only access. A record contains:
 - module ownership and a stable `sub_<guest-entry>` ID when no symbol name is
   available;
 - canonical and additional entries;
-- the derived CFG range;
+- precise normalized half-open owned instruction ranges;
+- a convex `[range_begin, range_end)` envelope retained only for display and
+  conservative search;
 - primary discovery source, confidence, and all evidence;
-- CFG, basic blocks, direct calls, indirect call sites, and unresolved flow;
+- CFG, basic blocks, direct calls, function transfers, indirect call sites, and
+  unresolved flow;
 - translation state, unsupported records, and diagnostics.
 
-Overlapping analyzed ranges produce `FunctionBoundaryConflict` records with both
-function identities, ranges, sources, and confidence values. The builder never
-chooses silently. A canonical entry is always aligned and belongs to a checked
-executable mapping.
+Conflicts are produced only when precise owned instruction ranges intersect.
+Each normalized canonical function pair produces one record with every exact
+overlap island; envelope-only intersections produce no conflict. The builder
+never chooses silently. A canonical entry is always aligned and belongs to a
+checked executable mapping.
+
+### Precise function ownership
+
+Ownership is derived exclusively from decoded instruction addresses. Each
+instruction contributes `[pc, pc + 4)`, with checked address arithmetic. The
+addresses are sorted and deduplicated, then only overlapping or exactly
+adjacent spans are merged. The result is sorted, non-empty for an analyzed CFG,
+internally non-overlapping, AArch64-aligned, and bounded by executable
+`GuestMemory`. A gap between disconnected CFG regions remains a gap; no
+numeric convex hull is treated as owned code.
+
+`FunctionBoundaryConflict::first_range` and `second_range` remain compatibility
+envelopes. `overlap_ranges` is the exact normalized intersection and is the
+validator's authority. Unconditional `B` into another strong known entry is
+represented by an external `function_transfer` edge. Ordinary local branches,
+self-branches, conditional branches, direct `BL` calls, and unresolved
+register-indirect `BR` flow retain their distinct semantics.
 
 ## Translation pipeline
 
@@ -200,7 +250,8 @@ Coverage is intentionally split into distinct measures rather than one opaque
 percentage:
 
 - analysis: executable bytes, decoded instructions, functions discovered,
-  functions analyzed, basic blocks, and CFG edges;
+  functions analyzed, precise ownership bytes, envelope span bytes, basic
+  blocks, CFG edges, and function transfers;
 - instruction semantics: supported and unsupported instructions, decode
   failures, and counts by semantic family;
 - translation: fully lifted, verified, translated, unsupported, failed, and IR
@@ -234,9 +285,12 @@ TOTK build.
 --max-edges N
 --max-seeds N
 --max-bytes N
+--max-boundary-passes N
 ```
 
-JSON output is schema-versioned and ordered through project-owned sorted
+The generated function-map and whole-module report schema is version 2 because
+precise ownership, exact conflict overlaps, and entry provenance are public
+machine-readable fields. JSON output is ordered through project-owned sorted
 containers. It contains no input path, host pointer, timestamp, or random
 identifier. The logical module name, build ID, hash, guest addresses, feature
 flags, function map, functions, symbols, imports, relocations, and coverage are
@@ -263,6 +317,13 @@ Diagnostic continuation never upgrades a blocker to a translation success.
 - duplicate-safe stable function ownership and code/data separation;
 - invalid aligned-address checks and analysis budget exhaustion;
 - conflicting function ranges;
+- precise contiguous, disconnected, duplicate, adjacent, gap, and overflow
+  ownership normalization;
+- exact conflict intersection, envelope-only non-conflict, containment,
+  duplicate, adjacency, multi-island, and insertion-order regressions;
+- internal, self, external, late-known, direct-call, and unresolved indirect
+  function-flow regressions;
+- text-start candidate versus verified process-entry provenance;
 - deterministic normalized conflict identity, adjacency/containment, exact
   duplicate-range, three-way, chain-overlap, permutation, and late direct-call
   discovery regressions;
@@ -317,16 +378,26 @@ the repository. Its observed identity was:
   TOTK process load address).
 
 With the exact bounded configuration of 5,000 functions, 200,000 instructions,
-50,000 blocks, 100,000 edges, 10,000 seeds, and 16 MiB analyzed bytes, both
-diagnostic runs reached local report generation. The relocation-enabled run
-parsed 504,436 relocations, applied 502,345, and retained 2,091 unresolved
+50,000 blocks, 100,000 edges, 10,000 seeds, and 16 MiB analyzed bytes, the
+after-fix diagnostic run reached local report generation. The relocation-enabled
+run parsed 504,436 relocations, applied 502,345, and retained 2,091 unresolved
 bindings (1,451 non-PLT and 640 JMPREL); 675 unresolved imports were listed.
-It discovered/analyzed 613 functions, translated 8, marked 1 unsupported and
-604 failed, with 74,240 analyzed bytes, 4,437 blocks, 4,958 CFG edges, 126 decoded instructions,
-125 lifted instructions, 1 unsupported instruction, 820 direct calls, 675
-indirect calls, and 792 unresolved indirect-flow observations. The finalized
-map contained 16,103 explicit boundary conflicts involving 604 functions.
-No configured analysis budget was exhausted.
+It discovered/analyzed 613 functions, translated 518, marked 40 unsupported
+and 55 failed, with 72,708 precise ownership bytes, 541,613,404 envelope-span
+bytes, 4,327 blocks, 4,868 CFG edges, 17,828 decoded instructions, 9,569
+lifted instructions, 118 unsupported instructions, 797 direct calls, 32
+function transfers, 675 indirect calls, and 771 unresolved indirect-flow
+observations. The finalized map contained 16 explicit conflict records,
+all with exact shared ownership ranges, involving 9 functions. No configured
+analysis budget was exhausted.
+
+The before-fix comparison was 613 discovered/analyzed functions, 8 translated,
+1 unsupported, 604 failed/conflicting, 74,240 convex-range-based analyzed bytes,
+4,437 blocks, 4,958 CFG edges, 126 decoded instructions, 125 lifted
+instructions, 820 direct calls, 675 indirect calls, 792 unresolved
+indirect-flow observations, and 16,103 envelope conflicts. The post-fix map
+must not be judged by a target conflict count: only the exact ownership
+intersections are authoritative.
 
 `__cxa_pure_virtual` remains unresolved as symbol index 13. The report records
 its RELA `R_AARCH64_ABS64` binding at relocation index 502349 and also records
@@ -335,11 +406,19 @@ repeated bounded diagnostic run produced byte-identical `main.json` and
 `main.functions.json`. These reports remain local derived artifacts and are
 not committed.
 
+The focused readiness checks found that the function at `0x7102aa4210` is no
+longer blocked by the previous 29 envelope-only conflicts from the `DT_INIT`
+frontier. Its indirect `br x17` remains unresolved, and this is a genuine
+runtime-computed transfer boundary. The `0x71000313fc` versus `0x7102aa4210`
+pair has envelope overlap but no precise overlap. The confirmed
+`0x7100000320 -> 0x7100000410` branch is an external function transfer and the
+caller does not own the target instructions.
+
 Remaining blockers are expected diagnostic boundaries in unsupported
-instruction semantics, failed/conflicting function translations, unresolved
-indirect flow, and missing runtime/import bindings. This validation does not
-claim game execution, boot, a verified process load address, or whole-game
-translation.
+instruction semantics, genuine shared ownership conflicts, failed function
+translations, unresolved indirect flow, and missing runtime/import bindings.
+This validation does not claim game execution, boot, a verified process load
+address, a modeled full-process entry, or whole-game translation.
 
 ## Known limitations
 
@@ -347,8 +426,8 @@ translation.
   validated direct calls automatically grow the map.
 - Indirect targets are recorded, but M10 does not infer arbitrary vtables or
   jump tables without reviewed metadata.
-- Overlapping CFG ranges are reported as conflicts and therefore block a clean
-  strict result.
+- Only exact shared decoded-instruction ownership is reported as a function
+  conflict; convex envelope span is retained for display only.
 - Complete AArch64, system-call, exception, and runtime coverage is not claimed.
 - The optional LLVM flag reports a codegen failure when LLVM 18 is unavailable;
   parsing, analysis, Semantic IR, verification, and reports do not require it.
@@ -357,8 +436,11 @@ translation.
 
 ## Deferred work
 
-M11 starts entry-path execution and stops at the first known unsupported runtime
-dependency. Later milestones may add runtime bring-up, filesystem, graphics,
-renderer, audio, input, broader ISA support, richer analyst metadata, optimized
-dispatch, multi-module linking, and performance work. These are deliberately
-outside M10’s correctness and auditability boundary.
+M11 starts controlled initialization-path work and stops at the first known
+unsupported runtime dependency. The full native process startup architecture
+is rtld-led: future work must account for ExeFS module order and `rtld` before
+claiming a verified process entry. Later milestones may add runtime bring-up,
+filesystem, graphics, renderer, audio, input, broader ISA support, richer
+analyst metadata, optimized dispatch, multi-module linking, and performance
+work. These are deliberately outside M10.2’s correctness and auditability
+boundary.

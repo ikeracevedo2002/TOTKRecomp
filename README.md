@@ -33,6 +33,10 @@ direct-call evidence, a deterministic finalized function map, per-function CFG â
 Semantic IR â†’ verifier translation attempts, strict/diagnostic modes, a validated
 guest-address dispatcher, import/runtime boundary accounting, and stable
 machine-readable/human coverage reports through `translate-module`.
+M10.2 tracks precise non-contiguous function ownership, exact ownership
+conflicts, boundary-aware function transfers, and honest startup-entry
+provenance. The main `.text` start is not treated as a verified process entry;
+rtld-led multi-module startup remains deferred.
 
 No supported TOTK build is committed. The repository contains no game binaries,
 keys, firmware, SDKs, or extracted game assets. The committed TOTK manifest is an
@@ -148,6 +152,9 @@ game assets.
 - deterministic whole-module function discovery with provenance, confidence,
   bounded fixed-point growth, boundary-conflict records, and a validated
   finalized function map;
+- precise normalized function ownership ranges, exact conflict intersections,
+  boundary-aware function transfers, and explicit text-start/initialization
+  candidate provenance;
 - per-function whole-module translation attempts through the existing CFG,
   Semantic IR, verifier, interpreter-compatible lifter, and optional LLVM 18
   backend, with strict and diagnostic modes;

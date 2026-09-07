@@ -33,9 +33,11 @@ checked shared memory, exclusive reservations, acquire/release ordering, and
 barriers through a stable runtime ABI. There is still no game-specific runtime,
 metadata for a supported game version, renderer, or supported game build to
 preserve. Milestone 10 adds bounded function discovery from module metadata and
-validated direct-call targets, a deterministic finalized function map, per-
-function CFG/lift/verify orchestration, explicit strict/diagnostic translation
-states, guest-address dispatch validation, and versioned module coverage reports.
+validated direct-call targets, precise non-contiguous function ownership, exact
+ownership conflicts, boundary-aware function transfers, a deterministic
+finalized function map, per-function CFG/lift/verify orchestration, explicit
+strict/diagnostic translation states, guest-address dispatch validation, and
+versioned module coverage reports.
 
 ### Proposed
 
@@ -402,10 +404,18 @@ into the report. RELA and JMPREL source identity is retained for deterministic
 reporting.
 
 Finalized function-map conflicts use the same freeze point as the canonical
-function records. After fixed-point discovery and range population, all
-pairwise half-open range overlaps are computed once in canonical-entry order;
-adjacent ranges (`end == begin`) are not overlaps. Conflict pairs are
-normalized, deduplicated, and validated in both directions so discovery order
+function records. A function owns only the decoded instruction spans in its
+CFG. Each instruction contributes the checked half-open interval `[pc, pc +
+4)`. Sorted duplicate spans are removed, and only overlapping or exactly
+adjacent spans are merged. Disconnected CFG regions remain separate ownership
+ranges. The legacy `[range_begin, range_end)` value is only a convex
+display/conservative-search envelope; it is never ownership authority.
+
+After boundary-aware ownership finalization, exact interval intersections are
+computed with a deterministic sweep in canonical-entry order. Adjacent ranges
+(`end == begin`) are not overlaps. Each normalized function pair produces one
+conflict record containing every normalized overlap island. Conflict pairs are
+validated against the precise ranges in both directions, so discovery order
 cannot change conflict identity or ordering. Conflicting records retain their
 discovery evidence while receiving explicit conflict confidence/status.
 
@@ -749,7 +759,36 @@ For each seed:
 
 A function may have multiple valid entry points or local labels. The metadata model must represent entry blocks separately from the canonical function name.
 
-### 12.2 Hybrid analyst workflow
+The analyzer receives a deterministic set of strong known function entries.
+Confirmed/high-confidence explicit symbol, export, relocation, analyst,
+manual, module-entry, and validated direct-`BL` evidence can define a boundary;
+weak heuristic-only evidence and a main `.text` start candidate cannot. An
+unconditional `B` to another strong known entry ends the caller CFG with an
+external `function_transfer` edge. It does not set the link register and is not
+represented as a call. A `B` to an ordinary local label and a self-branch remain
+internal control flow. Conditional branch fallthrough/taken behavior remains
+explicit and is not reclassified automatically. Register-indirect `BR` targets
+remain unresolved unless independent reviewed evidence resolves them.
+
+Function discovery first reaches a bounded direct-call fixed point. It then
+freezes the strong-entry set and performs bounded boundary-aware re-analysis;
+the aggregate analysis budgets cover both phases. If finalization reveals a new
+strong direct-call entry, another bounded pass is allowed, and failure to reach
+stability is reported rather than converging without a limit.
+
+### 12.2 Startup entry provenance
+
+The beginning of `main.text` is not a verified process entry merely because it
+is the first executable segment. Standard retail Switch startup is `rtld`-led:
+the `rtld` `.text` entry is the first program-owned executable code and its
+launch model establishes module state, relocations, symbols, runtime/SDK state,
+module initialization, and eventual `main()` invocation. Single-main analysis
+therefore reports no verified process entry unless an external launch model
+supplies one. `DT_INIT` and `DT_FINI` are module initialization/finalization
+candidates, not process-entry evidence. Multi-module `rtld` startup remains
+deferred to execution architecture work.
+
+### 12.3 Hybrid analyst workflow
 
 Automatic analysis is required for scale, but a hybrid workflow is more realistic:
 
@@ -778,7 +817,7 @@ Example shape:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "game": "totk",
   "build": {
     "version": "TBD",
@@ -798,9 +837,12 @@ Example shape:
 The schema must support at least:
 
 - Module name, build ID, hash, guest ranges, and protections.
-- Function guest start/end and additional entries.
+- Function convex envelope, precise owned ranges, and additional entries.
 - Name, source, confidence, and analysis notes.
 - Basic blocks and control-flow edges.
+- External function-transfer edges distinct from direct `BL` calls.
+- Exact normalized conflict-overlap ranges.
+- Entry candidates with kind, provenance, confidence, and runtime-verification status.
 - Direct call targets and unresolved indirect-call sites.
 - Jump tables and default targets.
 - Symbols, aliases, vtables, RTTI observations, and globals.
@@ -1838,12 +1880,15 @@ structured failures for unsupported synchronization patterns.
 **Implemented:** A prepared NSO can be loaded through the existing parser,
 materializer, guest-memory loader, MOD0/dynamic metadata, symbol, import, and
 relocation layers. A bounded fixed-point analyzer builds a deterministic
-function map from module-entry, symbol, relocation, analyst, and direct-call
-evidence. Each discovered function is analyzed with CFG, lifted through the
+function map from module metadata, symbol, relocation, analyst, and direct-call
+evidence. Each discovered function owns precise normalized instruction ranges;
+the analyzer finalizes those ranges with strong-entry-aware CFG transfers and
+reports exact ownership conflicts. Functions are then lifted through the
 existing Semantic IR, verified, and optionally lowered with the LLVM 18 backend.
 The `translate-module` CLI emits human-readable or schema-versioned JSON
-reports, including module identity, per-function status, unsupported records,
-call edges, imports, runtime boundaries, and coverage by semantic family.
+reports, including module identity, entry provenance, per-function ownership
+and status, unsupported records, call/transfer edges, imports, runtime
+boundaries, and coverage by semantic family.
 
 The frozen guest-address dispatcher validates alignment, executable ownership,
 registered function entries, and ambiguity before allowing concurrent read-only
@@ -1854,12 +1899,15 @@ structured failures; they are never converted to host pointers or fake success.
 parsing through deterministic reporting, and all discovered functions that are
 reported as translated have passed Semantic IR verification.
 
-**Deferred:** Real TOTK `main` analysis is a local workflow only and has not
-been run or committed. Game boot, Horizon/runtime bring-up, filesystem,
+**Deferred:** Real TOTK `main` analysis is a local workflow only and its reports
+are never committed. The main `.text` start is not a verified process entry.
+Full native startup is rtld-led and requires the ExeFS module order and `rtld`
+launch model; that multi-module architecture is deferred. Game boot,
+Horizon/runtime bring-up, filesystem,
 graphics, audio, input, renderer, full exception behavior, complete AArch64
 coverage, pair-exclusive/LSE atomics, WFE/WFI, and final executable linking
-remain future work. M10 prepares the boundary for M11; it does not execute the
-game entry path.
+remain future work. M10.2 prepares trustworthy ownership data for controlled
+M11 initialization-path work; it does not execute the game entry path.
 
 **Roadmap numbering correction:** The future roadmap previously contained a numbering gap after Milestone 10. The affected future milestones have been renumbered to restore the intended continuous sequence from Milestone 11 through Milestone 20. No milestone scope was inserted or removed by this documentation correction.
 
