@@ -209,8 +209,9 @@ available ASan/UBSan and TSan configurations also pass `209/209`.
 | MSVC | not available locally |
 
 LLVM lowering remains implemented but was not executable-tested here because
-the installed local LLVM is 23.1 and the project requires LLVM 18. CI must
-provide the authoritative LLVM 18 and MSVC results.
+the installed local LLVM is 23.1 and the project requires LLVM 18. GitHub
+Actions CI passed the full matrix on both the push and pull-request runs:
+Linux GCC, Linux LLVM 18, Linux ASan/UBSan, Linux TSan, and Windows MSVC.
 
 ## Dependencies and privacy boundary
 
