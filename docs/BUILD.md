@@ -69,5 +69,23 @@ does not load or extract XCI/NSP/NCA content. LLVM lowering is isolated in
 `switchrecomp-codegen-llvm` and uses ORC `LLJIT`; the generated ABI is
 `uint32_t (CpuState*, RuntimeContext*)`.
 
+## Whole-module translation
+
+Milestone 10 adds `translate-module` for an already prepared, legally supplied
+NSO. It emits a deterministic human-readable report by default; add `--json`
+for machine-readable output and `--diagnostic` to continue past unsupported
+functions.
+
+```bash
+build/translate-module --help
+build/translate-module --diagnostic --json \
+  --module-base 0x7100000000 \
+  --report build/reports/main.json \
+  path/to/prepared-main.nso
+```
+
+The command does not decrypt or extract Nintendo content, and a blocked report
+does not claim successful game translation.
+
 The normal build never accesses game files and never requires Nintendo keys or
 other proprietary content.

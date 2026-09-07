@@ -1,9 +1,9 @@
 # TotkRecomp Architecture and Implementation Plan
 
-> Status: Proposed architecture with Milestones 0–9 implemented
+> Status: Proposed architecture with Milestones 0–10 implemented
 > Repository snapshot: 2026-09-06
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
-> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, MOD0/dynamic/RELA metadata discovery, dynamic symbol/relocation application, expanded AArch64 Semantic IR and lifting, synthetic tests, and deterministic inspection/coverage reports are committed; no supported game build has been committed.
+> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, MOD0/dynamic/RELA metadata discovery, dynamic symbol/relocation application, expanded AArch64 Semantic IR and lifting, deterministic whole-module function discovery/translation reporting, synthetic tests, and deterministic inspection/coverage reports are committed; no supported game build has been committed.
 
 This document is the primary engineering RFC for TotkRecomp. It describes the intended architecture, the evidence behind the design, the work required to validate it, and the boundaries of what is currently known.
 
@@ -18,7 +18,8 @@ header parser, Milestone 2A image materializer, Milestone 2B guest loader,
 Milestone 3 MOD0/dynamic metadata parser, Milestone 4 decoder/CFG, Milestone 5
 dynamic linking, Milestone 6 Semantic IR/lifting, Milestone 7 expanded
 AArch64 semantics and coverage, Milestone 8 FP/SIMD state and semantics, and
-the controlled Milestone 9 thread/TLS/atomic runtime subset:
+the controlled Milestone 9 thread/TLS/atomic runtime subset and Milestone 10
+whole-module translation layer:
 a C++20 source tree, CMake build, common safety utilities, manifest validation,
 tests, CI, strict NSO0 inspection, safe NSO image
 materialization, integrity verification, a checked guest-memory loader, and a
@@ -31,7 +32,10 @@ Milestone 9 adds joinable native guest threads, per-thread CPU/TLS state,
 checked shared memory, exclusive reservations, acquire/release ordering, and
 barriers through a stable runtime ABI. There is still no game-specific runtime,
 metadata for a supported game version, renderer, or supported game build to
-preserve.
+preserve. Milestone 10 adds bounded function discovery from module metadata and
+validated direct-call targets, a deterministic finalized function map, per-
+function CFG/lift/verify orchestration, explicit strict/diagnostic translation
+states, guest-address dispatch validation, and versioned module coverage reports.
 
 ### Proposed
 
@@ -1804,19 +1808,39 @@ per-thread `CpuState`/TLS and exclusive monitors, checked synchronized shared
 memory, acquire/release order, deterministic 64-byte exclusive reservations,
 barriers, runtime ABI helpers, normalized M9 Semantic IR, reference interpreter
 execution, and optional LLVM 18 helper lowering. Pair-exclusive/LSE forms,
-WFE/WFI, Horizon services, and function-map dispatch remain explicit future
-boundaries.
+WFE/WFI and Horizon services remain explicit future boundaries; function-map
+dispatch is implemented in Milestone 10.
 
 **Success:** Controlled multi-threaded workloads pass deterministic tests with
 structured failures for unsupported synchronization patterns.
 
 ### Milestone 10 — Whole-main translation
 
-**Goal:** Analyze and translate the targeted `main` module after function-map,
-threading, import, and runtime boundaries are validated.
+**Implemented:** A prepared NSO can be loaded through the existing parser,
+materializer, guest-memory loader, MOD0/dynamic metadata, symbol, import, and
+relocation layers. A bounded fixed-point analyzer builds a deterministic
+function map from module-entry, symbol, relocation, analyst, and direct-call
+evidence. Each discovered function is analyzed with CFG, lifted through the
+existing Semantic IR, verified, and optionally lowered with the LLVM 18 backend.
+The `translate-module` CLI emits human-readable or schema-versioned JSON
+reports, including module identity, per-function status, unsupported records,
+call edges, imports, runtime boundaries, and coverage by semantic family.
 
-**Success:** The known synthetic and legally supplied module corpus translates
-with auditable coverage and no silent unsupported instructions.
+The frozen guest-address dispatcher validates alignment, executable ownership,
+registered function entries, and ambiguity before allowing concurrent read-only
+lookups or an ABI-compatible call. Unknown targets and unresolved imports are
+structured failures; they are never converted to host pointers or fake success.
+
+**Success:** The synthetic whole-module corpus passes end-to-end from NSO
+parsing through deterministic reporting, and all discovered functions that are
+reported as translated have passed Semantic IR verification.
+
+**Deferred:** Real TOTK `main` analysis is a local workflow only and has not
+been run or committed. Game boot, Horizon/runtime bring-up, filesystem,
+graphics, audio, input, renderer, full exception behavior, complete AArch64
+coverage, pair-exclusive/LSE atomics, WFE/WFI, and final executable linking
+remain future work. M10 prepares the boundary for M11; it does not execute the
+game entry path.
 
 **Roadmap numbering correction:** The future roadmap previously contained a numbering gap after Milestone 10. The affected future milestones have been renumbered to restore the intended continuous sequence from Milestone 11 through Milestone 20. No milestone scope was inserted or removed by this documentation correction.
 
@@ -2061,7 +2085,7 @@ These are the first practical engineering tasks. They intentionally stop before 
 
 ### 15. Expand only under differential coverage — Milestones 7, 8, and 9 implemented
 
-- **Goal:** Add each architectural group only after differential coverage is available. FP/SIMD is implemented in Milestone 8, and the controlled native-thread/atomic subset is implemented in Milestone 9; function-map dispatch, pair-exclusive/LSE semantics, and Horizon services remain gated future work.
+- **Goal:** Add each architectural group only after differential coverage is available. FP/SIMD is implemented in Milestone 8, the controlled native-thread/atomic subset is implemented in Milestone 9, and deterministic function-map dispatch/whole-module reporting is implemented in Milestone 10; pair-exclusive/LSE semantics and Horizon services remain gated future work.
 - **Inputs:** Differential tests and failure corpus.
 - **Output:** Increasingly capable semantic IR/code generator and versioned coverage corpus.
 - **Success:** Each group passes tests before it is enabled for larger analysis.

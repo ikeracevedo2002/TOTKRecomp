@@ -7,7 +7,7 @@ TOTK-specific target metadata.
 
 ## Current status
 
-Milestones 0, 1, 2A, 2B, 3, 4, 5, 6, 7, 8, and 9 are implemented: C++20/CMake build targets, common
+Milestones 0, 1, 2A, 2B, 3, 4, 5, 6, 7, 8, 9, and 10 are implemented: C++20/CMake build targets, common
 bounds-checked binary utilities, SHA-256 validation, logging, versioned
 target-manifest validation, strict fixed-size NSO0 parsing, bounded section
 materialization, a checked host-backed guest memory map, MOD0/dynamic/RELA
@@ -28,6 +28,11 @@ exclusive monitors, synchronized shared guest memory, acquire/release ordering,
 barriers, a stable C runtime ABI, and interpreter/LLVM lowering for the
 documented atomic subset. Pair-exclusive/LSE forms, WFE/WFI, and Horizon
 services remain explicit unsupported boundaries.
+Milestone 10 adds bounded whole-module discovery from prepared NSO metadata and
+direct-call evidence, a deterministic finalized function map, per-function CFG →
+Semantic IR → verifier translation attempts, strict/diagnostic modes, a validated
+guest-address dispatcher, import/runtime boundary accounting, and stable
+machine-readable/human coverage reports through `translate-module`.
 
 No supported TOTK build is committed. The repository contains no game binaries,
 keys, firmware, SDKs, or extracted game assets. The committed TOTK manifest is an
@@ -73,7 +78,14 @@ Inspect and materialize an NSO0 input:
 ./build/aarch64-analyze --version
 ./build/aarch64-analyze --base 0x1000 --entry 0x1000 path/to/raw-aarch64-code.bin
 ./build/aarch64-analyze --coverage --json path/to/module.nso
+./build/translate-module --diagnostic --json --module-base 0x7100000000 \
+  --report build/reports/main.json path/to/prepared-main.nso
 ```
+
+`translate-module` consumes an already prepared, legally supplied NSO. It
+produces auditable function discovery, translation status, unsupported records,
+import/runtime boundaries, and coverage; a blocked report is returned with a
+non-zero status and is never treated as a successful game translation.
 
 On a multi-config generator, use `build/Debug/nso-inspect`.
 
@@ -85,6 +97,7 @@ On a multi-config generator, use `build/Debug/nso-inspect`.
 - [Semantic IR and expanded AArch64 lifting](docs/SEMANTIC_IR.md)
 - [Milestone 8 FP/SIMD design and support boundary](docs/MILESTONE_8.md)
 - [Milestone 9 threads, TLS, atomics, and memory ordering](docs/MILESTONE_9.md)
+- [Milestone 10 whole-main translation](docs/MILESTONE_10.md)
 - [AArch64 support matrix and coverage workflow](docs/AARCH64_SUPPORT.md)
 - [Build notes](docs/BUILD.md)
 - [Dependency policy](docs/DEPENDENCIES.md)
@@ -132,14 +145,27 @@ game assets.
   DMB/DSB/ISB runtime barriers;
 - normalized AArch64 M9 IR, reference interpretation, LLVM 18 helper lowering,
   and decoder-to-backend end-to-end fixtures.
+- deterministic whole-module function discovery with provenance, confidence,
+  bounded fixed-point growth, boundary-conflict records, and a validated
+  finalized function map;
+- per-function whole-module translation attempts through the existing CFG,
+  Semantic IR, verifier, interpreter-compatible lifter, and optional LLVM 18
+  backend, with strict and diagnostic modes;
+- a frozen guest-address function dispatcher with checked alignment,
+  executable-range, module-ownership, ambiguity, and unknown-target failures;
+- versioned deterministic JSON and human-readable module reports covering
+  identity, calls, imports, relocations, translation states, semantic families,
+  and every unsupported instruction record.
 
 The default materialization limits are 256 MiB per segment and 512 MiB for the
 combined `.text`, `.rodata`, `.data`, and BSS buffers. Library callers can pass
 smaller or larger limits explicitly; limits are checked before allocation.
 
-ZBIC decoding, REL tables, lazy PLT binding, symbol versioning, function-map
-dispatch, pair-exclusive/LSE atomics, WFE/WFI, Horizon/runtime HLE, renderer,
-exact TOTK target metadata, and game execution remain unimplemented. LLVM is
+ZBIC decoding, REL tables, lazy PLT binding, symbol versioning, pair-exclusive/LSE
+atomics, WFE/WFI, Horizon/runtime HLE, renderer, exact TOTK target metadata, and
+game execution remain unimplemented. Whole-module analysis and translation are
+available for prepared inputs, but do not imply complete ISA coverage or game
+boot. LLVM is
 optional and is enabled with
 `-DTOTKRECOMP_ENABLE_LLVM=ON` when a pinned LLVM installation is available.
 `nso-inspect` accepts `--header-only` when a caller needs
@@ -158,6 +184,7 @@ to inspect a ZBIC-marked header without claiming materialization succeeded.
 - Milestone 7 — Expanded AArch64 semantics and real-code coverage tooling: implemented.
 - Milestone 8 — AArch64 FP/SIMD state, semantics, and required vector memory: implemented.
 - Milestone 9 — Native threads, TLS, atomics, barriers, and memory ordering: implemented for the documented synthetic subset.
+- Milestone 10 — Whole-main translation: implemented for prepared modules and the documented synthetic corpus; real-game boot remains deferred.
 
 Materialization consumes a legally obtained, already prepared local NSO. The
 repository does not decrypt, extract, or distribute Nintendo content.

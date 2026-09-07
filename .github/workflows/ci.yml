@@ -27,6 +27,7 @@ jobs:
           build/nso-inspect --version
           build/aarch64-analyze --help
           build/aarch64-analyze --version
+          build/translate-module --help
           build/aarch64-lift --hex 0000018bc0035fd6 --show-ir --execute-ir
 
   linux-llvm:
@@ -45,7 +46,9 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
       - name: LLVM lift smoke test
-        run: build/aarch64-lift --hex 0000018bc0035fd6 --show-disassembly --show-ir --show-llvm --execute-ir --execute-native
+        run: |
+          build/translate-module --help
+          build/aarch64-lift --hex 0000018bc0035fd6 --show-disassembly --show-ir --show-llvm --execute-ir --execute-native
 
   linux-sanitizers:
     name: Linux / GCC / ASan + UBSan
@@ -92,4 +95,5 @@ jobs:
           build/Debug/nso-inspect.exe --version
           build/Debug/aarch64-analyze.exe --help
           build/Debug/aarch64-analyze.exe --version
+          build/Debug/translate-module.exe --help
           build/Debug/aarch64-lift.exe --hex 0000018bc0035fd6 --show-ir --execute-ir
