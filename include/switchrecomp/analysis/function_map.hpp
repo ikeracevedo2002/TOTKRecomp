@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -16,6 +17,7 @@ namespace switchrecomp::analysis
 enum class FunctionDiscoverySource : std::uint8_t
 {
     ModuleEntry,
+    TextStartCandidate,
     DynamicSymbol,
     Export,
     DirectCall,
@@ -26,6 +28,17 @@ enum class FunctionDiscoverySource : std::uint8_t
     Heuristic,
 };
 
+enum class EntryPointKind : std::uint8_t
+{
+    TextStartCandidate,
+    DynamicInit,
+    DynamicFini,
+    VerifiedProcessEntry,
+    AnalystOverride,
+};
+
+[[nodiscard]] std::string_view entry_point_kind_name(EntryPointKind kind) noexcept;
+
 enum class FunctionConfidence : std::uint8_t
 {
     Confirmed,
@@ -34,6 +47,16 @@ enum class FunctionConfidence : std::uint8_t
     Low,
     Manual,
     Conflict,
+};
+
+struct EntryPointEvidence
+{
+    memory::GuestAddress address = 0U;
+    EntryPointKind kind = EntryPointKind::TextStartCandidate;
+    std::string provenance;
+    FunctionConfidence confidence = FunctionConfidence::Low;
+    bool verified_runtime_entry = false;
+    std::string note;
 };
 
 enum class TranslationStatus : std::uint8_t
@@ -82,9 +105,10 @@ struct ModuleIdentity
     bool guest_base_verified = false;
     std::vector<GuestAddressRange> executable_ranges;
     std::string translator_version;
-    std::uint32_t metadata_schema_version = 1U;
+    std::uint32_t metadata_schema_version = 2U;
     std::string llvm_version;
     std::vector<std::string> feature_flags;
+    std::vector<EntryPointEvidence> entry_points;
 };
 
 struct FunctionSeed
@@ -133,6 +157,10 @@ struct FunctionBoundaryConflict
     memory::GuestAddress second_function = 0U;
     GuestAddressRange first_range;
     GuestAddressRange second_range;
+    // Exact normalized intersections of the two functions' owned instruction
+    // ranges. first_range/second_range are retained as convex display/search
+    // envelopes and are not ownership evidence.
+    std::vector<GuestAddressRange> overlap_ranges;
     FunctionDiscoverySource first_source = FunctionDiscoverySource::Heuristic;
     FunctionDiscoverySource second_source = FunctionDiscoverySource::Heuristic;
     FunctionConfidence first_confidence = FunctionConfidence::Low;
@@ -148,6 +176,9 @@ struct FunctionRecord
     std::vector<memory::GuestAddress> entries;
     memory::GuestAddress range_begin = 0U;
     memory::GuestAddress range_end = 0U;
+    // Exact normalized half-open spans made from decoded instruction PCs.
+    // range_begin/range_end are only the encompassing display/search envelope.
+    std::vector<GuestAddressRange> owned_code_ranges;
     FunctionDiscoverySource primary_source = FunctionDiscoverySource::Heuristic;
     FunctionConfidence confidence = FunctionConfidence::Low;
     std::optional<std::string> name;
@@ -169,6 +200,9 @@ struct AnalysisBudgets
     std::size_t max_edges = 8'000'000U;
     std::size_t max_seeds = 2'000'000U;
     memory::GuestSize max_bytes_analyzed = memory::GuestSize{64U} * 1024U * 1024U;
+    // Final boundary-aware re-analysis is bounded explicitly and consumes the
+    // same aggregate instruction/block/edge/byte budgets as discovery.
+    std::size_t max_boundary_finalization_passes = 8U;
 };
 
 struct ModuleAnalysisInput
@@ -185,6 +219,26 @@ struct FunctionMapOptions
     bool continue_after_function_failure = true;
 };
 
+// Normalize four-byte instruction spans into deterministic, half-open code
+// ranges. Duplicate and adjacent instruction spans are merged; gaps remain.
+[[nodiscard]] Result<std::vector<GuestAddressRange>> normalize_code_ranges(
+    std::span<const memory::GuestAddress> instruction_addresses);
+[[nodiscard]] Result<std::vector<GuestAddressRange>> normalize_code_ranges(
+    const std::vector<memory::GuestAddress>& instruction_addresses);
+[[nodiscard]] Result<std::vector<GuestAddressRange>> normalize_code_ranges(
+    std::span<const GuestAddressRange> input_ranges);
+[[nodiscard]] Result<std::vector<GuestAddressRange>> normalize_code_ranges(
+    const std::vector<GuestAddressRange>& input_ranges);
+[[nodiscard]] bool owned_ranges_overlap(const std::vector<GuestAddressRange>& left,
+                                         const std::vector<GuestAddressRange>& right) noexcept;
+[[nodiscard]] Result<std::vector<GuestAddressRange>> intersect_owned_ranges(
+    const std::vector<GuestAddressRange>& left, const std::vector<GuestAddressRange>& right);
+[[nodiscard]] Result<memory::GuestSize> precise_owned_byte_count(
+    const std::vector<GuestAddressRange>& ranges);
+[[nodiscard]] bool function_owns_address(const FunctionRecord& function,
+                                          memory::GuestAddress address) noexcept;
+[[nodiscard]] bool is_boundary_worthy_function_seed(const FunctionSeed& seed) noexcept;
+
 class FinalizedFunctionMap
 {
   public:
@@ -200,6 +254,8 @@ class FinalizedFunctionMap
         return conflicts_;
     }
     [[nodiscard]] const FunctionRecord* find(memory::GuestAddress entry) const noexcept;
+    [[nodiscard]] std::vector<const FunctionRecord*> find_owners(
+        memory::GuestAddress address) const;
     [[nodiscard]] bool frozen() const noexcept { return frozen_; }
 
   private:

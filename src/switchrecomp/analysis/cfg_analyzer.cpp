@@ -223,7 +223,8 @@ class GraphBuilder
     }
 
     [[nodiscard]] Result<bool> validate_direct_target(GuestAddress target,
-                                                       std::string_view description)
+                                                       std::string_view description,
+                                                       bool function_transfer = false)
     {
         if ((target & 0x3U) != 0U)
         {
@@ -247,8 +248,9 @@ class GraphBuilder
                 std::string(description) + " target " + hex_address(target) +
                     " is mapped but not executable"));
         }
-        const bool internal = !options_.allowed_code_range ||
-                              contains(options_.allowed_code_range.value(), target);
+        const bool internal = !function_transfer &&
+                              (!options_.allowed_code_range ||
+                               contains(options_.allowed_code_range.value(), target));
         if (internal)
         {
             const auto leader = mark_leader(target);
@@ -394,7 +396,11 @@ class GraphBuilder
                             " has no target"));
                 }
                 const auto branch = validate_direct_target(
-                    decoded.control_flow.target.value(), "direct control-flow");
+                    decoded.control_flow.target.value(), "direct control-flow",
+                    kind == ControlFlowKind::DirectBranch &&
+                        decoded.control_flow.target.value() != graph_.entry &&
+                        options_.known_function_entries.contains(
+                            decoded.control_flow.target.value()));
                 if (!branch)
                 {
                     return Result<BasicBlock>::failure(branch.error());
@@ -402,8 +408,13 @@ class GraphBuilder
                 block.successors.push_back(ControlFlowEdge{
                     current,
                     decoded.control_flow.target.value(),
-                    kind == ControlFlowKind::ConditionalBranch ? EdgeKind::ConditionalTaken
-                                                               : EdgeKind::Branch,
+                    kind == ControlFlowKind::ConditionalBranch
+                        ? EdgeKind::ConditionalTaken
+                        : (options_.known_function_entries.contains(
+                               decoded.control_flow.target.value()) &&
+                                   decoded.control_flow.target.value() != graph_.entry
+                               ? EdgeKind::FunctionTransfer
+                               : EdgeKind::Branch),
                     branch.value()});
                 if (kind == ControlFlowKind::ConditionalBranch)
                 {

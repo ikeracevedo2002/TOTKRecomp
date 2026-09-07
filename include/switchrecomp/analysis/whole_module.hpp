@@ -117,8 +117,11 @@ struct ModuleCoverage
     std::size_t conflicting_functions = 0U;
 
     memory::GuestSize bytes_analyzed = 0U;
+    memory::GuestSize ownership_bytes = 0U;
+    memory::GuestSize envelope_span_bytes = 0U;
     std::size_t basic_blocks = 0U;
     std::size_t cfg_edges = 0U;
+    std::size_t function_transfers = 0U;
     std::size_t direct_calls = 0U;
     std::size_t indirect_calls = 0U;
     std::size_t resolved_indirect_calls = 0U;

@@ -77,6 +77,7 @@ void print_help(std::ostream& output)
               "  --max-edges N          CFG edge discovery budget.\n"
               "  --max-seeds N          Function seed budget.\n"
               "  --max-bytes N          Executable bytes analyzed budget.\n"
+              "  --max-boundary-passes N  Boundary finalization pass budget.\n"
               "\nThe input must already be legally prepared executable data; this tool does not\n"
               "extract, decrypt, or distribute Nintendo content.\n";
 }
@@ -162,7 +163,8 @@ int main(int argc, char** argv)
             }
             if (argument == "--module-base" || argument == "--max-functions" ||
                 argument == "--max-instructions" || argument == "--max-blocks" ||
-                argument == "--max-edges" || argument == "--max-seeds" || argument == "--max-bytes")
+                argument == "--max-edges" || argument == "--max-seeds" || argument == "--max-bytes" ||
+                argument == "--max-boundary-passes")
             {
                 const auto value = require_value(argument);
                 std::uint64_t parsed = 0U;
@@ -178,7 +180,8 @@ int main(int argc, char** argv)
                 else if (argument == "--max-blocks") translation_options.function_map.budgets.max_blocks = static_cast<std::size_t>(parsed);
                 else if (argument == "--max-edges") translation_options.function_map.budgets.max_edges = static_cast<std::size_t>(parsed);
                 else if (argument == "--max-seeds") translation_options.function_map.budgets.max_seeds = static_cast<std::size_t>(parsed);
-                else translation_options.function_map.budgets.max_bytes_analyzed = parsed;
+                else if (argument == "--max-bytes") translation_options.function_map.budgets.max_bytes_analyzed = parsed;
+                else translation_options.function_map.budgets.max_boundary_finalization_passes = static_cast<std::size_t>(parsed);
                 continue;
             }
             if (!input_path.empty()) throw std::runtime_error("unexpected argument: " + std::string(argument));

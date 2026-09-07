@@ -18,6 +18,7 @@ enum class EdgeKind : std::uint8_t
 {
     Fallthrough,
     Branch,
+    FunctionTransfer,
     ConditionalTaken,
     ConditionalNotTaken,
 };

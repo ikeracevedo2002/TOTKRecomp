@@ -39,6 +39,8 @@ std::string_view edge_kind_name(EdgeKind kind) noexcept
         return "fallthrough";
     case EdgeKind::Branch:
         return "branch";
+    case EdgeKind::FunctionTransfer:
+        return "function_transfer";
     case EdgeKind::ConditionalTaken:
         return "taken";
     case EdgeKind::ConditionalNotTaken:
@@ -102,6 +104,13 @@ Result<void> validate_control_flow_graph(const ControlFlowGraph& graph)
                     ErrorCode::InvalidFormat,
                     "CFG internal edge points to an address that is not a block leader"));
             }
+            if (edge.kind == EdgeKind::FunctionTransfer &&
+                (edge.internal || graph.blocks.contains(edge.target)))
+            {
+                return Result<void>::failure(make_error(
+                    ErrorCode::InvalidFormat,
+                    "CFG function transfer must be an external edge to another function"));
+            }
         }
 
         const auto& last = block.instructions.back();
@@ -112,6 +121,13 @@ Result<void> validate_control_flow_graph(const ControlFlowGraph& graph)
                                    return edge.kind == wanted;
                                });
         };
+        const auto has_function_transfer = has_kind(EdgeKind::FunctionTransfer);
+        if (has_function_transfer && kind != aarch64::ControlFlowKind::DirectBranch)
+        {
+            return Result<void>::failure(make_error(
+                ErrorCode::InvalidFormat,
+                "CFG function transfer must terminate an unconditional direct branch"));
+        }
         if (kind == aarch64::ControlFlowKind::Return ||
             kind == aarch64::ControlFlowKind::IndirectBranch ||
             kind == aarch64::ControlFlowKind::Trap ||

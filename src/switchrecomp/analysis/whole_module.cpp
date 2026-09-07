@@ -153,6 +153,22 @@ using json = nlohmann::json;
     {
         flags.push_back(flag);
     }
+    json entry_points = json::array();
+    std::optional<std::string> verified_process_entry;
+    for (const auto& entry : identity.entry_points)
+    {
+        entry_points.push_back(json{{"address", hex_address(entry.address)},
+                                    {"kind", entry_point_kind_name(entry.kind)},
+                                    {"provenance", entry.provenance},
+                                    {"confidence", function_confidence_name(entry.confidence)},
+                                    {"verified_runtime_entry", entry.verified_runtime_entry},
+                                    {"note", entry.note}});
+        if (entry.verified_runtime_entry &&
+            entry.kind == EntryPointKind::VerifiedProcessEntry && !verified_process_entry)
+        {
+            verified_process_entry = hex_address(entry.address);
+        }
+    }
     return json{{"module", identity.module},
                 {"build_id", identity.build_id},
                 {"sha256", identity.input_sha256},
@@ -163,7 +179,11 @@ using json = nlohmann::json;
                 {"translator_version", identity.translator_version},
                 {"metadata_schema_version", identity.metadata_schema_version},
                 {"llvm_version", identity.llvm_version},
-                {"feature_flags", std::move(flags)}};
+                {"feature_flags", std::move(flags)},
+                {"entry_points", std::move(entry_points)},
+                {"verified_process_entry", verified_process_entry
+                                                   ? json(*verified_process_entry)
+                                                   : json(nullptr)}};
 }
 
 [[nodiscard]] json call_json(const CallSite& call)
@@ -246,6 +266,13 @@ using json = nlohmann::json;
     {
         diagnostics.push_back(diagnostic_json(item));
     }
+    json owned_ranges = json::array();
+    for (const auto& range : function.owned_code_ranges)
+    {
+        owned_ranges.push_back(range_json(range));
+    }
+    const auto ownership_bytes = precise_owned_byte_count(function.owned_code_ranges);
+    json function_transfers = json::array();
     json blocks = json::array();
     std::size_t instructions = 0U;
     if (function.cfg)
@@ -268,6 +295,13 @@ using json = nlohmann::json;
                                           {"target", hex_address(edge.target)},
                                           {"kind", edge_kind_name(edge.kind)},
                                           {"internal", edge.internal}});
+                if (edge.kind == EdgeKind::FunctionTransfer)
+                {
+                    function_transfers.push_back(json{{"source", hex_address(edge.source)},
+                                                       {"target", hex_address(edge.target)},
+                                                       {"kind", edge_kind_name(edge.kind)},
+                                                       {"internal", edge.internal}});
+                }
             }
             json block_calls = json::array();
             for (const auto& call : block.calls)
@@ -287,6 +321,10 @@ using json = nlohmann::json;
                {"entries", std::move(entries)},
                {"range", json{{"begin", hex_address(function.range_begin)},
                                 {"end", hex_address(function.range_end)}}},
+               {"envelope", json{{"begin", hex_address(function.range_begin)},
+                                   {"end", hex_address(function.range_end)}}},
+               {"owned_ranges", std::move(owned_ranges)},
+               {"ownership_bytes", ownership_bytes ? ownership_bytes.value() : 0U},
                {"source", function_discovery_source_name(function.primary_source)},
                {"confidence", function_confidence_name(function.confidence)},
                {"name", function.name.value_or(function.synthetic_id)},
@@ -296,6 +334,7 @@ using json = nlohmann::json;
                {"instructions", instructions},
                {"direct_calls", std::move(direct_calls)},
                {"indirect_calls", std::move(indirect_calls)},
+               {"function_transfers", std::move(function_transfers)},
                {"unresolved_control_flow", std::move(unresolved)},
                {"translation_status", translation_status_name(function.translation_status)},
                {"unsupported", std::move(unsupported)},
@@ -330,7 +369,9 @@ using json = nlohmann::json;
                                   {"max_blocks", coverage.budgets.max_blocks},
                                   {"max_edges", coverage.budgets.max_edges},
                                   {"max_seeds", coverage.budgets.max_seeds},
-                                  {"max_bytes_analyzed", coverage.budgets.max_bytes_analyzed}}},
+                                  {"max_bytes_analyzed", coverage.budgets.max_bytes_analyzed},
+                                  {"max_boundary_finalization_passes",
+                                   coverage.budgets.max_boundary_finalization_passes}}},
                 {"executable_bytes", coverage.executable_bytes},
                 {"decoded_instructions", coverage.decoded_instructions},
                 {"supported_instructions", coverage.supported_instructions},
@@ -346,8 +387,11 @@ using json = nlohmann::json;
                 {"functions_failed", coverage.functions_failed},
                 {"conflicting_functions", coverage.conflicting_functions},
                 {"bytes_analyzed", coverage.bytes_analyzed},
+                {"ownership_bytes", coverage.ownership_bytes},
+                {"envelope_span_bytes", coverage.envelope_span_bytes},
                 {"basic_blocks", coverage.basic_blocks},
                 {"cfg_edges", coverage.cfg_edges},
+                {"function_transfers", coverage.function_transfers},
                 {"direct_calls", coverage.direct_calls},
                 {"indirect_calls", coverage.indirect_calls},
                 {"resolved_indirect_calls", coverage.resolved_indirect_calls},
@@ -464,13 +508,37 @@ using json = nlohmann::json;
         if (function.cfg)
         {
             ++result.coverage.functions_analyzed;
-            result.coverage.bytes_analyzed +=
-                static_cast<memory::GuestSize>(function.cfg->instruction_count) * 4U;
+            const auto owned_bytes = precise_owned_byte_count(function.owned_code_ranges);
+            if (!owned_bytes ||
+                owned_bytes.value() > std::numeric_limits<memory::GuestSize>::max() -
+                                         result.coverage.ownership_bytes ||
+                owned_bytes.value() > std::numeric_limits<memory::GuestSize>::max() -
+                                         result.coverage.bytes_analyzed)
+            {
+                return Result<WholeModuleTranslationResult>::failure(make_error(
+                    ErrorCode::AnalysisBudgetExceeded,
+                    "precise owned-byte coverage exceeds guest size limits"));
+            }
+            result.coverage.ownership_bytes += owned_bytes.value();
+            result.coverage.bytes_analyzed += owned_bytes.value();
+            const auto envelope_size = function.range_end - function.range_begin;
+            if (envelope_size > std::numeric_limits<memory::GuestSize>::max() -
+                                    result.coverage.envelope_span_bytes)
+            {
+                return Result<WholeModuleTranslationResult>::failure(make_error(
+                    ErrorCode::AnalysisBudgetExceeded,
+                    "function envelope coverage exceeds guest size limits"));
+            }
+            result.coverage.envelope_span_bytes += envelope_size;
             result.coverage.basic_blocks += function.cfg->blocks.size();
             for (const auto& [unused, block] : function.cfg->blocks)
             {
                 (void)unused;
                 result.coverage.cfg_edges += block.successors.size();
+                result.coverage.function_transfers += static_cast<std::size_t>(std::count_if(
+                    block.successors.begin(), block.successors.end(), [](const auto& edge) {
+                        return edge.kind == EdgeKind::FunctionTransfer;
+                    }));
             }
         }
         result.coverage.direct_calls += function.direct_calls.size();
@@ -836,7 +904,7 @@ Result<LoadedModule> load_prepared_nso(std::span<const std::byte> file_bytes,
     identity.guest_base = options.module_base;
     identity.executable_ranges = ranges;
     identity.translator_version = switchrecomp::version;
-    identity.metadata_schema_version = 1U;
+    identity.metadata_schema_version = 2U;
 #ifdef TOTKRECOMP_HAS_LLVM
     identity.llvm_version = "LLVM 18";
 #else
@@ -859,24 +927,34 @@ Result<LoadedModule> load_prepared_nso(std::span<const std::byte> file_bytes,
             return Result<LoadedModule>::failure(make_error(
                 ErrorCode::ArithmeticOverflow, "module base plus text offset overflows"));
         }
-        result.seeds.push_back(FunctionSeed{text_entry.value(), FunctionDiscoverySource::ModuleEntry,
-                                            FunctionConfidence::Confirmed, std::nullopt, std::nullopt,
-                                            "prepared NSO text entry candidate"});
+        result.identity.entry_points.push_back(EntryPointEvidence{
+            text_entry.value(), EntryPointKind::TextStartCandidate,
+            "prepared NSO .text segment start", FunctionConfidence::Low, false,
+            "text start is an analysis candidate, not a verified process entry"});
+        result.seeds.push_back(FunctionSeed{text_entry.value(),
+                                            FunctionDiscoverySource::TextStartCandidate,
+                                            FunctionConfidence::Low, std::nullopt, std::nullopt,
+                                            "prepared NSO text start candidate; runtime entry not verified"});
     }
     if (result.metadata.dynamic)
     {
         const auto add_pointer_seed = [&](const auto& pointer, FunctionDiscoverySource source,
-                                          FunctionConfidence confidence, std::string note) {
+                                          FunctionConfidence confidence, EntryPointKind kind,
+                                          std::string provenance, std::string note) {
             if (pointer && pointer->address != 0U)
             {
+                result.identity.entry_points.push_back(EntryPointEvidence{
+                    pointer->address, kind, std::move(provenance), confidence, false, note});
                 result.seeds.push_back(FunctionSeed{pointer->address, source, confidence,
                                                     std::nullopt, std::nullopt, std::move(note)});
             }
         };
         add_pointer_seed(result.metadata.dynamic->init, FunctionDiscoverySource::AnalystSeed,
-                         FunctionConfidence::High, "DT_INIT candidate");
+                         FunctionConfidence::High, EntryPointKind::DynamicInit, "DT_INIT",
+                         "DT_INIT is a main-module initialization candidate, not a process entry");
         add_pointer_seed(result.metadata.dynamic->fini, FunctionDiscoverySource::AnalystSeed,
-                         FunctionConfidence::High, "DT_FINI candidate");
+                         FunctionConfidence::High, EntryPointKind::DynamicFini, "DT_FINI",
+                         "DT_FINI is a main-module finalization candidate, not a process entry");
     }
     if (result.symbols)
     {
@@ -917,6 +995,18 @@ Result<LoadedModule> load_prepared_nso(std::span<const std::byte> file_bytes,
         }
     }
     result.seeds.insert(result.seeds.end(), options.seeds.begin(), options.seeds.end());
+    std::sort(result.identity.entry_points.begin(), result.identity.entry_points.end(),
+              [](const EntryPointEvidence& left, const EntryPointEvidence& right) {
+                  if (left.address != right.address) return left.address < right.address;
+                  if (left.kind != right.kind) return left.kind < right.kind;
+                  if (left.provenance != right.provenance) return left.provenance < right.provenance;
+                  if (left.confidence != right.confidence) return left.confidence < right.confidence;
+                  if (left.verified_runtime_entry != right.verified_runtime_entry)
+                  {
+                      return left.verified_runtime_entry < right.verified_runtime_entry;
+                  }
+                  return left.note < right.note;
+              });
     return Result<LoadedModule>::success(std::move(result));
 }
 
@@ -970,18 +1060,24 @@ std::string render_function_map_json(const FinalizedFunctionMap& map)
     json conflicts = json::array();
     for (const auto& conflict : map.conflicts())
     {
+        json overlap_ranges = json::array();
+        for (const auto& range : conflict.overlap_ranges)
+        {
+            overlap_ranges.push_back(range_json(range));
+        }
         conflicts.push_back(json{{"module", conflict.module},
                                  {"first_function", hex_address(conflict.first_function)},
                                  {"second_function", hex_address(conflict.second_function)},
                                  {"first_range", range_json(conflict.first_range)},
                                  {"second_range", range_json(conflict.second_range)},
+                                 {"overlap_ranges", std::move(overlap_ranges)},
                                  {"first_source", function_discovery_source_name(conflict.first_source)},
                                  {"second_source", function_discovery_source_name(conflict.second_source)},
                                  {"first_confidence", function_confidence_name(conflict.first_confidence)},
                                  {"second_confidence", function_confidence_name(conflict.second_confidence)},
                                  {"resolution", conflict.resolution}});
     }
-    return json{{"schema_version", 1U},
+    return json{{"schema_version", 2U},
                 {"input", identity_json(map.identity())},
                 {"module", map.identity().module},
                 {"functions", std::move(functions)},
@@ -1049,7 +1145,7 @@ std::string render_translation_report_json(const WholeModuleTranslationResult& r
     const auto unresolved_plt = static_cast<std::size_t>(std::count_if(
         result.unresolved_relocations.begin(), result.unresolved_relocations.end(),
         [](const auto& item) { return item.relocation.source == format::RelocationSource::JmpRel; }));
-    return json{{"schema_version", 1U},
+    return json{{"schema_version", 2U},
                 {"input", identity_json(result.identity)},
                 {"module", result.identity.module},
                 {"mode", translation_mode_name(result.mode)},
@@ -1103,12 +1199,46 @@ std::string render_translation_report(const WholeModuleTranslationResult& result
            << "Name: " << result.identity.module << '\n'
            << "Build ID: " << result.identity.build_id << '\n'
            << "SHA-256: " << result.identity.input_sha256 << '\n'
-           << "Guest base: " << hex_address(result.identity.guest_base) << "\n\n"
+           << "Guest base: " << hex_address(result.identity.guest_base)
+           << (result.identity.guest_base_verified
+                   ? " (verified)"
+                   : " (analysis-selected; runtime address not verified)")
+           << "\n\n"
+           << "Startup provenance\n-------------------\n"
+           << "Verified process entry: ";
+    std::optional<GuestAddress> verified_process_entry;
+    for (const auto& entry : result.identity.entry_points)
+    {
+        if (entry.kind == EntryPointKind::VerifiedProcessEntry && entry.verified_runtime_entry)
+        {
+            verified_process_entry = entry.address;
+            break;
+        }
+    }
+    if (verified_process_entry)
+    {
+        output << hex_address(verified_process_entry.value()) << '\n';
+    }
+    else
+    {
+        output << "none in this single-main analysis\n";
+    }
+    for (const auto& entry : result.identity.entry_points)
+    {
+        output << entry_point_kind_name(entry.kind) << ": " << hex_address(entry.address)
+               << " (" << entry.provenance << ", "
+               << function_confidence_name(entry.confidence) << ", verified_runtime_entry="
+               << (entry.verified_runtime_entry ? "true" : "false") << ") - " << entry.note
+               << '\n';
+    }
+    output << "\n"
            << "Analysis\n--------\n"
            << "Executable bytes: " << result.coverage.executable_bytes << '\n'
            << "Functions discovered: " << result.coverage.functions_discovered << '\n'
            << "Functions analyzed: " << result.coverage.functions_analyzed << '\n'
            << "Conflicting functions: " << result.coverage.conflicting_functions << '\n'
+           << "Precise ownership bytes: " << result.coverage.ownership_bytes << '\n'
+           << "Envelope span bytes: " << result.coverage.envelope_span_bytes << '\n'
            << "Basic blocks: " << result.coverage.basic_blocks << '\n'
            << "Decoded instructions: " << result.coverage.decoded_instructions << '\n'
            << "Supported instructions: " << result.coverage.supported_instructions << '\n'
@@ -1121,6 +1251,7 @@ std::string render_translation_report(const WholeModuleTranslationResult& result
            << "Functions failed: " << result.coverage.functions_failed << "\n\n"
            << "Calls\n-----\n"
            << "Direct calls: " << result.coverage.direct_calls << '\n'
+           << "Function transfers: " << result.coverage.function_transfers << '\n'
            << "Indirect calls: " << result.coverage.indirect_calls << '\n'
            << "Resolved indirect calls: " << result.coverage.resolved_indirect_calls << '\n'
            << "Unresolved indirect calls: " << result.coverage.unresolved_indirect_calls << "\n\n"
