@@ -201,6 +201,116 @@ TEST_CASE("M10 function map reports boundary conflicts without choosing silently
     REQUIRE(map.value().functions().at(1).translation_status == analysis::TranslationStatus::Conflict);
 }
 
+TEST_CASE("M10 conflicts normalize canonical identity when range order is reversed")
+{
+    const auto code = words({0xd65f03c0U, 0xd65f03c0U, 0x17fffffeU});
+    const auto memory = make_code(0x6000U, code);
+    const auto first = input_for(
+        memory, 0x6000U, code.size(),
+        {seed(0x6008U, FunctionDiscoverySource::ManualOverride, FunctionConfidence::Manual),
+         seed(0x6004U, FunctionDiscoverySource::Heuristic, FunctionConfidence::Low)});
+    const auto reversed = input_for(
+        memory, 0x6000U, code.size(),
+        {seed(0x6004U, FunctionDiscoverySource::Heuristic, FunctionConfidence::Low),
+         seed(0x6008U, FunctionDiscoverySource::ManualOverride, FunctionConfidence::Manual)});
+
+    const auto first_map = analysis::FunctionMapBuilder::build(first);
+    const auto reversed_map = analysis::FunctionMapBuilder::build(reversed);
+    REQUIRE(first_map);
+    REQUIRE(reversed_map);
+    REQUIRE(first_map.value().conflicts().size() == 1U);
+    REQUIRE(first_map.value().conflicts().front().first_function == 0x6004U);
+    REQUIRE(first_map.value().conflicts().front().second_function == 0x6008U);
+    REQUIRE(first_map.value().conflicts().front().first_range.base == 0x6004U);
+    REQUIRE(first_map.value().conflicts().front().second_range.base == 0x6000U);
+    REQUIRE(analysis::render_function_map_json(first_map.value()) ==
+            analysis::render_function_map_json(reversed_map.value()));
+}
+
+TEST_CASE("M10 conflict calculation distinguishes adjacency, containment, and duplicate ranges")
+{
+    const auto adjacent_code = words({0xd65f03c0U, 0xd65f03c0U});
+    const auto adjacent_memory = make_code(0x7000U, adjacent_code);
+    const auto adjacent = input_for(
+        adjacent_memory, 0x7000U, adjacent_code.size(),
+        {seed(0x7000U, FunctionDiscoverySource::ManualOverride, FunctionConfidence::Manual),
+         seed(0x7004U, FunctionDiscoverySource::Heuristic, FunctionConfidence::Low)});
+    const auto adjacent_map = analysis::FunctionMapBuilder::build(adjacent);
+    REQUIRE(adjacent_map);
+    REQUIRE(adjacent_map.value().conflicts().empty());
+
+    const auto duplicate_code = words({0x14000003U, 0x17ffffffU, 0x17fffffeU,
+                                       0xd65f03c0U});
+    const auto duplicate_memory = make_code(0x8000U, duplicate_code);
+    const auto duplicate = input_for(
+        duplicate_memory, 0x8000U, duplicate_code.size(),
+        {seed(0x8004U, FunctionDiscoverySource::ManualOverride, FunctionConfidence::Manual),
+         seed(0x8008U, FunctionDiscoverySource::Heuristic, FunctionConfidence::Low)});
+    const auto duplicate_map = analysis::FunctionMapBuilder::build(duplicate);
+    REQUIRE(duplicate_map);
+    REQUIRE(duplicate_map.value().conflicts().size() == 1U);
+    REQUIRE(duplicate_map.value().conflicts().front().first_range.base == 0x8000U);
+    REQUIRE(duplicate_map.value().conflicts().front().second_range.base == 0x8000U);
+    REQUIRE(duplicate_map.value().conflicts().front().first_range.size ==
+            duplicate_map.value().conflicts().front().second_range.size);
+}
+
+TEST_CASE("M10 conflict calculation emits complete three-way and chain overlap sets")
+{
+    const auto three_way_code = words({0x14000004U, 0x17ffffffU, 0x17fffffeU,
+                                       0x17fffffdU, 0xd65f03c0U});
+    const auto three_way_memory = make_code(0x9000U, three_way_code);
+    const auto three_way = input_for(
+        three_way_memory, 0x9000U, three_way_code.size(),
+        {seed(0x9004U, FunctionDiscoverySource::ManualOverride, FunctionConfidence::Manual),
+         seed(0x9008U, FunctionDiscoverySource::Heuristic, FunctionConfidence::Low),
+         seed(0x900cU, FunctionDiscoverySource::AnalystSeed, FunctionConfidence::Medium)});
+    const auto three_way_map = analysis::FunctionMapBuilder::build(three_way);
+    REQUIRE(three_way_map);
+    REQUIRE(three_way_map.value().conflicts().size() == 3U);
+    REQUIRE(three_way_map.value().conflicts()[0].first_function == 0x9004U);
+    REQUIRE(three_way_map.value().conflicts()[0].second_function == 0x9008U);
+    REQUIRE(three_way_map.value().conflicts()[1].first_function == 0x9004U);
+    REQUIRE(three_way_map.value().conflicts()[1].second_function == 0x900cU);
+    REQUIRE(three_way_map.value().conflicts()[2].first_function == 0x9008U);
+    REQUIRE(three_way_map.value().conflicts()[2].second_function == 0x900cU);
+
+    const auto chain_code = words({0x14000001U, 0xd65f03c0U, 0xd503201fU,
+                                   0xd503201fU, 0xd65f03c0U, 0xd503201fU,
+                                   0x17fffffbU});
+    const auto chain_memory = make_code(0xa000U, chain_code);
+    const auto chain = input_for(
+        chain_memory, 0xa000U, chain_code.size(),
+        {seed(0xa000U, FunctionDiscoverySource::ManualOverride, FunctionConfidence::Manual),
+         seed(0xa010U, FunctionDiscoverySource::AnalystSeed, FunctionConfidence::Medium),
+         seed(0xa018U, FunctionDiscoverySource::Heuristic, FunctionConfidence::Low)});
+    const auto chain_map = analysis::FunctionMapBuilder::build(chain);
+    REQUIRE(chain_map);
+    REQUIRE(chain_map.value().conflicts().size() == 2U);
+    REQUIRE(chain_map.value().conflicts()[0].first_function == 0xa000U);
+    REQUIRE(chain_map.value().conflicts()[0].second_function == 0xa018U);
+    REQUIRE(chain_map.value().conflicts()[1].first_function == 0xa010U);
+    REQUIRE(chain_map.value().conflicts()[1].second_function == 0xa018U);
+}
+
+TEST_CASE("M10 late direct-call discovery contributes final boundary conflicts")
+{
+    const auto code = words({0x94000002U, 0xd65f03c0U, 0x17fffffeU});
+    const auto memory = make_code(0xb000U, code);
+    const auto input = input_for(
+        memory, 0xb000U, code.size(),
+        {seed(0xb000U, FunctionDiscoverySource::ModuleEntry, FunctionConfidence::Confirmed)});
+    const auto map = analysis::FunctionMapBuilder::build(input);
+    REQUIRE(map);
+    REQUIRE(map.value().find(0xb008U) != nullptr);
+    REQUIRE(map.value().find(0xb008U)->translation_status == analysis::TranslationStatus::Conflict);
+    REQUIRE(std::any_of(map.value().find(0xb008U)->evidence.begin(),
+                        map.value().find(0xb008U)->evidence.end(), [](const auto& evidence) {
+                            return evidence.source == FunctionDiscoverySource::DirectCall;
+                        }));
+    REQUIRE(map.value().conflicts().size() == 1U);
+}
+
 TEST_CASE("M10 discovery rejects invalid seeds and enforces bounded fixed-point growth")
 {
     const auto code = words({0x94000004U, 0xd65f03c0U, 0xd503201fU,

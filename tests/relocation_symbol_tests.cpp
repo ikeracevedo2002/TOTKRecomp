@@ -283,3 +283,124 @@ TEST_CASE("relocation processing is atomic on validation or type failure")
     require_error(switchrecomp::loader::apply_relocations(fixture.memory, overflow, resolver),
                   ErrorCode::ArithmeticOverflow);
 }
+
+TEST_CASE("diagnostic relocation planning records unresolved symbol boundaries without writes")
+{
+    Fixture fixture;
+    REQUIRE(fixture.memory.map(0x5000U, 0x30U, GuestMemoryPermissions::Read, "diagnostic target"));
+    const auto symbols = DynamicSymbolTable::parse(fixture.memory, fixture.dynamic);
+    REQUIRE(symbols);
+    SymbolResolver resolver(symbols.value(), Fixture::module_base);
+
+    const std::array<Relocation, 5> relocations{
+        Relocation{0U, 0x5000U, 1027U, switchrecomp::format::AArch64RelocationType::Relative,
+                   0U, 1},
+        Relocation{8U, 0x5008U, 257U,
+                   switchrecomp::format::AArch64RelocationType::Abs64, 1U, 5},
+        Relocation{16U, 0x5010U, 1026U,
+                   switchrecomp::format::AArch64RelocationType::JumpSlot, 3U, 0,
+                   switchrecomp::format::RelocationSource::JmpRel},
+        Relocation{24U, 0x5018U, 1025U,
+                   switchrecomp::format::AArch64RelocationType::GlobDat, 3U, 4},
+        Relocation{32U, 0x5020U, 257U,
+                   switchrecomp::format::AArch64RelocationType::Abs64, 3U, -8},
+    };
+    const auto plan = switchrecomp::loader::plan_relocations(
+        fixture.memory, relocations, resolver);
+    REQUIRE(plan);
+    REQUIRE(plan.value().relocation_count == relocations.size());
+    REQUIRE(plan.value().applied.size() == 2U);
+    REQUIRE(plan.value().unresolved.size() == 3U);
+    REQUIRE(plan.value().unresolved[0].relocation_index == 2U);
+    REQUIRE(plan.value().unresolved[0].symbol.name == "missing");
+    REQUIRE(plan.value().unresolved[0].relocation.type ==
+            switchrecomp::format::AArch64RelocationType::JumpSlot);
+    REQUIRE(plan.value().unresolved[0].relocation.source ==
+            switchrecomp::format::RelocationSource::JmpRel);
+    REQUIRE(plan.value().unresolved[1].relocation.type ==
+            switchrecomp::format::AArch64RelocationType::GlobDat);
+    REQUIRE(plan.value().unresolved[2].relocation.type ==
+            switchrecomp::format::AArch64RelocationType::Abs64);
+
+    require_error(switchrecomp::loader::apply_relocations(
+                      fixture.memory, std::array{relocations[2]}, resolver),
+                  ErrorCode::UndefinedStrongSymbol);
+
+    REQUIRE(switchrecomp::loader::apply_relocation_plan(fixture.memory, plan.value()));
+    std::array<std::byte, 8> bytes{};
+    REQUIRE(fixture.memory.read(0x5000U, bytes));
+    REQUIRE(std::bit_cast<std::uint64_t>(bytes) == 0x1001U);
+    REQUIRE(fixture.memory.read(0x5008U, bytes));
+    REQUIRE(std::bit_cast<std::uint64_t>(bytes) == 0x1505U);
+    for (const auto address : {0x5010U, 0x5018U, 0x5020U})
+    {
+        REQUIRE(fixture.memory.read(address, bytes));
+        REQUIRE(std::bit_cast<std::uint64_t>(bytes) == 0U);
+    }
+}
+
+TEST_CASE("relocation planning preserves hard failures and transactionality")
+{
+    Fixture fixture;
+    REQUIRE(fixture.memory.map(0x6000U, 0x30U, GuestMemoryPermissions::Read, "transaction target"));
+    const auto symbols = DynamicSymbolTable::parse(fixture.memory, fixture.dynamic);
+    REQUIRE(symbols);
+    SymbolResolver resolver(symbols.value(), Fixture::module_base);
+
+    const Relocation valid{0U, 0x6000U, 1027U,
+                           switchrecomp::format::AArch64RelocationType::Relative, 0U, 7};
+    const Relocation invalid_symbol{8U, 0x6008U, 257U,
+                                    switchrecomp::format::AArch64RelocationType::Abs64, 99U, 0};
+    const Relocation unknown{16U, 0x6010U, 0xffffU,
+                             switchrecomp::format::AArch64RelocationType::Unknown, 0U, 0};
+    const Relocation target_overflow{
+        24U, std::numeric_limits<GuestAddress>::max() - 7U, 1027U,
+        switchrecomp::format::AArch64RelocationType::Relative, 0U, 0};
+
+    require_error(switchrecomp::loader::plan_relocations(
+                      fixture.memory, std::array{valid, invalid_symbol}, resolver),
+                  ErrorCode::InvalidSymbolIndex);
+    require_error(switchrecomp::loader::plan_relocations(
+                      fixture.memory, std::array{valid, unknown}, resolver),
+                  ErrorCode::UnsupportedRelocationType);
+    require_error(switchrecomp::loader::plan_relocations(
+                      fixture.memory, std::array{valid, target_overflow}, resolver),
+                  ErrorCode::ArithmeticOverflow);
+
+    std::array<std::byte, 8> bytes{};
+    REQUIRE(fixture.memory.read(0x6000U, bytes));
+    REQUIRE(std::bit_cast<std::uint64_t>(bytes) == 0U);
+
+    GuestMemory permission_memory;
+    REQUIRE(permission_memory.map(0x7000U, 0x10U, GuestMemoryPermissions::Read, "read-only target"));
+    const Relocation permission_relocation{
+        0U, 0x7000U, 1027U, switchrecomp::format::AArch64RelocationType::Relative, 0U, 0};
+    require_error(switchrecomp::loader::plan_relocations(
+                      permission_memory, std::array{permission_relocation}, resolver,
+                      switchrecomp::loader::RelocationProcessorOptions{false}),
+                  ErrorCode::PermissionDenied);
+
+    const std::array<Relocation, 3> ordering_input{
+        valid,
+        Relocation{8U, 0x6008U, 1026U,
+                   switchrecomp::format::AArch64RelocationType::JumpSlot, 3U, 0},
+        Relocation{16U, 0x6010U, 1025U,
+                   switchrecomp::format::AArch64RelocationType::GlobDat, 3U, 0}};
+    const auto first = switchrecomp::loader::plan_relocations(
+        fixture.memory, ordering_input, resolver);
+    const auto second = switchrecomp::loader::plan_relocations(
+        fixture.memory, ordering_input, resolver);
+    REQUIRE(first);
+    REQUIRE(second);
+    REQUIRE(first.value().unresolved.size() == second.value().unresolved.size());
+    REQUIRE(first.value().unresolved.size() == 2U);
+    for (std::size_t index = 0U; index < first.value().unresolved.size(); ++index)
+    {
+        REQUIRE(first.value().unresolved[index].relocation_index ==
+                second.value().unresolved[index].relocation_index);
+        REQUIRE(first.value().unresolved[index].symbol.name ==
+                second.value().unresolved[index].symbol.name);
+        REQUIRE(first.value().unresolved[index].relocation.type ==
+                second.value().unresolved[index].relocation.type);
+    }
+}
