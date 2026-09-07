@@ -350,6 +350,20 @@ endif()
 totkrecomp_enable_project_warnings(switchrecomp-module-translation)
 totkrecomp_enable_sanitizers(switchrecomp-module-translation)
 
+add_library(switchrecomp-execution
+    src/switchrecomp/execution/session.cpp
+)
+target_include_directories(switchrecomp-execution
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-execution
+    PUBLIC switchrecomp-common switchrecomp-memory switchrecomp-analysis
+           switchrecomp-ir switchrecomp-lifter switchrecomp-interpreter
+           switchrecomp-module-translation nlohmann_json::nlohmann_json
+)
+totkrecomp_enable_project_warnings(switchrecomp-execution)
+totkrecomp_enable_sanitizers(switchrecomp-execution)
+
 add_executable(nso-inspect tools/nso-inspect/main.cpp)
 target_link_libraries(nso-inspect PRIVATE switchrecomp-memory)
 target_compile_definitions(nso-inspect PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
@@ -391,6 +405,12 @@ target_compile_definitions(translate-module PRIVATE SWITCHRECOMP_VERSION="${PROJ
 totkrecomp_enable_project_warnings(translate-module)
 totkrecomp_enable_sanitizers(translate-module)
 
+add_executable(run-entry tools/run-entry/main.cpp)
+target_link_libraries(run-entry PRIVATE switchrecomp-execution)
+target_compile_definitions(run-entry PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
+totkrecomp_enable_project_warnings(run-entry)
+totkrecomp_enable_sanitizers(run-entry)
+
 if(TOTKRECOMP_BUILD_TESTS)
     add_executable(switchrecomp-tests
         tests/common_tests.cpp
@@ -409,6 +429,7 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/milestone8_fp_simd_tests.cpp
         tests/milestone9_threads_atomics_tests.cpp
         tests/milestone10_whole_main_tests.cpp
+        tests/milestone11_execution_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE
@@ -423,6 +444,7 @@ if(TOTKRECOMP_BUILD_TESTS)
             switchrecomp-interpreter
             switchrecomp-target
             switchrecomp-module-translation
+            switchrecomp-execution
             lz4_static
             Catch2::Catch2WithMain
     )
@@ -439,5 +461,5 @@ if(TOTKRECOMP_BUILD_TESTS)
     catch_discover_tests(switchrecomp-tests)
 endif()
 
-install(TARGETS nso-inspect nso-dynamic-inspect aarch64-analyze aarch64-lift translate-module
+install(TARGETS nso-inspect nso-dynamic-inspect aarch64-analyze aarch64-lift translate-module run-entry
         RUNTIME DESTINATION bin)
