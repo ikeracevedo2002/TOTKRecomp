@@ -404,6 +404,23 @@ Result<void> verify(const Function& function)
                 }
                 break;
             }
+            case Opcode::MulHighUnsigned:
+            {
+                const auto pair = require_same_integer_pair();
+                if (!pair)
+                {
+                    checked = invalid(pair.error().message);
+                }
+                else if (pair.value() != i64_type() || instruction.result_type != i64_type())
+                {
+                    checked = invalid("mul_high_unsigned currently requires matching i64 operands and result");
+                }
+                else
+                {
+                    checked = Result<void>::success();
+                }
+                break;
+            }
             case Opcode::CompareEqual:
             case Opcode::CompareNotEqual:
             case Opcode::CompareUnsigned:

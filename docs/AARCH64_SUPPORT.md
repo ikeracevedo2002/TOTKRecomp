@@ -14,6 +14,7 @@ backend; the optional LLVM backend lowers the same IR primitives.
 | LSL/LSR/ASR/ROR, UBFM/SBFM/BFM aliases | yes | yes | yes | common immediate bitfield forms |
 | CSEL family | yes | yes | yes | CSEL/CSINC/CSINV/CSNEG and common aliases |
 | MUL/MADD/MSUB/MNEG | yes | yes | yes | modulo-width integer multiplication |
+| UMULH | yes | yes | yes | scalar A64 unsigned high multiply; i64/X-register form only; NZCV unchanged |
 | LDR/STR scalar | yes | yes | yes | byte/half/word/doubleword, sign/zero extension |
 | LDUR/STUR | yes | yes | yes | signed unscaled displacement |
 | Register-offset memory | yes | yes | yes | LSL, UXTX/UXTW and SXTX/SXTW-style forms |

@@ -29,6 +29,12 @@ primitives. It has integer types `i1`, `i8`, `i16`, `i32`, `i64`, floating types
 basic-block terminators, and deterministic textual printing. It does not yet
 perform SSA optimization, constant folding, register allocation, or inlining.
 
+`MulHighUnsigned` is the project-owned scalar unsigned high-multiply primitive.
+It accepts exactly two `i64` operands and produces an `i64` result containing
+bits 127:64 of the mathematical unsigned 64x64 product. The interpreter uses
+a portable 32-bit-limb implementation; LLVM lowers it with zero-extension to
+`i128`, multiplication, a logical shift by 64, and truncation to `i64`.
+
 FP operations use raw-bit constants and typed `BitCast` instructions. Vector
 operations carry an explicit arrangement and lane index; vector values are
 never represented as host pointers in the IR. The verifier checks arrangement,
@@ -117,6 +123,7 @@ disassembly.
 | CSEL/CSINC/CSINV/CSNEG aliases | CSET/CSETM/CINC/CINV/CNEG included | no | no | supported |
 | LSL/LSR/ASR/ROR and UBFM/SBFM/BFM aliases | immediate shift and common bitfield aliases | no | no | supported |
 | MUL/MADD/MSUB/MNEG | modulo-width integer multiply and accumulate | no | no | supported |
+| UMULH | unsigned high half of an i64 × i64 product | no | no | supported |
 | ADR/ADRP | validated guest-PC and page-relative values | no | no | supported |
 | LDR/STR scalar | byte/half/word/doubleword; sign extension; base, offset, and writeback forms | no | read/write | supported forms |
 | LDP/STP | scalar pairs with offset, pre-index, and post-index forms | no | read/write | supported forms |

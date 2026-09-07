@@ -580,6 +580,22 @@ class ModuleLowerer
             assign(instruction, lowered);
             return Result<void>::success();
         }
+        case ir::Opcode::MulHighUnsigned:
+        {
+            const auto left = require_value(instruction.operands[0]);
+            const auto right = require_value(instruction.operands[1]);
+            if (!left || !right)
+            {
+                return Result<void>::failure(!left ? left.error() : right.error());
+            }
+            auto* wide_type = Type::getInt128Ty(context_);
+            auto* wide_left = builder_.CreateZExt(left.value(), wide_type, "umulh.left");
+            auto* wide_right = builder_.CreateZExt(right.value(), wide_type, "umulh.right");
+            auto* product = builder_.CreateMul(wide_left, wide_right, "umulh.product");
+            auto* high = builder_.CreateLShr(product, ConstantInt::get(wide_type, 64U), "umulh.high");
+            assign(instruction, builder_.CreateTrunc(high, Type::getInt64Ty(context_), "umulh.result"));
+            return Result<void>::success();
+        }
         case ir::Opcode::Not:
         {
             const auto source = require_value(instruction.operands[0]);

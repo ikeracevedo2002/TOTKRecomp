@@ -36,7 +36,7 @@ enum class InstructionId : std::uint16_t
     Mov, Mvn, Cmp, Cmn, Ccmp, Ccmn, Tst, Neg, Negs,
     Csel, Csinc, Csinv, Csneg, Cset, Csetm, Cinc, Cinv, Cneg,
     Movz, Movk, Movn, Lsl, Lsr, Asr, Ror, Ubfm, Sbfm, Bfm,
-    Mul, Madd, Msub, Mneg, Udiv, Sdiv, Adr, Adrp,
+    Mul, Madd, Msub, Mneg, Umulh, Udiv, Sdiv, Adr, Adrp,
     Ldr, Ldrb, Ldrh, Ldrsb, Ldrsh, Ldrsw, Str, Strb, Strh,
     Ldp, Stp, Ldur, Stur, LdrLiteral,
     B, Bl, BCond, Br, Blr, Ret, Cbz, Cbnz, Tbz, Tbnz,

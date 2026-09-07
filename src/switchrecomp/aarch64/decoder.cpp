@@ -502,6 +502,8 @@ namespace
         return InstructionId::Msub;
     case ARM64_INS_MNEG:
         return InstructionId::Mneg;
+    case ARM64_INS_UMULH:
+        return InstructionId::Umulh;
     case ARM64_INS_UDIV:
         return InstructionId::Udiv;
     case ARM64_INS_SDIV:
@@ -874,6 +876,14 @@ namespace
     {
         result.kind = ControlFlowKind::Exception;
         result.has_fallthrough = false;
+        return Result<ControlFlowInfo>::success(result);
+    }
+
+    // UMULH is an ordinary scalar data-processing instruction. Keep its
+    // normalized project-owned identity authoritative even if a backend
+    // classifies the instruction into an unexpected group.
+    if (id == InstructionId::Umulh)
+    {
         return Result<ControlFlowInfo>::success(result);
     }
 

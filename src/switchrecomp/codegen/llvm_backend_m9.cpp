@@ -229,6 +229,18 @@ class M9Lowerer
             }
             set_result(instruction, result); return Result<void>::success();
         }
+        case ir::Opcode::MulHighUnsigned:
+        {
+            const auto left = operand(0U), right = operand(1U);
+            if (!left || !right) return Result<void>::failure(!left ? left.error() : right.error());
+            auto* wide_type = Type::getInt128Ty(context_);
+            auto* wide_left = builder_.CreateZExt(left.value(), wide_type);
+            auto* wide_right = builder_.CreateZExt(right.value(), wide_type);
+            auto* product = builder_.CreateMul(wide_left, wide_right);
+            auto* high = builder_.CreateLShr(product, ConstantInt::get(wide_type, 64U));
+            set_result(instruction, builder_.CreateTrunc(high, Type::getInt64Ty(context_)));
+            return Result<void>::success();
+        }
         case ir::Opcode::Truncate: case ir::Opcode::ZeroExtend: case ir::Opcode::SignExtend:
         {
             const auto input = operand(0U); if (!input) return Result<void>::failure(input.error());

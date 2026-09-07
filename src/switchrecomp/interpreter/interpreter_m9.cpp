@@ -1,6 +1,7 @@
 #include "switchrecomp/interpreter/interpreter.hpp"
 
 #include "switchrecomp/common/checked_arithmetic.hpp"
+#include "switchrecomp/common/portable_arithmetic.hpp"
 #include "switchrecomp/ir/verifier.hpp"
 
 #include <cstdint>
@@ -179,6 +180,15 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
                     : instruction.opcode == ir::Opcode::Or ? left.value() | right.value()
                     : left.value() ^ right.value();
                 if (const auto done = store(value); !done) return Result<runtime::ExecutionResult>::failure(done.error());
+                break;
+            }
+            case ir::Opcode::MulHighUnsigned:
+            {
+                const auto left = read(0U), right = read(1U);
+                if (!left || !right)
+                    return Result<runtime::ExecutionResult>::failure(!left ? left.error() : right.error());
+                if (const auto done = store(common::multiply_high_unsigned_64(left.value(), right.value())); !done)
+                    return Result<runtime::ExecutionResult>::failure(done.error());
                 break;
             }
             case ir::Opcode::Not:

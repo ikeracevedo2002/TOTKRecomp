@@ -2054,13 +2054,24 @@ remain open.
 See [MILESTONE_15.md](MILESTONE_15.md) for the inventory, public-source
 evidence, report hashes, execution frontier, and exact next blocker.
 
+### Milestone 16 — Provider execution frontier
+
+M16 adds project-owned scalar A64 `UMULH` decoding, lifting, verification,
+portable interpreter semantics, and LLVM lowering. Synthetic process fixtures
+cover guest-provider relocation, indirect transfer, provider entry, UMULH
+execution, return continuation, and the no-runtime-fallback invariant. The
+real four-module M15 executable set remains an external local input; M16 does
+not invent bootstrap state or relabel the metadata-selected `main` `DT_INIT`
+candidate as a verified process entry. See [MILESTONE_16.md](MILESTONE_16.md)
+for the real-input availability and execution-frontier status.
+
 ### Future milestone — Filesystem and asset loading
 
 **Goal:** Mount user-provided game data and implement the required streaming path.
 
 **Success:** TOTK opens required resources and begins loading without missing-path or handle-semantics failures.
 
-### Milestone 16 — Graphics initialization
+### Future milestone — Graphics initialization
 
 **Goal:** Trace and intercept the selected graphics boundary and create logical native resources.
 

@@ -1,6 +1,7 @@
 #include "switchrecomp/interpreter/interpreter.hpp"
 
 #include "switchrecomp/common/checked_arithmetic.hpp"
+#include "switchrecomp/common/portable_arithmetic.hpp"
 #include "switchrecomp/ir/verifier.hpp"
 #include "switchrecomp/runtime/fp.hpp"
 
@@ -292,6 +293,22 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                                                                ? left.value() | right.value()
                                                                : left.value() ^ right.value();
                 const auto stored = store_result(value);
+                if (!stored)
+                {
+                    return Result<runtime::ExecutionResult>::failure(stored.error());
+                }
+                break;
+            }
+            case ir::Opcode::MulHighUnsigned:
+            {
+                const auto left = read(instruction.operands[0]);
+                const auto right = read(instruction.operands[1]);
+                if (!left || !right)
+                {
+                    return Result<runtime::ExecutionResult>::failure(!left ? left.error() : right.error());
+                }
+                const auto stored = store_result(
+                    common::multiply_high_unsigned_64(left.value(), right.value()));
                 if (!stored)
                 {
                     return Result<runtime::ExecutionResult>::failure(stored.error());

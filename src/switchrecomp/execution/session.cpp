@@ -961,9 +961,11 @@ Result<void> ExecutionSession::enter_function(GuestAddress entry,
     result.executed_functions.push_back(entry);
     result.executed_function_modules.push_back(module_name_for(entry));
     result.maximum_call_depth = std::max(result.maximum_call_depth, current_.call_depth);
-    return record_event(result, ExecutionEvent{0U, ExecutionEventKind::FunctionEnter, entry, 0U, 0U,
-                                                false, current_.call_depth,
-                                                runtime::ExecutionBoundaryKind::None, {}, {}, {}, {}})
+    ExecutionEvent event{0U, ExecutionEventKind::FunctionEnter, entry, entry, 0U, false,
+                         current_.call_depth, runtime::ExecutionBoundaryKind::None,
+                         {}, {}, {}, {}};
+    event.function_module = module_name_for(entry);
+    return record_event(result, std::move(event))
                ? Result<void>::success()
                : Result<void>::success();
 }
@@ -1143,10 +1145,11 @@ Result<void> ExecutionSession::dispatch_transfer(const runtime::ExecutionResult&
     result.executed_functions.push_back(current_.function_entry);
     result.executed_function_modules.push_back(module_name_for(current_.function_entry));
     result.maximum_call_depth = std::max(result.maximum_call_depth, current_.call_depth);
-    return record_event(result, ExecutionEvent{0U, ExecutionEventKind::FunctionEnter,
-                                                current_.function_entry, 0U, 0U, false,
-                                                current_.call_depth,
-                                                runtime::ExecutionBoundaryKind::None, {}, {}, {}, {}})
+    ExecutionEvent event{0U, ExecutionEventKind::FunctionEnter, current_.function_entry,
+                         current_.function_entry, 0U, false, current_.call_depth,
+                         runtime::ExecutionBoundaryKind::None, {}, {}, {}, {}};
+    event.function_module = module_name_for(current_.function_entry);
+    return record_event(result, std::move(event))
                ? Result<void>::success()
                : Result<void>::success();
 }

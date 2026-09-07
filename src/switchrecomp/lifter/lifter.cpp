@@ -292,6 +292,20 @@ class FunctionLifter
                                           source_location(instruction)});
     }
 
+    [[nodiscard]] Result<ir::ValueId> mul_high_unsigned(ir::ValueId left, ir::ValueId right,
+                                                        ir::Type type,
+                                                        const DecodedInstruction& instruction)
+    {
+        if (type != ir::i64_type())
+        {
+            return Result<ir::ValueId>::failure(
+                unsupported(instruction, "UMULH requires 64-bit scalar operands"));
+        }
+        return emit_value(ir::Instruction{ir::Opcode::MulHighUnsigned, ir::invalid_value, type,
+                                          {left, right}, {}, ir::Flag::N, ir::ConditionCode::Al,
+                                          0, 0, 0, source_location(instruction)});
+    }
+
     [[nodiscard]] Result<ir::ValueId> unary(ir::Opcode opcode, ir::ValueId value, ir::Type type,
                                             const DecodedInstruction& instruction)
     {
@@ -1643,6 +1657,10 @@ class FunctionLifter
         {
             return Result<void>::failure(unsupported(instruction, "expected multiply register operands"));
         }
+        if (instruction.id == aarch64::InstructionId::Umulh && instruction.operands.size() != 3U)
+        {
+            return Result<void>::failure(unsupported(instruction, "UMULH requires exactly three register operands"));
+        }
         const auto type = type_for_width(instruction.operands[0].reg.width);
         const auto left = operand_value(instruction.operands[1], type, instruction);
         const auto right = operand_value(instruction.operands[2], type, instruction);
@@ -1650,7 +1668,9 @@ class FunctionLifter
         {
             return Result<void>::failure(!left ? left.error() : right.error());
         }
-        const auto product = binary(ir::Opcode::Mul, left.value(), right.value(), type, instruction);
+        const auto product = instruction.id == aarch64::InstructionId::Umulh
+                                 ? mul_high_unsigned(left.value(), right.value(), type, instruction)
+                                 : binary(ir::Opcode::Mul, left.value(), right.value(), type, instruction);
         if (!product)
         {
             return Result<void>::failure(product.error());
@@ -2963,6 +2983,7 @@ class FunctionLifter
         case aarch64::InstructionId::Madd:
         case aarch64::InstructionId::Msub:
         case aarch64::InstructionId::Mneg:
+        case aarch64::InstructionId::Umulh:
             return lift_multiply(instruction);
         case aarch64::InstructionId::Adr:
         case aarch64::InstructionId::Adrp:
@@ -3067,6 +3088,7 @@ bool is_instruction_liftable(aarch64::InstructionId id) noexcept
     case aarch64::InstructionId::Madd:
     case aarch64::InstructionId::Msub:
     case aarch64::InstructionId::Mneg:
+    case aarch64::InstructionId::Umulh:
     case aarch64::InstructionId::Adr:
     case aarch64::InstructionId::Adrp:
     case aarch64::InstructionId::Ldr:

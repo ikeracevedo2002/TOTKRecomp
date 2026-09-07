@@ -444,6 +444,7 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/milestone13_multimodule_tests.cpp
         tests/milestone14_module_set_tests.cpp
         tests/milestone15_closure_tests.cpp
+        tests/milestone16_umulh_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE
