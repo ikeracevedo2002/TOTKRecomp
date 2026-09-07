@@ -88,6 +88,9 @@ struct ImportSymbol
     SymbolBinding binding;
     SymbolType type;
     SymbolVisibility visibility;
+    // Undefined symbols normally have SHN_UNDEF (zero). Retaining the field
+    // makes the import report complete without requiring a second lookup.
+    std::uint16_t section_index = 0U;
 };
 
 struct DynamicSymbolTable

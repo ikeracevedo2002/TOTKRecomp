@@ -4,6 +4,7 @@
 #include "switchrecomp/common/result.hpp"
 #include "switchrecomp/interpreter/interpreter.hpp"
 #include "switchrecomp/runtime/execution.hpp"
+#include "switchrecomp/runtime/imports.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -51,6 +52,10 @@ enum class ExecutionStopReason
     FunctionOwnershipConflict,
     MemoryFault,
     RuntimeServiceBoundary,
+    RuntimeImportUnimplemented,
+    RuntimeImportAbiViolation,
+    RuntimeImportMemoryFault,
+    RuntimeImportInvariantViolation,
     GuestTrap,
     ReturnTargetMismatch,
     CallDepthExceeded,
@@ -88,6 +93,12 @@ enum class ExecutionEventKind
     Return,
     FunctionResume,
     ImportBoundary,
+    RuntimeImportResolved,
+    RuntimeImportEnter,
+    RuntimeImportArgumentSummary,
+    RuntimeStateRegistration,
+    RuntimeImportReturn,
+    RuntimeImportBoundary,
     IndirectBoundary,
     MemoryFault,
     UnsupportedBoundary,
@@ -107,6 +118,7 @@ struct ExecutionEvent
     std::size_t call_depth = 0U;
     runtime::ExecutionBoundaryKind boundary = runtime::ExecutionBoundaryKind::None;
     std::string code;
+    std::string import_symbol;
 };
 
 struct ExecutionBudgets
@@ -159,14 +171,65 @@ struct CallStackFrame
     std::size_t call_depth = 0U;
 };
 
+struct RuntimeAbiArgumentObservation
+{
+    std::size_t index = 0U;
+    std::string location;
+    bool readable = false;
+    std::uint64_t value = 0U;
+    std::string diagnostic;
+    std::string mapping;
+    std::string permissions;
+    std::string region_kind;
+    bool aligned_8 = false;
+    bool aligned_16 = false;
+    std::vector<std::string> dynamic_tags;
+    std::vector<std::string> dynamic_symbols;
+    std::vector<std::string> relocation_ranges;
+    std::string range_validity;
+};
+
+struct RuntimeImportObservation
+{
+    runtime::RuntimeImportDescriptor descriptor;
+    ImportBoundary provenance;
+    runtime::ExternalInvocationKind invocation = runtime::ExternalInvocationKind::Call;
+    memory::GuestAddress source_guest_pc = 0U;
+    runtime::GuestAbiSnapshot abi;
+    std::vector<RuntimeAbiArgumentObservation> arguments;
+    std::string abi_validation;
+    std::string abi_diagnostic;
+    std::string outcome;
+    std::string outcome_diagnostic;
+    std::string trampoline_classification;
+    std::vector<std::string> trampoline_evidence;
+    std::optional<memory::GuestAddress> dynamic_pltgot;
+    std::optional<std::uint64_t> dynamic_pltgot_slot_delta;
+};
+
+struct RuntimeExecutionSummary
+{
+    std::size_t imports_encountered = 0U;
+    std::size_t imports_resolved = 0U;
+    std::size_t imports_handled = 0U;
+    std::size_t imports_unimplemented = 0U;
+    std::size_t imports_abi_violations = 0U;
+    std::size_t imports_memory_faults = 0U;
+    std::size_t imports_invariant_violations = 0U;
+    std::size_t import_returns = 0U;
+    std::size_t dso_modules_registered = 0U;
+    std::vector<RuntimeImportObservation> imports;
+};
+
 struct ExecutionSessionResult
 {
-    static constexpr std::uint32_t schema_version = 1U;
+    static constexpr std::uint32_t schema_version = 2U;
 
     analysis::ModuleIdentity identity;
     EntrySelection entry;
     ExecutionSessionOptions options;
     ExecutionLoadSummary relocations;
+    std::optional<format::ModuleMetadata> module_metadata;
     std::size_t analyzed_functions = 0U;
     std::size_t conflicting_functions = 0U;
     std::size_t precise_conflicts = 0U;
@@ -194,6 +257,7 @@ struct ExecutionSessionResult
     std::size_t maximum_call_depth = 0U;
     std::vector<CallStackFrame> call_stack;
     std::vector<ExecutionEvent> events;
+    RuntimeExecutionSummary runtime;
 };
 
 class ExecutionSession
@@ -202,7 +266,10 @@ class ExecutionSession
     ExecutionSession(memory::GuestMemory& memory, const analysis::FinalizedFunctionMap& function_map,
                       const std::vector<loader::UnresolvedRelocation>& unresolved_relocations,
                       ExecutionSessionOptions options = {},
-                      ExecutionLoadSummary load_summary = {});
+                      ExecutionLoadSummary load_summary = {},
+                      runtime::RuntimeImportRegistry* runtime_imports = nullptr,
+                      const format::ModuleMetadata* module_metadata = nullptr,
+                      const format::DynamicSymbolTable* symbols = nullptr);
 
     [[nodiscard]] Result<ExecutionSessionResult> run(const EntrySelection& entry);
 
@@ -231,6 +298,9 @@ class ExecutionSession
                                              ExecutionSessionResult& result);
     [[nodiscard]] Result<void> dispatch_transfer(const runtime::ExecutionResult& boundary,
                                                  ExecutionSessionResult& result);
+    [[nodiscard]] Result<void> dispatch_runtime_import(
+        const runtime::ExecutionResult& boundary, const ImportBoundary& import,
+        runtime::ExternalInvocationKind invocation, ExecutionSessionResult& result);
     [[nodiscard]] Result<void> stop(ExecutionSessionResult& result, ExecutionStopReason reason,
                                     std::string diagnostic, std::optional<memory::GuestAddress> target = std::nullopt,
                                     const runtime::ExecutionResult* boundary = nullptr);
@@ -244,6 +314,10 @@ class ExecutionSession
     memory::GuestMemory* memory_ = nullptr;
     const analysis::FinalizedFunctionMap* function_map_ = nullptr;
     ImportBoundaryIndex imports_;
+    runtime::RuntimeImportRegistry empty_runtime_imports_;
+    runtime::RuntimeImportRegistry* runtime_imports_ = nullptr;
+    const format::ModuleMetadata* module_metadata_ = nullptr;
+    const format::DynamicSymbolTable* symbols_ = nullptr;
     ExecutionSessionOptions options_;
     ExecutionLoadSummary load_summary_;
     std::map<memory::GuestAddress, LiftCacheEntry> lift_cache_;
@@ -251,6 +325,7 @@ class ExecutionSession
     SessionFrame current_;
     runtime::CpuState cpu_{};
     runtime::RuntimeContext runtime_{};
+    runtime::RuntimeState runtime_state_{};
     bool running_ = false;
 };
 

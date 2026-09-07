@@ -253,6 +253,7 @@ add_library(switchrecomp-runtime-core
     src/switchrecomp/runtime/atomic_memory.cpp
     src/switchrecomp/runtime/thread.cpp
     src/switchrecomp/runtime/dispatcher.cpp
+    src/switchrecomp/runtime/imports.cpp
 )
 target_include_directories(switchrecomp-runtime-core
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -430,6 +431,7 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/milestone9_threads_atomics_tests.cpp
         tests/milestone10_whole_main_tests.cpp
         tests/milestone11_execution_tests.cpp
+        tests/milestone12_runtime_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE

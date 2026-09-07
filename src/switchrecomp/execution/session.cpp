@@ -3,6 +3,7 @@
 #include "switchrecomp/common/checked_arithmetic.hpp"
 
 #include <algorithm>
+#include <array>
 #include <iomanip>
 #include <limits>
 #include <nlohmann/json.hpp>
@@ -42,6 +43,211 @@ using json = nlohmann::json;
                 {"x30", hex_address(cpu.x[30U])}, {"x", std::move(registers)}};
 }
 
+[[nodiscard]] json abi_snapshot_json(const runtime::GuestAbiSnapshot& snapshot)
+{
+    json arguments = json::array();
+    for (const auto value : snapshot.x0_x7)
+    {
+        arguments.push_back(hex_address(value));
+    }
+    return json{{"x0_x7", std::move(arguments)}, {"sp", hex_address(snapshot.sp)},
+                {"x29", hex_address(snapshot.x29)}, {"x30", hex_address(snapshot.x30)},
+                {"pc", hex_address(snapshot.pc)}};
+}
+
+[[nodiscard]] json dynamic_pointer_json(const std::optional<format::DynamicPointer>& pointer)
+{
+    if (!pointer)
+    {
+        return nullptr;
+    }
+    return json{{"module_offset", hex_address(pointer->module_offset)},
+                {"address", hex_address(pointer->address)}};
+}
+
+[[nodiscard]] json mod0_range_json(const std::optional<format::Mod0Range>& range)
+{
+    if (!range)
+    {
+        return nullptr;
+    }
+    return json{{"start_offset", range->start_offset}, {"end_offset", range->end_offset},
+                {"start_address", hex_address(range->start_address)},
+                {"end_address", hex_address(range->end_address)}};
+}
+
+[[nodiscard]] json module_metadata_json(
+    const std::optional<format::ModuleMetadata>& metadata)
+{
+    if (!metadata)
+    {
+        return json{{"present", false}};
+    }
+
+    json value{{"present", true}, {"module_base", hex_address(metadata->module_base)}};
+    if (metadata->mod0)
+    {
+        const auto& mod0 = metadata->mod0.value();
+        value["mod0"] = json{
+            {"address", hex_address(mod0.address)},
+            {"dynamic_offset", mod0.dynamic_offset},
+            {"bss_start_offset", mod0.bss_start_offset},
+            {"bss_end_offset", mod0.bss_end_offset},
+            {"exception_info_start_offset", mod0.exception_info_start_offset},
+            {"exception_info_end_offset", mod0.exception_info_end_offset},
+            {"module_object_offset", mod0.module_object_offset},
+            {"dynamic_address", hex_address(mod0.dynamic_address)},
+            {"bss_start_address", hex_address(mod0.bss_start_address)},
+            {"bss_end_address", hex_address(mod0.bss_end_address)},
+            {"exception_info_start_address", hex_address(mod0.exception_info_start_address)},
+            {"exception_info_end_address", hex_address(mod0.exception_info_end_address)},
+            {"module_object_address", hex_address(mod0.module_object_address)},
+            {"relro", mod0_range_json(mod0.relro)},
+            {"nx_debug_link", mod0_range_json(mod0.nx_debug_link)},
+            {"gnu_build_id_note", mod0_range_json(mod0.gnu_build_id_note)}};
+    }
+    else
+    {
+        value["mod0"] = nullptr;
+    }
+
+    if (!metadata->dynamic)
+    {
+        value["dynamic"] = nullptr;
+        return value;
+    }
+
+    const auto& dynamic = metadata->dynamic.value();
+    json entries = json::array();
+    for (const auto& entry : dynamic.entries)
+    {
+        entries.push_back(json{{"tag", entry.tag},
+                               {"tag_name", format::dynamic_tag_name(
+                                                   static_cast<format::DynamicTag>(entry.tag))},
+                               {"value", hex_address(entry.value)}});
+    }
+    value["dynamic"] = json{
+        {"module_base", hex_address(dynamic.module_base)},
+        {"address", hex_address(dynamic.address)},
+        {"entry_count", dynamic.entry_count},
+        {"entries", std::move(entries)},
+        {"pltgot", dynamic_pointer_json(dynamic.pltgot)},
+        {"hash", dynamic_pointer_json(dynamic.hash)},
+        {"gnu_hash", dynamic_pointer_json(dynamic.gnu_hash)},
+        {"strtab", dynamic_pointer_json(dynamic.strtab)},
+        {"symtab", dynamic_pointer_json(dynamic.symtab)},
+        {"rela", dynamic_pointer_json(dynamic.rela)},
+        {"init", dynamic_pointer_json(dynamic.init)},
+        {"fini", dynamic_pointer_json(dynamic.fini)},
+        {"rel", dynamic_pointer_json(dynamic.rel)},
+        {"debug", dynamic_pointer_json(dynamic.debug)},
+        {"jmprel", dynamic_pointer_json(dynamic.jmprel)},
+        {"init_array", dynamic_pointer_json(dynamic.init_array)},
+        {"fini_array", dynamic_pointer_json(dynamic.fini_array)},
+        {"preinit_array", dynamic_pointer_json(dynamic.preinit_array)},
+        {"pltrelsz", dynamic.pltrelsz ? json(dynamic.pltrelsz.value()) : json(nullptr)},
+        {"strsz", dynamic.strsz ? json(dynamic.strsz.value()) : json(nullptr)},
+        {"syment", dynamic.syment ? json(dynamic.syment.value()) : json(nullptr)},
+        {"relasz", dynamic.relasz ? json(dynamic.relasz.value()) : json(nullptr)},
+        {"relaent", dynamic.relaent ? json(dynamic.relaent.value()) : json(nullptr)},
+        {"relsz", dynamic.relsz ? json(dynamic.relsz.value()) : json(nullptr)},
+        {"relent", dynamic.relent ? json(dynamic.relent.value()) : json(nullptr)},
+        {"plt_rel_type", dynamic.plt_rel_type ? json(dynamic.plt_rel_type.value()) : json(nullptr)},
+        {"init_array_size", dynamic.init_array_size ? json(dynamic.init_array_size.value()) : json(nullptr)},
+        {"fini_array_size", dynamic.fini_array_size ? json(dynamic.fini_array_size.value()) : json(nullptr)},
+        {"preinit_array_size", dynamic.preinit_array_size ? json(dynamic.preinit_array_size.value()) : json(nullptr)},
+        {"relacount", dynamic.relacount ? json(dynamic.relacount.value()) : json(nullptr)},
+        {"relcount", dynamic.relcount ? json(dynamic.relcount.value()) : json(nullptr)},
+        {"rela_count", dynamic.rela_count ? json(dynamic.rela_count.value()) : json(nullptr)},
+        {"jmprel_count", dynamic.jmprel_count ? json(dynamic.jmprel_count.value()) : json(nullptr)},
+        {"rel_count", dynamic.rel_count ? json(dynamic.rel_count.value()) : json(nullptr)}};
+    return value;
+}
+
+[[nodiscard]] json runtime_import_json(const RuntimeImportObservation& observation)
+{
+    const auto& descriptor = observation.descriptor;
+    json abi_arguments = json::array();
+    for (const auto kind : descriptor.signature.arguments)
+    {
+        abi_arguments.push_back(runtime::abi_value_kind_name(kind));
+    }
+    if (descriptor.signature.arguments.empty() && descriptor.signature.argument_count)
+    {
+        abi_arguments = json::array();
+    }
+
+    json observed_arguments = json::array();
+    for (const auto& argument : observation.arguments)
+    {
+        observed_arguments.push_back(json{
+            {"index", argument.index},
+            {"location", argument.location},
+            {"readable", argument.readable},
+            {"value", hex_address(argument.value)},
+            {"diagnostic", argument.diagnostic},
+            {"mapping", argument.mapping},
+            {"permissions", argument.permissions},
+            {"region_kind", argument.region_kind},
+            {"aligned_8", argument.aligned_8},
+            {"aligned_16", argument.aligned_16},
+            {"dynamic_tags", argument.dynamic_tags},
+            {"dynamic_symbols", argument.dynamic_symbols},
+            {"relocation_ranges", argument.relocation_ranges},
+            {"range_validity", argument.range_validity}});
+    }
+
+    json trampoline_evidence = observation.trampoline_evidence;
+    const auto& import = observation.provenance;
+    return json{
+        {"symbol", descriptor.symbol_name},
+        {"support", runtime::runtime_support_status_name(descriptor.support)},
+        {"subsystem", runtime::runtime_subsystem_name(descriptor.subsystem)},
+        {"signature", json{
+                          {"argument_count", descriptor.signature.argument_count
+                                                   ? json(descriptor.signature.argument_count.value())
+                                                   : json(nullptr)},
+                          {"observed_argument_count", descriptor.signature.observed_argument_count},
+                          {"arguments", std::move(abi_arguments)},
+                          {"return", runtime::abi_return_kind_name(
+                                         descriptor.signature.return_kind)}}},
+        {"evidence", json{{"sources", descriptor.evidence.sources},
+                           {"confidence", descriptor.evidence.confidence},
+                           {"rationale", descriptor.evidence.rationale}}},
+        {"invocation", runtime::external_invocation_kind_name(observation.invocation)},
+        {"source_guest_pc", hex_address(observation.source_guest_pc)},
+        {"dynamic_pltgot", observation.dynamic_pltgot
+                                ? json(hex_address(observation.dynamic_pltgot.value()))
+                                : json(nullptr)},
+        {"dynamic_pltgot_slot_delta", observation.dynamic_pltgot_slot_delta
+                                          ? json(hex_address(observation.dynamic_pltgot_slot_delta.value()))
+                                          : json(nullptr)},
+        {"provenance", json{
+                           {"relocation_target", hex_address(import.relocation_target)},
+                           {"relocation_index", import.relocation_index},
+                           {"relocation_offset", hex_address(import.relocation.offset)},
+                           {"relocation_type", import.relocation.raw_type},
+                           {"relocation_type_name", format::aarch64_relocation_type_name(
+                                                         import.relocation.type)},
+                           {"relocation_source", format::relocation_source_name(
+                                                       import.relocation.source)},
+                           {"relocation_addend", import.relocation.addend},
+                           {"symbol_index", import.symbol.symbol_index},
+                           {"symbol", import.symbol.name},
+                           {"binding", format::symbol_binding_name(import.symbol.binding)},
+                           {"type", format::symbol_type_name(import.symbol.type)},
+                           {"visibility", format::symbol_visibility_name(import.symbol.visibility)},
+                           {"section_index", import.symbol.section_index}}},
+        {"abi", json{{"snapshot", abi_snapshot_json(observation.abi)},
+                      {"validation", observation.abi_validation},
+                      {"diagnostic", observation.abi_diagnostic},
+                      {"arguments", std::move(observed_arguments)}}},
+        {"trampoline", json{{"classification", observation.trampoline_classification},
+                             {"evidence", std::move(trampoline_evidence)}}},
+        {"outcome", json{{"status", observation.outcome},
+                          {"diagnostic", observation.outcome_diagnostic}}}};
+}
+
 [[nodiscard]] bool is_memory_error(ErrorCode code) noexcept
 {
     switch (code)
@@ -68,6 +274,214 @@ using json = nlohmann::json;
         return Result<GuestAddress>::failure(rounded.error());
     }
     return Result<GuestAddress>::success(rounded.value() & ~mask);
+}
+
+[[nodiscard]] std::string permissions_text(memory::GuestMemoryPermissions permissions)
+{
+    std::string result;
+    if (memory::has_permission(permissions, memory::GuestMemoryPermissions::Read)) result += 'r';
+    else result += '-';
+    if (memory::has_permission(permissions, memory::GuestMemoryPermissions::Write)) result += 'w';
+    else result += '-';
+    if (memory::has_permission(permissions, memory::GuestMemoryPermissions::Execute)) result += 'x';
+    else result += '-';
+    return result;
+}
+
+[[nodiscard]] bool range_contains(GuestAddress begin, GuestAddress end, GuestAddress value) noexcept
+{
+    return begin <= value && value < end;
+}
+
+void add_pointer_relation(const std::optional<format::DynamicPointer>& pointer,
+                          std::string_view tag, GuestAddress value,
+                          std::vector<std::string>& relations)
+{
+    if (pointer && pointer->address == value)
+    {
+        relations.emplace_back(tag);
+    }
+}
+
+void add_range_relation(const std::optional<format::DynamicPointer>& pointer,
+                        const std::optional<std::uint64_t>& size, std::string_view tag,
+                        GuestAddress value, std::vector<std::string>& relations)
+{
+    if (!pointer || !size || size.value() == 0U)
+    {
+        return;
+    }
+    const auto end = checked_add_u64(pointer->address, size.value());
+    if (end && range_contains(pointer->address, end.value(), value))
+    {
+        relations.emplace_back(tag);
+    }
+}
+
+void add_symbol_relations(const format::DynamicSymbolTable* symbols, GuestAddress module_base,
+                          GuestAddress value, std::vector<std::string>& relations)
+{
+    if (symbols == nullptr)
+    {
+        return;
+    }
+    constexpr std::uint16_t shn_abs = 0xfff1U;
+    for (const auto& symbol : symbols->symbols)
+    {
+        if (!symbol.is_defined() || symbol.name.empty())
+        {
+            continue;
+        }
+        const auto address = symbol.section_index == shn_abs
+                                 ? Result<GuestAddress>::success(symbol.value)
+                                 : checked_add_u64(module_base, symbol.value);
+        if (address && address.value() == value)
+        {
+            relations.push_back(std::to_string(symbol.index) + ":" + symbol.name);
+        }
+    }
+}
+
+[[nodiscard]] RuntimeAbiArgumentObservation observe_argument(
+    const runtime::AArch64GuestCall& abi, std::size_t index, const memory::GuestMemory& memory,
+    const format::DynamicInfo* dynamic, const format::DynamicSymbolTable* symbols)
+{
+    RuntimeAbiArgumentObservation observation;
+    observation.index = index;
+    if (index < 8U)
+    {
+        observation.location = "x" + std::to_string(index);
+    }
+    else
+    {
+        const auto offset = checked_mul_u64(static_cast<std::uint64_t>(index - 8U), 8U);
+        observation.location = offset ? "[sp+0x" + [&]() {
+            std::ostringstream text;
+            text << std::hex << offset.value();
+            return text.str();
+        }() + "]" : "[sp+overflow]";
+    }
+
+    const auto value = abi.integer_argument(index);
+    if (!value)
+    {
+        observation.diagnostic = std::string(error_code_name(value.error().code)) + ": " +
+                                 value.error().message;
+        observation.mapping = "invalid";
+        observation.permissions = "unavailable";
+        observation.region_kind = "unknown";
+        observation.range_validity = "invalid_argument_slot";
+        return observation;
+    }
+    observation.readable = true;
+    observation.value = value.value();
+    observation.aligned_8 = (value.value() & 0x7U) == 0U;
+    observation.aligned_16 = (value.value() & 0xfU) == 0U;
+    const auto region = memory.region_at(value.value());
+    if (!region)
+    {
+        observation.mapping = value.value() == 0U ? "null" : "unmapped";
+        observation.permissions = "unavailable";
+        observation.region_kind = "unknown";
+    }
+    else
+    {
+        observation.mapping = region.value().name;
+        observation.permissions = permissions_text(region.value().permissions);
+        observation.region_kind = std::string(memory::guest_region_kind_name(region.value().kind));
+    }
+    if (dynamic != nullptr)
+    {
+        add_pointer_relation(dynamic->pltgot, "DT_PLTGOT", value.value(), observation.dynamic_tags);
+        add_pointer_relation(dynamic->strtab, "DT_STRTAB", value.value(), observation.dynamic_tags);
+        add_pointer_relation(dynamic->symtab, "DT_SYMTAB", value.value(), observation.dynamic_tags);
+        add_pointer_relation(dynamic->rela, "DT_RELA", value.value(), observation.dynamic_tags);
+        add_pointer_relation(dynamic->jmprel, "DT_JMPREL", value.value(), observation.dynamic_tags);
+        add_pointer_relation(dynamic->init, "DT_INIT", value.value(), observation.dynamic_tags);
+        add_pointer_relation(dynamic->fini, "DT_FINI", value.value(), observation.dynamic_tags);
+        add_range_relation(dynamic->rela, dynamic->relasz, "DT_RELA", value.value(),
+                           observation.relocation_ranges);
+        add_range_relation(dynamic->jmprel, dynamic->pltrelsz, "DT_JMPREL", value.value(),
+                           observation.relocation_ranges);
+    }
+    add_symbol_relations(symbols, dynamic == nullptr ? 0U : dynamic->module_base,
+                         value.value(), observation.dynamic_symbols);
+    observation.range_validity = "point_checked;extent_not_established";
+    return observation;
+}
+
+void classify_import_trampoline(const analysis::FunctionRecord* record,
+                                const runtime::ExecutionResult& boundary,
+                                const ImportBoundary& import,
+                                const format::DynamicInfo* dynamic,
+                                RuntimeImportObservation& observation)
+{
+    observation.trampoline_classification = "not_classified";
+    if (record == nullptr || !record->cfg)
+    {
+        observation.trampoline_evidence.push_back("no finalized CFG for current guest function");
+        return;
+    }
+    const auto owned = analysis::function_owns_address(*record, boundary.boundary.source_guest_pc);
+    const auto single_block = record->cfg->blocks.size() == 1U;
+    bool final_br = false;
+    bool source_matches = false;
+    if (single_block)
+    {
+        const auto& block = record->cfg->blocks.begin()->second;
+        if (!block.instructions.empty())
+        {
+            const auto& instruction = block.instructions.back();
+            final_br = instruction.id == aarch64::InstructionId::Br;
+            source_matches = instruction.address == boundary.boundary.source_guest_pc;
+        }
+    }
+    const bool relocation_is_plt = import.relocation.source == format::RelocationSource::JmpRel;
+    const bool relocation_is_jump_slot =
+        import.relocation.type == format::AArch64RelocationType::JumpSlot;
+    const bool provenance_matches = boundary.boundary.has_provenance_address &&
+                                    boundary.boundary.provenance_address == import.relocation_target;
+    observation.trampoline_evidence.push_back(
+        owned ? "exact function ownership contains the indirect-branch PC"
+              : "exact function ownership does not contain the indirect-branch PC");
+    observation.trampoline_evidence.push_back(
+        single_block ? "finalized CFG contains one basic block" : "finalized CFG is not one block");
+    observation.trampoline_evidence.push_back(
+        final_br ? "last decoded instruction is BR" : "last decoded instruction is not BR");
+    observation.trampoline_evidence.push_back(
+        source_matches ? "BR PC matches the execution boundary source PC"
+                       : "BR PC does not match the execution boundary source PC");
+    observation.trampoline_evidence.push_back(
+        provenance_matches ? "BR target provenance is the unresolved relocation slot"
+                            : "BR target provenance does not match the relocation slot");
+    observation.trampoline_evidence.push_back(
+        relocation_is_plt ? "relocation source is JMPREL" : "relocation source is not JMPREL");
+    observation.trampoline_evidence.push_back(
+        relocation_is_jump_slot ? "relocation type is R_AARCH64_JUMP_SLOT"
+                                : "relocation type is not R_AARCH64_JUMP_SLOT");
+    if (dynamic != nullptr && dynamic->jmprel && dynamic->jmprel_count)
+    {
+        observation.trampoline_evidence.push_back("DT_JMPREL metadata and entry count are parsed");
+    }
+    else
+    {
+        observation.trampoline_evidence.push_back("DT_JMPREL metadata is unavailable");
+    }
+    if (dynamic != nullptr && dynamic->pltgot)
+    {
+        observation.trampoline_evidence.push_back(
+            "DT_PLTGOT metadata is parsed; relocation slot is retained for explicit GOT comparison");
+    }
+
+    if (owned && single_block && final_br && source_matches && provenance_matches &&
+        relocation_is_plt && relocation_is_jump_slot)
+    {
+        observation.trampoline_classification = "import_trampoline";
+    }
+    else
+    {
+        observation.trampoline_classification = "indirect_import_candidate";
+    }
 }
 
 } // namespace
@@ -160,6 +574,11 @@ const char* execution_stop_reason_name(ExecutionStopReason reason) noexcept
     case ExecutionStopReason::FunctionOwnershipConflict: return "function_ownership_conflict";
     case ExecutionStopReason::MemoryFault: return "memory_fault";
     case ExecutionStopReason::RuntimeServiceBoundary: return "runtime_service_boundary";
+    case ExecutionStopReason::RuntimeImportUnimplemented: return "runtime_import_unimplemented";
+    case ExecutionStopReason::RuntimeImportAbiViolation: return "runtime_import_abi_violation";
+    case ExecutionStopReason::RuntimeImportMemoryFault: return "runtime_import_memory_fault";
+    case ExecutionStopReason::RuntimeImportInvariantViolation:
+        return "runtime_import_invariant_violation";
     case ExecutionStopReason::GuestTrap: return "guest_trap";
     case ExecutionStopReason::ReturnTargetMismatch: return "return_target_mismatch";
     case ExecutionStopReason::CallDepthExceeded: return "call_depth_exceeded";
@@ -202,6 +621,12 @@ const char* execution_event_kind_name(ExecutionEventKind kind) noexcept
     case ExecutionEventKind::Return: return "return";
     case ExecutionEventKind::FunctionResume: return "function_resume";
     case ExecutionEventKind::ImportBoundary: return "import_boundary";
+    case ExecutionEventKind::RuntimeImportResolved: return "runtime_import_resolved";
+    case ExecutionEventKind::RuntimeImportEnter: return "runtime_import_enter";
+    case ExecutionEventKind::RuntimeImportArgumentSummary: return "runtime_import_argument_summary";
+    case ExecutionEventKind::RuntimeStateRegistration: return "runtime_state_registration";
+    case ExecutionEventKind::RuntimeImportReturn: return "runtime_import_return";
+    case ExecutionEventKind::RuntimeImportBoundary: return "runtime_import_boundary";
     case ExecutionEventKind::IndirectBoundary: return "indirect_boundary";
     case ExecutionEventKind::MemoryFault: return "memory_fault";
     case ExecutionEventKind::UnsupportedBoundary: return "unsupported_boundary";
@@ -245,9 +670,14 @@ const ImportBoundary* ImportBoundaryIndex::find(GuestAddress relocation_target) 
 ExecutionSession::ExecutionSession(
     memory::GuestMemory& memory, const analysis::FinalizedFunctionMap& function_map,
     const std::vector<loader::UnresolvedRelocation>& unresolved_relocations,
-    ExecutionSessionOptions options, ExecutionLoadSummary load_summary)
+    ExecutionSessionOptions options, ExecutionLoadSummary load_summary,
+    runtime::RuntimeImportRegistry* runtime_imports,
+    const format::ModuleMetadata* module_metadata,
+    const format::DynamicSymbolTable* symbols)
     : memory_(&memory), function_map_(&function_map), imports_(unresolved_relocations),
-      options_(std::move(options)), load_summary_(load_summary)
+      runtime_imports_(runtime_imports == nullptr ? &empty_runtime_imports_ : runtime_imports),
+      module_metadata_(module_metadata), symbols_(symbols), options_(std::move(options)),
+      load_summary_(load_summary)
 {
 }
 
@@ -269,6 +699,14 @@ ExecutionStopReason ExecutionSession::classify_error(const Error& error) const n
     case ErrorCode::UnresolvedIndirectFlow:
         return ExecutionStopReason::UnresolvedIndirectControlFlow;
     case ErrorCode::RuntimeBoundary: return ExecutionStopReason::RuntimeServiceBoundary;
+    case ErrorCode::RuntimeImportUnimplemented:
+        return ExecutionStopReason::RuntimeImportUnimplemented;
+    case ErrorCode::RuntimeImportAbiViolation:
+        return ExecutionStopReason::RuntimeImportAbiViolation;
+    case ErrorCode::RuntimeImportMemoryFault:
+        return ExecutionStopReason::RuntimeImportMemoryFault;
+    case ErrorCode::RuntimeImportInvariantViolation:
+        return ExecutionStopReason::RuntimeImportInvariantViolation;
     case ErrorCode::UnsupportedInstruction:
     case ErrorCode::UnsupportedOperandForm:
     case ErrorCode::Unsupported: return ExecutionStopReason::UnsupportedInstruction;
@@ -349,7 +787,7 @@ Result<void> ExecutionSession::map_stack(ExecutionSessionResult& result)
     }
     if (!record_event(result, ExecutionEvent{0U, ExecutionEventKind::StackMapped, 0U, 0U,
                                                result.stack_base, true, 0U,
-                                               runtime::ExecutionBoundaryKind::None, {}}))
+                                               runtime::ExecutionBoundaryKind::None, {}, {}}))
     {
         return Result<void>::success();
     }
@@ -434,7 +872,7 @@ Result<void> ExecutionSession::enter_function(GuestAddress entry,
     result.maximum_call_depth = std::max(result.maximum_call_depth, current_.call_depth);
     return record_event(result, ExecutionEvent{0U, ExecutionEventKind::FunctionEnter, entry, 0U, 0U,
                                                 false, current_.call_depth,
-                                                runtime::ExecutionBoundaryKind::None, {}})
+                                                runtime::ExecutionBoundaryKind::None, {}, {}})
                ? Result<void>::success()
                : Result<void>::success();
 }
@@ -468,13 +906,21 @@ Result<void> ExecutionSession::stop(ExecutionSessionResult& result, ExecutionSto
              reason == ExecutionStopReason::InvalidIndirectTarget)
         event_kind = ExecutionEventKind::IndirectBoundary;
     else if (reason == ExecutionStopReason::MemoryFault) event_kind = ExecutionEventKind::MemoryFault;
+    else if (reason == ExecutionStopReason::RuntimeImportUnimplemented ||
+             reason == ExecutionStopReason::RuntimeImportAbiViolation ||
+             reason == ExecutionStopReason::RuntimeImportMemoryFault ||
+             reason == ExecutionStopReason::RuntimeImportInvariantViolation)
+        event_kind = ExecutionEventKind::RuntimeImportBoundary;
+    const auto import_symbol = result.import_boundary
+                                   ? result.import_boundary->symbol.name
+                                   : std::string{};
     if (!record_event(result, ExecutionEvent{0U, event_kind, current_.function_entry, result.stop_pc,
                                                target.value_or(0U), target.has_value(),
                                                current_.call_depth,
                                                boundary == nullptr
                                                    ? runtime::ExecutionBoundaryKind::None
                                                    : boundary->boundary.kind,
-                                               execution_stop_reason_name(reason)}))
+                                               execution_stop_reason_name(reason), import_symbol}))
     {
         return Result<void>::success();
     }
@@ -485,7 +931,7 @@ Result<void> ExecutionSession::stop(ExecutionSessionResult& result, ExecutionSto
                                                boundary == nullptr
                                                    ? runtime::ExecutionBoundaryKind::None
                                                    : boundary->boundary.kind,
-                                               execution_stop_reason_name(reason)});
+                                               execution_stop_reason_name(reason), import_symbol});
     running_ = false;
     return Result<void>::success();
 }
@@ -500,9 +946,9 @@ Result<void> ExecutionSession::classify_target(const runtime::ExecutionResult& b
         if (const auto* import = imports_.find(payload.provenance_address))
         {
             result.import_boundary = *import;
-            return stop(result, ExecutionStopReason::UnresolvedImport,
-                        "indirect target originates at unresolved relocation " +
-                            hex_address(payload.provenance_address), target, &boundary);
+            const auto invocation = call ? runtime::ExternalInvocationKind::Call
+                                         : runtime::ExternalInvocationKind::TailTransfer;
+            return dispatch_runtime_import(boundary, *import, invocation, result);
         }
     }
     if ((target & 0x3U) != 0U || target == 0U)
@@ -556,7 +1002,7 @@ Result<void> ExecutionSession::dispatch_call(const runtime::ExecutionResult& bou
     if (!record_event(result, ExecutionEvent{0U, event_kind, current_.function_entry,
                                                boundary.boundary.source_guest_pc,
                                                boundary.boundary.target_guest_address, true,
-                                               current_.call_depth, boundary.boundary.kind, {}}))
+                                               current_.call_depth, boundary.boundary.kind, {}, {}}))
     {
         return Result<void>::success();
     }
@@ -577,7 +1023,7 @@ Result<void> ExecutionSession::dispatch_transfer(const runtime::ExecutionResult&
                                                current_.function_entry,
                                                boundary.boundary.source_guest_pc,
                                                boundary.boundary.target_guest_address, true,
-                                               current_.call_depth, boundary.boundary.kind, {}}))
+                                               current_.call_depth, boundary.boundary.kind, {}, {}}))
     {
         return Result<void>::success();
     }
@@ -595,7 +1041,212 @@ Result<void> ExecutionSession::dispatch_transfer(const runtime::ExecutionResult&
     return record_event(result, ExecutionEvent{0U, ExecutionEventKind::FunctionEnter,
                                                 current_.function_entry, 0U, 0U, false,
                                                 current_.call_depth,
-                                                runtime::ExecutionBoundaryKind::None, {}})
+                                                runtime::ExecutionBoundaryKind::None, {}, {}})
+               ? Result<void>::success()
+               : Result<void>::success();
+}
+
+Result<void> ExecutionSession::dispatch_runtime_import(
+    const runtime::ExecutionResult& boundary, const ImportBoundary& import,
+    runtime::ExternalInvocationKind invocation, ExecutionSessionResult& result)
+{
+    ++result.runtime.imports_encountered;
+    const auto* descriptor = runtime_imports_ == nullptr
+                                 ? nullptr
+                                 : runtime_imports_->find(import.symbol.name);
+
+    RuntimeImportObservation observation;
+    observation.provenance = import;
+    observation.invocation = invocation;
+    observation.source_guest_pc = boundary.boundary.source_guest_pc;
+    if (descriptor != nullptr)
+    {
+        observation.descriptor = *descriptor;
+        ++result.runtime.imports_resolved;
+    }
+    else
+    {
+        observation.descriptor.symbol_name = import.symbol.name;
+        observation.descriptor.support = runtime::RuntimeSupportStatus::Unknown;
+        observation.descriptor.subsystem = runtime::RuntimeSubsystem::Unknown;
+        observation.descriptor.evidence.confidence = "not_registered";
+    }
+
+    const auto* dynamic = module_metadata_ != nullptr && module_metadata_->dynamic
+                              ? &module_metadata_->dynamic.value()
+                              : nullptr;
+    classify_import_trampoline(function_record(current_.function_entry), boundary, import, dynamic,
+                               observation);
+    if (dynamic != nullptr && dynamic->pltgot)
+    {
+        observation.dynamic_pltgot = dynamic->pltgot->address;
+        if (import.relocation_target >= dynamic->pltgot->address)
+        {
+            observation.dynamic_pltgot_slot_delta =
+                import.relocation_target - dynamic->pltgot->address;
+        }
+    }
+
+    const runtime::AbiSignature empty_signature;
+    const auto& signature = descriptor == nullptr ? empty_signature : descriptor->signature;
+    runtime::AArch64GuestCall abi(cpu_, *memory_, signature);
+    observation.abi = abi.snapshot();
+    const auto observed_count = descriptor == nullptr ? 0U : signature.observed_argument_count;
+    observation.arguments.reserve(observed_count);
+    for (std::size_t index = 0U; index < observed_count; ++index)
+    {
+        observation.arguments.push_back(
+            observe_argument(abi, index, *memory_, dynamic, symbols_));
+    }
+
+    const auto runtime_event = [&](ExecutionEventKind kind, std::string code) {
+        return record_event(result, ExecutionEvent{0U, kind, current_.function_entry,
+                                                     boundary.boundary.source_guest_pc,
+                                                     boundary.boundary.target_guest_address, true,
+                                                     current_.call_depth, boundary.boundary.kind,
+                                                     std::move(code), import.symbol.name});
+    };
+
+    if (descriptor == nullptr)
+    {
+        observation.abi_validation = "not_attempted";
+        observation.outcome = "unresolved";
+        observation.outcome_diagnostic =
+            "no runtime descriptor is registered for the provenance-backed import";
+        result.runtime.imports.push_back(std::move(observation));
+        return stop(result, ExecutionStopReason::UnresolvedImport,
+                    "indirect target originates at unresolved relocation " +
+                        hex_address(import.relocation_target),
+                    boundary.boundary.target_guest_address, &boundary);
+    }
+
+    if (!runtime_event(ExecutionEventKind::RuntimeImportResolved,
+                       std::string(runtime::runtime_support_status_name(descriptor->support))))
+    {
+        observation.abi_validation = "not_attempted";
+        observation.outcome = "event_limit";
+        result.runtime.imports.push_back(std::move(observation));
+        return Result<void>::success();
+    }
+    if (!runtime_event(ExecutionEventKind::RuntimeImportEnter,
+                       std::string(runtime::external_invocation_kind_name(invocation))))
+    {
+        observation.abi_validation = "not_attempted";
+        observation.outcome = "event_limit";
+        result.runtime.imports.push_back(std::move(observation));
+        return Result<void>::success();
+    }
+    if (!runtime_event(ExecutionEventKind::RuntimeImportArgumentSummary,
+                       "observed_argument_slots=" + std::to_string(observed_count)))
+    {
+        observation.abi_validation = "not_attempted";
+        observation.outcome = "event_limit";
+        result.runtime.imports.push_back(std::move(observation));
+        return Result<void>::success();
+    }
+
+    runtime::RuntimeImportContext context{abi, *memory_, runtime_state_, *descriptor,
+                                          runtime::ImportProvenance{
+                                              import.relocation_target, import.relocation_index,
+                                              import.relocation, import.symbol},
+                                          invocation, module_metadata_};
+    const auto invoked = runtime_imports_->invoke(context);
+    runtime::RuntimeImportOutcome outcome = invoked
+                                                ? std::move(invoked).value()
+                                                : runtime::RuntimeImportOutcome::invariant_violation(
+                                                      invoked.error());
+    if (outcome.abi_validated)
+    {
+        observation.abi_validation = outcome.abi_signature_known
+                                          ? "valid"
+                                          : "observed_slots_valid_signature_unknown";
+    }
+    else
+    {
+        observation.abi_validation = "invalid";
+    }
+    observation.abi_diagnostic = outcome.error ?
+                                     std::string(error_code_name(outcome.error->code)) + ": " +
+                                         outcome.error->message
+                                                     : std::string{};
+    observation.outcome = std::string(runtime::runtime_import_outcome_name(outcome.kind));
+    observation.outcome_diagnostic = outcome.diagnostic;
+    result.runtime.dso_modules_registered = runtime_state_.dso_modules_registered();
+    result.runtime.imports.push_back(std::move(observation));
+
+    if (outcome.kind != runtime::RuntimeImportOutcomeKind::Handled)
+    {
+        switch (outcome.kind)
+        {
+        case runtime::RuntimeImportOutcomeKind::Unimplemented:
+            ++result.runtime.imports_unimplemented;
+            return stop(result, ExecutionStopReason::RuntimeImportUnimplemented,
+                        outcome.diagnostic, boundary.boundary.target_guest_address, &boundary);
+        case runtime::RuntimeImportOutcomeKind::AbiViolation:
+            ++result.runtime.imports_abi_violations;
+            return stop(result, ExecutionStopReason::RuntimeImportAbiViolation,
+                        outcome.diagnostic, boundary.boundary.target_guest_address, &boundary);
+        case runtime::RuntimeImportOutcomeKind::MemoryFault:
+            ++result.runtime.imports_memory_faults;
+            return stop(result, ExecutionStopReason::RuntimeImportMemoryFault,
+                        outcome.diagnostic, boundary.boundary.target_guest_address, &boundary);
+        case runtime::RuntimeImportOutcomeKind::InvariantViolation:
+            ++result.runtime.imports_invariant_violations;
+            return stop(result, ExecutionStopReason::RuntimeImportInvariantViolation,
+                        outcome.diagnostic, boundary.boundary.target_guest_address, &boundary);
+        case runtime::RuntimeImportOutcomeKind::Handled:
+            break;
+        }
+    }
+
+    if (!runtime_event(ExecutionEventKind::RuntimeImportReturn,
+                       std::string(runtime::runtime_import_outcome_name(outcome.kind))))
+    {
+        return Result<void>::success();
+    }
+    ++result.runtime.imports_handled;
+    ++result.runtime.import_returns;
+
+    if (invocation == runtime::ExternalInvocationKind::Call)
+    {
+        if (boundary.boundary.continuation_block == ir::invalid_block ||
+            boundary.boundary.continuation_guest_pc == 0U ||
+            (boundary.boundary.continuation_guest_pc & 0x3U) != 0U)
+        {
+            ++result.runtime.imports_invariant_violations;
+            return stop(result, ExecutionStopReason::RuntimeImportInvariantViolation,
+                        "handled external call has no valid guest continuation",
+                        boundary.boundary.target_guest_address, &boundary);
+        }
+        current_.interpreter.current_block = boundary.boundary.continuation_block;
+        cpu_.pc = boundary.boundary.continuation_guest_pc;
+        return Result<void>::success();
+    }
+
+    if (current_.expected_return_pc == 0U || (current_.expected_return_pc & 0x3U) != 0U)
+    {
+        ++result.runtime.imports_invariant_violations;
+        return stop(result, ExecutionStopReason::RuntimeImportInvariantViolation,
+                    "handled tail external transfer has no inherited guest return contract",
+                    boundary.boundary.target_guest_address, &boundary);
+    }
+    if (suspended_frames_.empty())
+    {
+        return stop(result, ExecutionStopReason::EntryReturned,
+                    "tail runtime import returned through the inherited entry contract",
+                    std::nullopt, &boundary);
+    }
+
+    const auto expected_return = current_.expected_return_pc;
+    current_ = std::move(suspended_frames_.back());
+    suspended_frames_.pop_back();
+    cpu_.pc = expected_return;
+    return record_event(result, ExecutionEvent{0U, ExecutionEventKind::FunctionResume,
+                                                current_.function_entry, expected_return, 0U,
+                                                false, current_.call_depth,
+                                                runtime::ExecutionBoundaryKind::Return,
+                                                "runtime_tail_transfer_resume",
+                                                import.symbol.name})
                ? Result<void>::success()
                : Result<void>::success();
 }
@@ -624,11 +1275,16 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     suspended_frames_.clear();
     current_ = SessionFrame{};
     lift_cache_.clear();
+    runtime_state_.reset();
     ExecutionSessionResult result;
     result.identity = function_map_->identity();
     result.entry = entry;
     result.options = options_;
     result.relocations = load_summary_;
+    if (module_metadata_ != nullptr)
+    {
+        result.module_metadata = *module_metadata_;
+    }
     result.analyzed_functions = function_map_->functions().size();
     result.precise_conflicts = function_map_->conflicts().size();
     std::set<GuestAddress> conflicting_functions;
@@ -652,11 +1308,11 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     }
     if (!record_event(result, ExecutionEvent{0U, ExecutionEventKind::SessionStart, 0U, 0U, 0U,
                                                false, 0U,
-                                               runtime::ExecutionBoundaryKind::None, {}}) ||
+                                               runtime::ExecutionBoundaryKind::None, {}, {}}) ||
         !record_event(result, ExecutionEvent{0U, ExecutionEventKind::EntrySelected, 0U,
                                                entry.address, entry.address, true, 0U,
                                                runtime::ExecutionBoundaryKind::None,
-                                               entry_selection_kind_name(entry.kind)}))
+                                               entry_selection_kind_name(entry.kind), {}}))
     {
         result.final_cpu = cpu_;
         return Result<ExecutionSessionResult>::success(std::move(result));
@@ -743,7 +1399,7 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
                                                        boundary.source_guest_pc,
                                                        boundary.target_guest_address,
                                                        boundary.target_known, current_.call_depth,
-                                                       boundary.kind, {}}))
+                                                       boundary.kind, {}, {}}))
                 break;
             if (suspended_frames_.empty())
             {
@@ -765,7 +1421,7 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
                                                        current_.function_entry,
                                                        current_.expected_return_pc, 0U, false,
                                                        current_.call_depth,
-                                                       runtime::ExecutionBoundaryKind::Return, {}}))
+                                                       runtime::ExecutionBoundaryKind::Return, {}, {}}))
                 break;
             break;
         case runtime::ExecutionBoundaryKind::DirectCall:
@@ -808,6 +1464,7 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         }
     }
     result.final_cpu = cpu_;
+    result.runtime.dso_modules_registered = runtime_state_.dso_modules_registered();
     if (running_)
     {
         running_ = false;
@@ -831,6 +1488,7 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                   {"boundary", runtime::execution_boundary_kind_name(event.boundary)},
                   {"code", event.code}};
         if (event.has_target) item["target"] = hex_address(event.target);
+        if (!event.import_symbol.empty()) item["import_symbol"] = event.import_symbol;
         events.push_back(std::move(item));
     }
     json stack = json::array();
@@ -858,6 +1516,7 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                    {"conflict_records", result.precise_conflicts},
                                    {"precise_conflicts", result.precise_conflicts},
                                    {"precise_owned_bytes", result.precise_owned_bytes}}},
+                {"metadata", module_metadata_json(result.module_metadata)},
                 {"entry", json{{"kind", entry_selection_kind_name(result.entry.kind)},
                                 {"address", hex_address(result.entry.address)},
                                 {"source", result.entry.source},
@@ -893,17 +1552,39 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                   {"max_guest_blocks", result.options.budgets.max_guest_blocks}}},
                 {"call_stack_snapshot", std::move(stack)},
                 {"registers", cpu_json(result.final_cpu)},
+                {"runtime", json{{"imports_encountered", result.runtime.imports_encountered},
+                                  {"imports_resolved", result.runtime.imports_resolved},
+                                  {"imports_handled", result.runtime.imports_handled},
+                                  {"imports_unimplemented", result.runtime.imports_unimplemented},
+                                  {"imports_abi_violations", result.runtime.imports_abi_violations},
+                                  {"imports_memory_faults", result.runtime.imports_memory_faults},
+                                  {"imports_invariant_violations",
+                                   result.runtime.imports_invariant_violations},
+                                  {"import_returns", result.runtime.import_returns},
+                                  {"dso_modules_registered",
+                                   result.runtime.dso_modules_registered},
+                                  {"imports", [&]() {
+                                      json imports = json::array();
+                                      for (const auto& observation : result.runtime.imports)
+                                      {
+                                          imports.push_back(runtime_import_json(observation));
+                                      }
+                                      return imports;
+                                  }()}}},
                 {"events", std::move(events)}};
     if (result.import_boundary)
     {
         const auto& import = result.import_boundary.value();
         value["execution"]["import"] = json{{"relocation_target", hex_address(import.relocation_target)},
+                                               {"relocation_offset", hex_address(import.relocation.offset)},
                                                {"relocation_index", import.relocation_index},
                                                {"symbol_index", import.symbol.symbol_index},
                                                {"symbol", import.symbol.name},
                                                {"binding", format::symbol_binding_name(import.symbol.binding)},
                                                {"symbol_type", format::symbol_type_name(import.symbol.type)},
                                                {"visibility", format::symbol_visibility_name(import.symbol.visibility)},
+                                               {"section_index", import.symbol.section_index},
+                                               {"undefined_in_main", import.symbol.section_index == 0U},
                                                {"relocation_type", import.relocation.raw_type},
                                                {"relocation_type_name", format::aarch64_relocation_type_name(import.relocation.type)},
                                                {"relocation_source", format::relocation_source_name(import.relocation.source)},

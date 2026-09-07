@@ -74,6 +74,10 @@ std::string_view error_code_name(ErrorCode code) noexcept
     case ErrorCode::FunctionRegistryFrozen: return "function_registry_frozen";
     case ErrorCode::UnknownGuestFunction: return "unknown_guest_function";
     case ErrorCode::RuntimeBoundary: return "runtime_boundary";
+    case ErrorCode::RuntimeImportUnimplemented: return "runtime_import_unimplemented";
+    case ErrorCode::RuntimeImportAbiViolation: return "runtime_import_abi_violation";
+    case ErrorCode::RuntimeImportMemoryFault: return "runtime_import_memory_fault";
+    case ErrorCode::RuntimeImportInvariantViolation: return "runtime_import_invariant_violation";
     case ErrorCode::MissingImportBinding: return "missing_import_binding";
     case ErrorCode::CodegenFailure: return "codegen_failure";
     case ErrorCode::LlvmVerificationFailed: return "llvm_verification_failed";

@@ -289,12 +289,22 @@ int main(int argc, char** argv)
         print_error(selected.error());
         return static_cast<int>(ExitCode::InfrastructureFailure);
     }
+    runtime::RuntimeImportRegistry runtime_imports;
+    const auto registered = runtime::register_m12_evidence_imports(runtime_imports);
+    if (!registered)
+    {
+        print_error(registered.error());
+        return static_cast<int>(ExitCode::InfrastructureFailure);
+    }
     execution::ExecutionSession session(loaded.value().memory, map.value(),
                                         loaded.value().unresolved_relocations, execution_options,
                                         execution::ExecutionLoadSummary{
                                             loaded.value().relocations.size(),
                                             loaded.value().applied_relocations,
-                                            loaded.value().unresolved_relocations.size()});
+                                            loaded.value().unresolved_relocations.size()},
+                                        &runtime_imports, &loaded.value().metadata,
+                                        loaded.value().symbols ? &loaded.value().symbols.value()
+                                                               : nullptr);
     const auto run = session.run(selected.value());
     if (!run)
     {

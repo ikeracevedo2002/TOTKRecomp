@@ -627,7 +627,7 @@ std::vector<ImportSymbol> DynamicSymbolTable::imports() const
         if (!symbol.is_defined())
         {
             result.push_back(ImportSymbol{symbol.index, symbol.name, symbol.binding, symbol.type,
-                                          symbol.visibility});
+                                          symbol.visibility, symbol.section_index});
         }
     }
     return result;

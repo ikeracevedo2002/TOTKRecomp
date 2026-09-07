@@ -178,7 +178,7 @@ TotkRecomp should own:
 
 A game-specific patch must not be added to SwitchRecomp merely because it makes TOTK boot.
 
-### 4.3 Controlled entry execution (Milestone 11)
+### 4.3 Controlled entry execution and runtime imports (Milestones 11–12)
 
 The M11 execution path is intentionally smaller than a Switch process launch:
 
@@ -193,7 +193,7 @@ guest call / return / FunctionTransfer
         ↓
 GuestFunctionRegistry / precise FunctionMap
         ↓
-runtime or import boundary
+RuntimeImportRegistry / import boundary
 ```
 
 The interpreter owns one resumable function frame. `ExecutionSession` owns the
@@ -201,7 +201,13 @@ explicit guest call stack, global budgets, synthetic stack, exact-entry
 dispatch, tail-transfer return contracts, and deterministic events. `BL`/`BLR`
 are calls with X30=`PC+4`; `B`/`BR` function transfers preserve X30 and do not
 push a call frame. Unresolved imports remain boundaries and are never replaced
-with host stubs.
+with host stubs. Milestone 12 adds a session-local ordered runtime-import
+registry, the reusable AArch64 guest-call ABI adapter, relocation-backed import
+provenance, typed support/outcome states, and checked guest-memory access for
+handlers. `BL`/`BLR` imports resume their explicit guest continuation;
+`B`/`BR` imports inherit the existing guest return contract. Guest addresses
+are never cast to host function pointers. A recognized import can therefore
+remain an explicit unimplemented boundary when its contract is not established.
 
 This controlled entry execution consumes a single prepared main module and a
 metadata-selected `DT_INIT` candidate. It is not full process launch: no rtld,
@@ -1957,9 +1963,22 @@ startup.
 
 ### Milestone 12 — Runtime bring-up
 
-**Goal:** Add required memory, timing, threading, filesystem, handle, and service behavior incrementally.
+**Implemented:** Establish the evidence-driven runtime import boundary, the
+reusable AArch64 ABI adapter, relocation/provenance-backed registry, typed
+runtime outcomes, checked guest-memory handler context, and transactional
+generic DSO/TLS descriptor validation. The first real dependency,
+`__nnmusl_init_dso`, is recognized from the measured `JMPREL`/`JUMP_SLOT`
+provenance and import trampoline but remains deliberately unimplemented because
+its formal ABI, return contract, side effects, and provider identity are not
+established.
 
-**Success:** Initialization progresses consistently between runs.
+**Success:** Additional execution is only admitted through an auditable,
+deterministic, ABI-aware boundary. The real M11 frontier remains the real M12
+frontier until evidence justifies a faithful implementation. DSO/TLS
+registration, when used by a future handler, is validate-then-commit.
+
+**Deferred:** Nintendo loader semantics, provider/module selection, full TLS,
+multi-module startup, Horizon/services, and speculative compatibility returns.
 
 ### Milestone 13 — Filesystem and asset loading
 
