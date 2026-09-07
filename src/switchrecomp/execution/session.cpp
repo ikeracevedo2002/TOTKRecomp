@@ -222,6 +222,8 @@ using json = nlohmann::json;
         {"dynamic_pltgot_slot_delta", observation.dynamic_pltgot_slot_delta
                                           ? json(hex_address(observation.dynamic_pltgot_slot_delta.value()))
                                           : json(nullptr)},
+        {"guest_provider_resolution", observation.guest_provider_resolution},
+        {"runtime_fallback_eligible", observation.runtime_fallback_eligible},
         {"provenance", json{
                            {"consumer_module", import.consumer_module},
                            {"relocation_target", hex_address(import.relocation_target)},
@@ -1154,18 +1156,47 @@ Result<void> ExecutionSession::dispatch_runtime_import(
     runtime::ExternalInvocationKind invocation, ExecutionSessionResult& result)
 {
     ++result.runtime.imports_encountered;
-    const auto* descriptor = runtime_imports_ == nullptr
-                                 ? nullptr
-                                 : runtime_imports_->find(import.symbol.name);
+    const analysis::ProcessBinding* process_binding = nullptr;
+    bool runtime_fallback_eligible = true;
+    std::string guest_provider_resolution = "not_available_without_process_image";
+    if (process_image_ != nullptr)
+    {
+        const auto binding_it = std::find_if(
+            process_image_->bindings().begin(), process_image_->bindings().end(),
+            [&](const auto& binding) {
+                return binding.consumer_module == import.consumer_module &&
+                       binding.relocation_index == import.relocation_index &&
+                       binding.relocation.target_address == import.relocation_target;
+            });
+        if (binding_it != process_image_->bindings().end()) process_binding = &*binding_it;
+        if (process_binding == nullptr)
+        {
+            runtime_fallback_eligible = false;
+            guest_provider_resolution = "binding_missing";
+        }
+        else
+        {
+            guest_provider_resolution = std::string(
+                analysis::provider_resolution_status_name(process_binding->provider.status));
+            runtime_fallback_eligible = process_binding->provider.status ==
+                                        analysis::ProviderResolutionStatus::NotFoundInSuppliedModules;
+        }
+    }
+    const auto* registered_descriptor = runtime_imports_ == nullptr
+                                            ? nullptr
+                                            : runtime_imports_->find(import.symbol.name);
+    const auto* descriptor = runtime_fallback_eligible ? registered_descriptor : nullptr;
 
     RuntimeImportObservation observation;
     observation.provenance = import;
     observation.invocation = invocation;
     observation.source_guest_pc = boundary.boundary.source_guest_pc;
-    if (descriptor != nullptr)
+    observation.guest_provider_resolution = std::move(guest_provider_resolution);
+    observation.runtime_fallback_eligible = runtime_fallback_eligible;
+    if (registered_descriptor != nullptr)
     {
-        observation.descriptor = *descriptor;
-        ++result.runtime.imports_resolved;
+        observation.descriptor = *registered_descriptor;
+        if (descriptor != nullptr) ++result.runtime.imports_resolved;
     }
     else
     {
@@ -1219,6 +1250,20 @@ Result<void> ExecutionSession::dispatch_runtime_import(
                                                      current_.call_depth, boundary.boundary.kind,
                                                      std::move(code), import.symbol.name, {}, {}});
     };
+
+    if (!runtime_fallback_eligible)
+    {
+        observation.abi_validation = "not_attempted";
+        observation.outcome = "guest_provider_resolution_blocked";
+        observation.outcome_diagnostic =
+            "runtime fallback is forbidden until complete guest-provider resolution reports "
+            "provider_not_found_complete (resolution=" + observation.guest_provider_resolution + ")";
+        result.runtime.imports.push_back(std::move(observation));
+        return stop(result, ExecutionStopReason::UnresolvedImport,
+                    "guest provider resolution did not authorize runtime fallback for '" +
+                        import.symbol.name + "'",
+                    boundary.boundary.target_guest_address, &boundary);
+    }
 
     if (descriptor == nullptr)
     {
@@ -1820,8 +1865,15 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                 {"provider_module", binding.provider_module ? json(*binding.provider_module) : json(nullptr)},
                 {"provider_symbol_index", binding.provider_symbol_index
                                                 ? json(*binding.provider_symbol_index) : json(nullptr)},
+                {"provider_base", binding.provider_base
+                                      ? json(hex_address(*binding.provider_base)) : json(nullptr)},
+                {"provider_symbol_value", binding.provider_symbol_value
+                                                ? json(hex_address(*binding.provider_symbol_value)) : json(nullptr)},
                 {"provider_address", binding.provider_address
                                           ? json(hex_address(*binding.provider_address)) : json(nullptr)},
+                {"resolved_value", binding.resolved_value
+                                        ? json(hex_address(*binding.resolved_value)) : json(nullptr)},
+                {"slot_value_verified", binding.slot_value_verified},
                 {"resolution_basis", binding.resolution_basis},
                 {"confidence", binding.confidence},
                 {"applied", binding.applied},
@@ -1899,6 +1951,8 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                             {"coherence", analysis::module_set_coherence_name(
                                                                   result.process->coherence)},
                                             {"coherence_basis", result.process->coherence_basis},
+                                            {"module_load_order", result.process->module_load_order},
+                                            {"module_load_order_basis", result.process->module_load_order_basis},
                                             {"module_count", result.process->module_count},
                                             {"executable_module_count", result.process->executable_module_count},
                                             {"relocations_planned", result.process->relocations_planned},

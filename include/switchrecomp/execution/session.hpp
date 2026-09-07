@@ -216,6 +216,8 @@ struct RuntimeImportObservation
     std::vector<std::string> trampoline_evidence;
     std::optional<memory::GuestAddress> dynamic_pltgot;
     std::optional<std::uint64_t> dynamic_pltgot_slot_delta;
+    std::string guest_provider_resolution;
+    bool runtime_fallback_eligible = false;
 };
 
 struct RuntimeExecutionSummary

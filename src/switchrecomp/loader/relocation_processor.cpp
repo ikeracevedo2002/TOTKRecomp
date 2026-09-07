@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace switchrecomp::loader
 {
@@ -222,6 +223,29 @@ Result<void> apply_relocation_plan(memory::GuestMemory& guest_memory, const Relo
             }
         }
 
+        struct Snapshot
+        {
+            memory::GuestAddress address = 0U;
+            std::vector<std::byte> bytes;
+        };
+        std::vector<Snapshot> snapshots;
+        snapshots.reserve(plan.applied.size());
+        for (const auto& entry : plan.applied)
+        {
+            Snapshot snapshot;
+            snapshot.address = entry.relocation.target_address;
+            snapshot.bytes.resize(entry.width);
+            const auto read = guest_memory.read(
+                snapshot.address, std::span<std::byte>(snapshot.bytes.data(), snapshot.bytes.size()));
+            if (!read)
+            {
+                return Result<void>::failure(make_error(
+                    read.error().code,
+                    "relocation plan could not snapshot target before commit: " + read.error().message));
+            }
+            snapshots.push_back(std::move(snapshot));
+        }
+
         for (const auto& entry : plan.applied)
         {
             std::array<std::byte, sizeof(std::uint64_t)> bytes{};
@@ -235,7 +259,29 @@ Result<void> apply_relocation_plan(memory::GuestMemory& guest_memory, const Relo
                                           std::span<const std::byte>(bytes.data(), entry.width));
             if (!result)
             {
-                return Result<void>::failure(result.error());
+                // Writes are committed only as one logical transaction. The
+                // preflight above catches ordinary failures; this rollback
+                // also protects callers if a write becomes invalid between
+                // preflight and commit.
+                for (std::size_t index = snapshots.size(); index > 0U; --index)
+                {
+                    const auto& snapshot = snapshots[index - 1U];
+                    if (options.use_loader_write)
+                    {
+                        (void)guest_memory.loader_write(
+                            snapshot.address,
+                            std::span<const std::byte>(snapshot.bytes.data(), snapshot.bytes.size()));
+                    }
+                    else
+                    {
+                        (void)guest_memory.write(
+                            snapshot.address,
+                            std::span<const std::byte>(snapshot.bytes.data(), snapshot.bytes.size()));
+                    }
+                }
+                return Result<void>::failure(make_error(
+                    ErrorCode::RelocationPlanFailed,
+                    "relocation plan commit failed and was rolled back: " + result.error().message));
             }
         }
         return Result<void>::success();
