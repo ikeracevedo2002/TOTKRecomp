@@ -434,6 +434,13 @@ ProviderLookup ProcessSymbolNamespace::lookup(
     {
         if (candidate.symbol == name) result.candidates.push_back(candidate);
     }
+    // A candidate in a directory scan is evidence, not a resolved provider.
+    // Do not let a partial namespace accidentally become executable state.
+    if (completeness == ModuleSetCompleteness::Incomplete)
+    {
+        result.status = ProviderResolutionStatus::ProviderSearchIncomplete;
+        return result;
+    }
     std::vector<std::size_t> strong;
     for (std::size_t index = 0U; index < result.candidates.size(); ++index)
     {
@@ -526,6 +533,8 @@ ProcessImageSummary ProcessImage::summary() const
     result.coherence = coherence_;
     result.coherence_basis = coherence_basis_;
     result.source = source_;
+    result.module_load_order = module_order_.module_names;
+    result.module_load_order_basis = module_order_.basis;
     result.module_count = modules_.size();
     result.relocations_planned = relocations_planned_;
     result.transactional_relocation_success = executable_state_valid_;
@@ -791,6 +800,7 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
         result.coherence_ = options.module_set_coherence;
         result.coherence_basis_ = options.module_set_coherence_basis;
         result.source_ = options.module_set_source;
+        result.module_order_ = options.module_order;
         result.ignored_module_entries_ = options.ignored_module_entries;
         result.relocations_planned_ = options.plan_relocations;
         result.executable_state_valid_ = options.plan_relocations && options.apply_relocations;
@@ -988,11 +998,25 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
                             }
                             binding.provider_module = provider.module;
                             binding.provider_symbol_index = provider.symbol_index;
+                            const auto provider_module_it = std::find_if(
+                                result.modules_.begin(), result.modules_.end(),
+                                [&](const auto& item) {
+                                    return item.identity.module == provider.module;
+                                });
+                            if (provider_module_it == result.modules_.end())
+                            {
+                                return Result<ProcessImage>::failure(make_error(
+                                    ErrorCode::InvalidProviderDefinition,
+                                    "selected provider module is absent from the process image"));
+                            }
+                            binding.provider_base = provider_module_it->identity.guest_base;
+                            binding.provider_symbol_value = provider.value;
                             binding.provider_address = provider.address;
                             const auto calculated = checked_add_signed_u64(provider.address,
                                                                              relocation.addend);
                             if (!calculated) return Result<ProcessImage>::failure(calculated.error());
                             value = calculated.value();
+                            binding.resolved_value = value;
                             binding.applied = true;
                         }
                         else
@@ -1035,6 +1059,43 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
         for (auto& binding : result.bindings_)
         {
             if (binding.applied && !options.apply_relocations) binding.applied = false;
+            if (binding.applied)
+            {
+                if (!binding.resolved_value)
+                {
+                    return Result<ProcessImage>::failure(make_error(
+                        ErrorCode::RelocationPlanFailed,
+                        "applied process binding has no resolved relocation value"));
+                }
+                const auto width = loader::relocation_width(binding.relocation.type);
+                std::array<std::byte, sizeof(std::uint64_t)> bytes{};
+                const auto read = result.memory_.read(
+                    binding.relocation.target_address,
+                    std::span<std::byte>(bytes.data(), width));
+                if (!read)
+                {
+                    return Result<ProcessImage>::failure(make_error(
+                        ErrorCode::RelocationPlanFailed,
+                        "applied process binding slot could not be read back: " + read.error().message));
+                }
+                std::uint64_t observed = 0U;
+                for (std::size_t index = 0U; index < width; ++index)
+                {
+                    observed |= static_cast<std::uint64_t>(
+                                    std::to_integer<unsigned int>(bytes[index]))
+                                << (index * 8U);
+                }
+                const auto expected = width == 4U
+                                          ? (*binding.resolved_value & 0xffffffffULL)
+                                          : *binding.resolved_value;
+                if (observed != expected)
+                {
+                    return Result<ProcessImage>::failure(make_error(
+                        ErrorCode::RelocationPlanFailed,
+                        "applied process binding slot does not contain its resolved guest value"));
+                }
+                binding.slot_value_verified = true;
+            }
         }
         return Result<ProcessImage>::success(std::move(result));
     }

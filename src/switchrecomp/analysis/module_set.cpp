@@ -84,6 +84,61 @@ void normalize_completeness_provenance(ModuleSetIngestionOptions& options) noexc
     return value;
 }
 
+struct load_order_key
+{
+    int rank = 4;
+    std::uint64_t subsdk_number = 0U;
+    bool numeric_subsdk = false;
+};
+
+[[nodiscard]] load_order_key exefs_load_order_key(std::string_view name) noexcept
+{
+    if (name == "rtld") return {0, 0U, false};
+    if (name == "main") return {1, 0U, false};
+    if (name == "sdk") return {3, 0U, false};
+    constexpr std::string_view prefix = "subsdk";
+    if (name.size() > prefix.size() && name.substr(0U, prefix.size()) == prefix)
+    {
+        std::uint64_t number = 0U;
+        for (const auto digit : name.substr(prefix.size()))
+        {
+            if (digit < '0' || digit > '9') return {4, 0U, false};
+            const auto next = checked_mul_u64(number, 10U);
+            if (!next) return {4, 0U, false};
+            const auto accumulated = checked_add_u64(
+                next.value(), static_cast<std::uint64_t>(digit - '0'));
+            if (!accumulated) return {4, 0U, false};
+            number = accumulated.value();
+        }
+        return {2, number, true};
+    }
+    return {4, 0U, false};
+}
+
+[[nodiscard]] std::pair<std::vector<std::string>, std::string> exefs_load_order(
+    const std::vector<ModuleInventoryEntry>& modules)
+{
+    std::vector<std::string> names;
+    names.reserve(modules.size());
+    bool all_known = true;
+    for (const auto& module : modules)
+    {
+        names.push_back(module.logical_name);
+        all_known &= exefs_load_order_key(module.logical_name).rank != 4;
+    }
+    std::sort(names.begin(), names.end(), [](const auto& left, const auto& right) {
+        const auto left_key = exefs_load_order_key(left);
+        const auto right_key = exefs_load_order_key(right);
+        if (left_key.rank != right_key.rank) return left_key.rank < right_key.rank;
+        if (left_key.numeric_subsdk && right_key.numeric_subsdk &&
+            left_key.subsdk_number != right_key.subsdk_number)
+            return left_key.subsdk_number < right_key.subsdk_number;
+        return left < right;
+    });
+    return {std::move(names), all_known ? "public_exefs_load_order"
+                                         : "public_exefs_load_order_with_unclassified_modules"};
+}
+
 [[nodiscard]] Result<void> validate_expected_modules(
     const std::vector<ModuleInventoryEntry>& modules,
     const std::vector<ModuleSetIngestionOptions::ExpectedModule>& expected)
@@ -242,6 +297,9 @@ void normalize_completeness_provenance(ModuleSetIngestionOptions& options) noexc
                   [](const auto& left, const auto& right) {
                       return left.logical_name < right.logical_name;
                   });
+        auto load_order = exefs_load_order(result.modules);
+        result.module_load_order = std::move(load_order.first);
+        result.module_load_order_basis = std::move(load_order.second);
         const auto expected = validate_expected_names(result.modules, options.expected_logical_names);
         if (!expected)
         {

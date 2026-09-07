@@ -101,6 +101,10 @@ class ModuleSetInventory
     ModuleSetCoherence coherence = ModuleSetCoherence::Unverified;
     std::string coherence_basis = "unknown";
     std::string source = "explicit";
+    // This is evidence about physical ExeFS loading order only. It is not
+    // symbol lookup precedence and is never used to break provider ties.
+    std::vector<std::string> module_load_order;
+    std::string module_load_order_basis = "not_established";
     std::vector<ModuleInventoryEntry> modules;
     // These are logical directory entry names and stable ignore reasons, never
     // host paths. They are retained so an inventory explains what was searched.

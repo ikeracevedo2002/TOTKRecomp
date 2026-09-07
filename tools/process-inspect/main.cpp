@@ -202,6 +202,8 @@ void print_error(const Error& error)
                                            inventory.completeness_basis)},
                 {"coherence", analysis::module_set_coherence_name(inventory.coherence)},
                 {"coherence_basis", inventory.coherence_basis},
+                {"module_load_order", inventory.module_load_order},
+                {"module_load_order_basis", inventory.module_load_order_basis},
                 {"module_count", inventory.modules.size()},
                 {"executable_module_count", std::count_if(
                                                  inventory.modules.begin(), inventory.modules.end(),
@@ -274,6 +276,34 @@ void print_error(const Error& error)
                         {"symbol_index", selected.symbol_index},
                         {"guest_address", selected.address}};
     }
+    json focus_bindings = json::array();
+    for (const auto& binding : summary.bindings)
+    {
+        if (binding.symbol != "__nnmusl_init_dso") continue;
+        focus_bindings.push_back(json{
+            {"consumer_module", binding.consumer_module},
+            {"consumer_symbol_index", binding.consumer_symbol_index},
+            {"symbol", binding.symbol},
+            {"relocation_index", binding.relocation_index},
+            {"relocation", json{{"type", binding.relocation.raw_type},
+                                 {"type_name", format::aarch64_relocation_type_name(binding.relocation.type)},
+                                 {"source", format::relocation_source_name(binding.relocation.source)},
+                                 {"target", binding.relocation.target_address},
+                                 {"offset", binding.relocation.offset},
+                                 {"addend", binding.relocation.addend}}},
+            {"result", provider_resolution_status_name(binding.provider.status)},
+            {"provider_module", binding.provider_module ? json(*binding.provider_module) : json(nullptr)},
+            {"provider_symbol_index", binding.provider_symbol_index
+                                            ? json(*binding.provider_symbol_index) : json(nullptr)},
+            {"provider_base", binding.provider_base ? json(*binding.provider_base) : json(nullptr)},
+            {"provider_symbol_value", binding.provider_symbol_value
+                                            ? json(*binding.provider_symbol_value) : json(nullptr)},
+            {"provider_guest_address", binding.provider_address
+                                            ? json(*binding.provider_address) : json(nullptr)},
+            {"resolved_value", binding.resolved_value ? json(*binding.resolved_value) : json(nullptr)},
+            {"applied", binding.applied},
+            {"slot_value_verified", binding.slot_value_verified}});
+    }
     return json{{"primary_module", summary.primary_module},
                 {"module_set", json{{"source", summary.source},
                                      {"completeness", module_set_completeness_name(summary.completeness)},
@@ -281,6 +311,8 @@ void print_error(const Error& error)
                                                                 summary.completeness_basis)},
                                      {"coherence", module_set_coherence_name(summary.coherence)},
                                      {"coherence_basis", summary.coherence_basis},
+                                     {"module_load_order", summary.module_load_order},
+                                     {"module_load_order_basis", summary.module_load_order_basis},
                                      {"module_count", summary.module_count},
                                      {"executable_module_count", summary.executable_module_count}}},
                 {"modules", std::move(modules)},
@@ -296,7 +328,8 @@ void print_error(const Error& error)
                     {"candidates", std::move(candidates)},
                     {"occurrences", std::move(occurrences)}}})},
                 {"relocation_plan", json{{"planned", summary.relocations_planned},
-                                          {"transactional_success", summary.transactional_relocation_success}}}};
+                                          {"transactional_success", summary.transactional_relocation_success},
+                                          {"focus_bindings", std::move(focus_bindings)}}}};
 }
 
 } // namespace
@@ -523,7 +556,9 @@ int main(int argc, char** argv)
     process_options.module_set_coherence_basis = inventory.coherence_basis;
     process_options.module_set_source = inventory.source;
     process_options.ignored_module_entries = inventory.ignored_entries;
-    process_options.plan_relocations = false;
+    process_options.module_order = analysis::ProcessModuleOrderEvidence{
+        inventory.module_load_order, inventory.module_load_order_basis};
+    process_options.plan_relocations = true;
     process_options.apply_relocations = false;
     if (!inventory.modules.empty())
     {

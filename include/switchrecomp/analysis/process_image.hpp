@@ -86,6 +86,16 @@ struct ProcessModuleInput
     std::string name_provenance = "explicit_configuration";
 };
 
+// A load-order record describes the order in which a prepared ExeFS set is
+// expected to be mapped. It is deliberately separate from provider lookup
+// order: public Switch evidence documents loading order, not a complete
+// Nintendo symbol-precedence contract.
+struct ProcessModuleOrderEvidence
+{
+    std::vector<std::string> module_names;
+    std::string basis = "not_established";
+};
+
 struct ProcessImageOptions
 {
     std::string primary_module = "main";
@@ -102,6 +112,7 @@ struct ProcessImageOptions
     std::string module_set_coherence_basis = "unknown";
     std::string module_set_source = "explicit";
     std::vector<std::string> ignored_module_entries;
+    ProcessModuleOrderEvidence module_order;
     // Inventory tools can deliberately stop after parsing/analysis metadata.
     // Such a ProcessImage is useful for evidence, but is not an executable
     // relocation-applied process state.
@@ -212,7 +223,11 @@ struct ProcessBinding
     ProviderLookup provider;
     std::optional<std::string> provider_module;
     std::optional<std::uint32_t> provider_symbol_index;
+    std::optional<memory::GuestAddress> provider_base;
+    std::optional<std::uint64_t> provider_symbol_value;
     std::optional<memory::GuestAddress> provider_address;
+    std::optional<std::uint64_t> resolved_value;
+    bool slot_value_verified = false;
     std::string resolution_basis;
     std::string confidence;
     bool applied = false;
@@ -277,6 +292,8 @@ struct ProcessImageSummary
     ModuleSetCoherence coherence = ModuleSetCoherence::Unverified;
     std::string coherence_basis = "unknown";
     std::string source = "explicit";
+    std::vector<std::string> module_load_order;
+    std::string module_load_order_basis = "not_established";
     std::size_t module_count = 0U;
     std::size_t executable_module_count = 0U;
     bool relocations_planned = true;
@@ -322,6 +339,7 @@ class ProcessImage
     ModuleSetCoherence coherence_ = ModuleSetCoherence::Unverified;
     std::string coherence_basis_ = "unknown";
     std::string source_ = "explicit";
+    ProcessModuleOrderEvidence module_order_;
     bool relocations_planned_ = true;
     bool executable_state_valid_ = true;
     std::vector<std::string> ignored_module_entries_;
