@@ -89,6 +89,18 @@ std::string_view error_code_name(ErrorCode code) noexcept
     case ErrorCode::InvalidProviderDefinition: return "invalid_provider_definition";
     case ErrorCode::ProviderSearchIncomplete: return "provider_search_incomplete";
     case ErrorCode::InvalidCrossModuleTransfer: return "invalid_cross_module_transfer";
+    case ErrorCode::ModuleSetEmpty: return "module_set_empty";
+    case ErrorCode::ModuleSetIdentityConflict: return "module_set_identity_conflict";
+    case ErrorCode::ModuleParseFailed: return "module_parse_failed";
+    case ErrorCode::ModuleMaterializationFailed: return "module_materialization_failed";
+    case ErrorCode::ModuleManifestMismatch: return "module_manifest_mismatch";
+    case ErrorCode::ProviderNotFoundComplete: return "provider_not_found_complete";
+    case ErrorCode::ProviderIneligible: return "provider_ineligible";
+    case ErrorCode::ProviderMetadataInvalid: return "provider_metadata_invalid";
+    case ErrorCode::RelocationPlanFailed: return "relocation_plan_failed";
+    case ErrorCode::ProviderFunctionNotDiscovered: return "provider_function_not_discovered";
+    case ErrorCode::ProviderExecutionBlocked: return "provider_execution_blocked";
+    case ErrorCode::DirectoryScanFailed: return "directory_scan_failed";
     }
     return "unknown";
 }

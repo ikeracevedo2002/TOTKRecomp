@@ -214,6 +214,7 @@ add_library(switchrecomp-analysis
     src/switchrecomp/analysis/cfg_analyzer.cpp
     src/switchrecomp/analysis/coverage.cpp
     src/switchrecomp/analysis/function_map.cpp
+    src/switchrecomp/analysis/module_set.cpp
     src/switchrecomp/analysis/process_image.cpp
 )
 target_include_directories(switchrecomp-analysis
@@ -408,10 +409,17 @@ totkrecomp_enable_project_warnings(translate-module)
 totkrecomp_enable_sanitizers(translate-module)
 
 add_executable(run-entry tools/run-entry/main.cpp)
-target_link_libraries(run-entry PRIVATE switchrecomp-execution)
+target_link_libraries(run-entry PRIVATE switchrecomp-execution switchrecomp-target)
 target_compile_definitions(run-entry PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
 totkrecomp_enable_project_warnings(run-entry)
 totkrecomp_enable_sanitizers(run-entry)
+
+add_executable(process-inspect tools/process-inspect/main.cpp)
+target_link_libraries(process-inspect PRIVATE switchrecomp-analysis switchrecomp-target
+                                             nlohmann_json::nlohmann_json)
+target_compile_definitions(process-inspect PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
+totkrecomp_enable_project_warnings(process-inspect)
+totkrecomp_enable_sanitizers(process-inspect)
 
 if(TOTKRECOMP_BUILD_TESTS)
     add_executable(switchrecomp-tests
@@ -434,6 +442,7 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/milestone11_execution_tests.cpp
         tests/milestone12_runtime_tests.cpp
         tests/milestone13_multimodule_tests.cpp
+        tests/milestone14_module_set_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE
@@ -465,5 +474,5 @@ if(TOTKRECOMP_BUILD_TESTS)
     catch_discover_tests(switchrecomp-tests)
 endif()
 
-install(TARGETS nso-inspect nso-dynamic-inspect aarch64-analyze aarch64-lift translate-module run-entry
+install(TARGETS nso-inspect nso-dynamic-inspect aarch64-analyze aarch64-lift translate-module run-entry process-inspect
         RUNTIME DESTINATION bin)

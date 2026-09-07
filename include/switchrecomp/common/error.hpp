@@ -91,6 +91,18 @@ enum class ErrorCode
     InvalidProviderDefinition,
     ProviderSearchIncomplete,
     InvalidCrossModuleTransfer,
+    ModuleSetEmpty,
+    ModuleSetIdentityConflict,
+    ModuleParseFailed,
+    ModuleMaterializationFailed,
+    ModuleManifestMismatch,
+    ProviderNotFoundComplete,
+    ProviderIneligible,
+    ProviderMetadataInvalid,
+    RelocationPlanFailed,
+    ProviderFunctionNotDiscovered,
+    ProviderExecutionBlocked,
+    DirectoryScanFailed,
 };
 
 [[nodiscard]] std::string_view error_code_name(ErrorCode code) noexcept;

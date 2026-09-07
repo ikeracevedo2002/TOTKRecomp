@@ -27,6 +27,8 @@ using GuestAddress = memory::GuestAddress;
 struct StagedModule
 {
     std::string name;
+    std::string name_provenance;
+    std::uint64_t input_size = 0U;
     format::NsoHeader header{};
     format::NsoImage image;
     Sha256Digest digest{};
@@ -80,6 +82,18 @@ struct StagedModule
     return left_base < right_end && right_base < left_end;
 }
 
+[[nodiscard]] bool stable_report_label(std::string_view value, std::size_t max_size = 256U) noexcept
+{
+    if (value.empty() || value.size() > max_size) return false;
+    for (const auto character : value)
+    {
+        if (character == '/' || character == '\\' ||
+            static_cast<unsigned char>(character) < 0x20U)
+            return false;
+    }
+    return true;
+}
+
 [[nodiscard]] Result<GuestAddress> symbol_address(const format::DynamicSymbol& symbol,
                                                   GuestAddress base)
 {
@@ -98,14 +112,24 @@ struct StagedModule
     return address;
 }
 
-[[nodiscard]] bool provider_eligible(const format::DynamicSymbol& symbol) noexcept
+[[nodiscard]] ProviderEligibility provider_eligibility(
+    const format::DynamicSymbol& symbol, bool mapped, bool executable) noexcept
 {
-    return symbol.is_defined() &&
-           (symbol.binding == format::SymbolBinding::Global ||
-            symbol.binding == format::SymbolBinding::Weak) &&
-           (symbol.visibility == format::SymbolVisibility::Default ||
-            symbol.visibility == format::SymbolVisibility::Protected) &&
-           !symbol.name.empty();
+    if (symbol.name.empty()) return ProviderEligibility::NoName;
+    if (!symbol.is_defined()) return ProviderEligibility::Undefined;
+    if (symbol.binding == format::SymbolBinding::Local) return ProviderEligibility::LocalBinding;
+    if (symbol.binding != format::SymbolBinding::Global &&
+        symbol.binding != format::SymbolBinding::Weak)
+        return ProviderEligibility::IneligibleBinding;
+    if (symbol.visibility == format::SymbolVisibility::Hidden ||
+        symbol.visibility == format::SymbolVisibility::Internal)
+        return ProviderEligibility::HiddenVisibility;
+    if (!mapped) return ProviderEligibility::OutsideProcessMemory;
+    if (symbol.type == format::SymbolType::Function && !executable)
+        return ProviderEligibility::NonExecutable;
+    if (symbol.type == format::SymbolType::Unknown || symbol.type == format::SymbolType::None)
+        return ProviderEligibility::UnsupportedType;
+    return ProviderEligibility::Eligible;
 }
 
 [[nodiscard]] bool is_strong(const ProviderCandidate& candidate) noexcept
@@ -142,7 +166,8 @@ struct StagedModule
 }
 
 [[nodiscard]] Result<void> add_seeds(ProcessModule& module,
-                                      const PreparedModuleOptions& options)
+                                      const PreparedModuleOptions& options,
+                                      const memory::GuestMemory& memory)
 {
     const auto text_entry = checked_add_u64(module.identity.guest_base,
                                              module.image.text.memory_offset);
@@ -187,13 +212,14 @@ struct StagedModule
     {
         for (const auto& symbol : module.symbols->symbols)
         {
-            if (!symbol.is_defined() || symbol.type != format::SymbolType::Function ||
-                symbol.value == 0U)
+            if (!symbol.is_defined() || symbol.type != format::SymbolType::Function)
             {
                 continue;
             }
             const auto address = symbol_address(symbol, module.identity.guest_base);
             if (!address) return Result<void>::failure(address.error());
+            const auto executable = memory.is_executable(address.value(), 4U);
+            if (!executable || !executable.value()) continue;
             module.seeds.push_back(FunctionSeed{
                 address.value(), FunctionDiscoverySource::DynamicSymbol,
                 FunctionConfidence::Confirmed, std::nullopt,
@@ -221,15 +247,73 @@ std::string_view provider_resolution_status_name(ProviderResolutionStatus status
     case ProviderResolutionStatus::ResolvedGuestModule: return "resolved_guest_module";
     case ProviderResolutionStatus::AmbiguousGuestProvider: return "ambiguous_guest_provider";
     case ProviderResolutionStatus::NotFoundInSuppliedModules:
-        return "not_found_in_supplied_modules";
+        return "provider_not_found_complete";
     case ProviderResolutionStatus::ProviderSearchIncomplete: return "provider_search_incomplete";
+    case ProviderResolutionStatus::ProviderIneligible: return "provider_ineligible";
     case ProviderResolutionStatus::InvalidProviderDefinition: return "invalid_provider_definition";
     }
     return "unknown";
 }
 
-Result<ProcessSymbolNamespace> ProcessSymbolNamespace::build(
-    const memory::GuestMemory& memory, std::span<const ProcessSymbolSource> sources)
+std::string_view module_set_completeness_name(ModuleSetCompleteness completeness) noexcept
+{
+    switch (completeness)
+    {
+    case ModuleSetCompleteness::Incomplete: return "incomplete";
+    case ModuleSetCompleteness::DeclaredComplete: return "declared_complete";
+    case ModuleSetCompleteness::ManifestVerifiedComplete: return "manifest_verified_complete";
+    }
+    return "unknown";
+}
+
+std::string_view module_set_completeness_basis_name(ModuleSetCompletenessBasis basis) noexcept
+{
+    switch (basis)
+    {
+    case ModuleSetCompletenessBasis::LegacyConfigFalse: return "legacy_config_false";
+    case ModuleSetCompletenessBasis::ExplicitLocalAssertion: return "explicit_local_assertion";
+    case ModuleSetCompletenessBasis::ExplicitInventory: return "explicit_inventory";
+    case ModuleSetCompletenessBasis::LocalManifestMatch: return "local_manifest_match";
+    case ModuleSetCompletenessBasis::TargetManifestMatch: return "target_manifest_match";
+    case ModuleSetCompletenessBasis::DirectoryScanOnly: return "directory_scan_only";
+    case ModuleSetCompletenessBasis::Unknown: return "unknown";
+    }
+    return "unknown";
+}
+
+std::string_view module_set_coherence_name(ModuleSetCoherence coherence) noexcept
+{
+    switch (coherence)
+    {
+    case ModuleSetCoherence::Verified: return "verified";
+    case ModuleSetCoherence::PartiallyVerified: return "partially_verified";
+    case ModuleSetCoherence::Unverified: return "unverified";
+    case ModuleSetCoherence::Conflicting: return "conflicting";
+    }
+    return "unknown";
+}
+
+std::string_view provider_eligibility_name(ProviderEligibility eligibility) noexcept
+{
+    switch (eligibility)
+    {
+    case ProviderEligibility::Eligible: return "eligible";
+    case ProviderEligibility::NoName: return "no_name";
+    case ProviderEligibility::Undefined: return "undefined";
+    case ProviderEligibility::LocalBinding: return "local_binding";
+    case ProviderEligibility::IneligibleBinding: return "ineligible_binding";
+    case ProviderEligibility::HiddenVisibility: return "hidden_visibility";
+    case ProviderEligibility::InvalidAddress: return "invalid_address";
+    case ProviderEligibility::OutsideProcessMemory: return "outside_process_memory";
+    case ProviderEligibility::NonExecutable: return "non_executable";
+    case ProviderEligibility::UnsupportedType: return "unsupported_type";
+    }
+    return "unknown";
+}
+
+Result<ProcessSymbolNamespace> ProcessSymbolNamespace::build_impl(
+    const memory::GuestMemory& memory, std::span<const ProcessSymbolSource> sources,
+    bool strict_invalid_providers)
 {
     ProcessSymbolNamespace result;
     try
@@ -243,39 +327,64 @@ Result<ProcessSymbolNamespace> ProcessSymbolNamespace::build(
             }
             for (const auto& symbol : source.symbols->symbols)
             {
-                if (!provider_eligible(symbol)) continue;
-                const auto address = symbol_address(symbol, source.base);
-                if (!address) return Result<ProcessSymbolNamespace>::failure(address.error());
-                const auto mapped = memory.region_at(address.value());
-                if (!mapped)
+                if (symbol.name.empty()) continue;
+                std::optional<GuestAddress> address;
+                bool mapped = false;
+                bool executable = false;
+                bool invalid_address = false;
+                if (symbol.is_defined())
                 {
-                    if (symbol.type == format::SymbolType::Function)
+                    const auto calculated = symbol_address(symbol, source.base);
+                    if (!calculated)
+                    {
+                        invalid_address = true;
+                        if (strict_invalid_providers)
+                            return Result<ProcessSymbolNamespace>::failure(calculated.error());
+                    }
+                    else
+                    {
+                        address = calculated.value();
+                        mapped = memory.region_at(calculated.value()).has_value();
+                        if (mapped)
+                        {
+                            const auto executable_result = memory.is_executable(
+                                calculated.value(), symbol.type == format::SymbolType::Function ? 4U : 1U);
+                            executable = executable_result && executable_result.value();
+                        }
+                    }
+                }
+                const auto eligibility = invalid_address
+                                             ? ProviderEligibility::InvalidAddress
+                                             : provider_eligibility(symbol, mapped, executable);
+                const bool eligible = eligibility == ProviderEligibility::Eligible;
+                result.occurrences_.push_back(ProviderOccurrence{
+                    source.module, symbol.index, symbol.name, symbol.is_defined(), symbol.binding,
+                    symbol.type, symbol.visibility, symbol.section_index, symbol.value, address,
+                    executable, eligible, eligibility});
+                if (!eligible)
+                {
+                    if (strict_invalid_providers &&
+                        (eligibility == ProviderEligibility::NonExecutable ||
+                         eligibility == ProviderEligibility::OutsideProcessMemory))
                     {
                         return Result<ProcessSymbolNamespace>::failure(make_error(
                             ErrorCode::InvalidProviderDefinition,
-                            "defined function provider is outside the process memory image"));
+                            "defined function provider is not mapped executable guest code"));
                     }
-                    // Linkers commonly emit boundary NOTYPE/data definitions one byte
-                    // past the mapped image. They are not executable providers and are
-                    // not eligible for a function relocation, so keep them out of the
-                    // provider index rather than inventing a binding.
                     continue;
-                }
-                const auto executable = memory.is_executable(
-                    address.value(), symbol.type == format::SymbolType::Function ? 4U : 1U);
-                const bool is_exec = executable && executable.value();
-                if (symbol.type == format::SymbolType::Function && !is_exec)
-                {
-                    return Result<ProcessSymbolNamespace>::failure(make_error(
-                        ErrorCode::InvalidProviderDefinition,
-                        "defined function provider is not executable"));
                 }
                 result.candidates_.push_back(ProviderCandidate{
                     source.module, symbol.index, symbol.name, symbol.binding, symbol.type,
-                    symbol.visibility, symbol.section_index, symbol.value, address.value(), is_exec});
+                    symbol.visibility, symbol.section_index, symbol.value, address.value(), executable});
             }
         }
         std::sort(result.candidates_.begin(), result.candidates_.end(),
+                  [](const auto& left, const auto& right) {
+                      if (left.symbol != right.symbol) return left.symbol < right.symbol;
+                      if (left.module != right.module) return left.module < right.module;
+                      return left.symbol_index < right.symbol_index;
+                  });
+        std::sort(result.occurrences_.begin(), result.occurrences_.end(),
                   [](const auto& left, const auto& right) {
                       if (left.symbol != right.symbol) return left.symbol < right.symbol;
                       if (left.module != right.module) return left.module < right.module;
@@ -290,9 +399,37 @@ Result<ProcessSymbolNamespace> ProcessSymbolNamespace::build(
     }
 }
 
+Result<ProcessSymbolNamespace> ProcessSymbolNamespace::build(
+    const memory::GuestMemory& memory, std::span<const ProcessSymbolSource> sources)
+{
+    return build_impl(memory, sources, true);
+}
+
+Result<ProcessSymbolNamespace> ProcessSymbolNamespace::build_audited(
+    const memory::GuestMemory& memory, std::span<const ProcessSymbolSource> sources)
+{
+    return build_impl(memory, sources, false);
+}
+
 ProviderLookup ProcessSymbolNamespace::lookup(std::string_view name, bool search_complete) const
 {
+    return lookup(name, search_complete ? ModuleSetCompleteness::DeclaredComplete
+                                         : ModuleSetCompleteness::Incomplete,
+                  search_complete ? ModuleSetCompletenessBasis::ExplicitLocalAssertion
+                                   : ModuleSetCompletenessBasis::LegacyConfigFalse);
+}
+
+ProviderLookup ProcessSymbolNamespace::lookup(
+    std::string_view name, ModuleSetCompleteness completeness,
+    ModuleSetCompletenessBasis basis) const
+{
     ProviderLookup result;
+    result.completeness = completeness;
+    result.completeness_basis = basis;
+    for (const auto& occurrence : occurrences_)
+    {
+        if (occurrence.symbol == name) result.occurrences.push_back(occurrence);
+    }
     for (const auto& candidate : candidates_)
     {
         if (candidate.symbol == name) result.candidates.push_back(candidate);
@@ -316,10 +453,19 @@ ProviderLookup ProcessSymbolNamespace::lookup(std::string_view name, bool search
         result.status = ProviderResolutionStatus::ResolvedGuestModule;
         result.selected_candidate = 0U;
     }
+    else if (std::any_of(result.occurrences.begin(), result.occurrences.end(), [](const auto& occurrence) {
+                 return occurrence.eligibility == ProviderEligibility::NonExecutable ||
+                        occurrence.eligibility == ProviderEligibility::OutsideProcessMemory ||
+                        occurrence.eligibility == ProviderEligibility::InvalidAddress;
+             }))
+    {
+        result.status = ProviderResolutionStatus::ProviderIneligible;
+    }
     else
     {
-        result.status = search_complete ? ProviderResolutionStatus::NotFoundInSuppliedModules
-                                        : ProviderResolutionStatus::ProviderSearchIncomplete;
+        result.status = completeness == ModuleSetCompleteness::Incomplete
+                            ? ProviderResolutionStatus::ProviderSearchIncomplete
+                            : ProviderResolutionStatus::NotFoundInSuppliedModules;
     }
     return result;
 }
@@ -365,15 +511,32 @@ std::vector<loader::UnresolvedRelocation> ProcessImage::unresolved_relocations()
     return result;
 }
 
+ProviderLookup ProcessImage::lookup_provider(std::string_view name) const
+{
+    return symbol_namespace_.lookup(name, completeness_, completeness_basis_);
+}
+
 ProcessImageSummary ProcessImage::summary() const
 {
     ProcessImageSummary result;
     result.primary_module = primary_module_;
     result.provider_search_complete = provider_search_complete_;
+    result.completeness = completeness_;
+    result.completeness_basis = completeness_basis_;
+    result.coherence = coherence_;
+    result.coherence_basis = coherence_basis_;
+    result.source = source_;
+    result.module_count = modules_.size();
+    result.relocations_planned = relocations_planned_;
+    result.transactional_relocation_success = executable_state_valid_;
+    result.ignored_module_entries = ignored_module_entries_;
+    result.focus_provider = lookup_provider("__nnmusl_init_dso");
     for (const auto& module : modules_)
     {
         ProcessModuleSummary summary;
         summary.logical_name = module.identity.module;
+        summary.name_provenance = module.name_provenance;
+        summary.input_size = module.input_size;
         summary.sha256 = module.identity.input_sha256;
         summary.build_id = module.identity.build_id;
         summary.nso_version = module.image.header.version;
@@ -410,6 +573,9 @@ ProcessImageSummary ProcessImage::summary() const
         summary.unresolved_relocations = module.unresolved_relocations.size();
         summary.mod0_available = module.metadata.mod0.has_value();
         summary.dynamic_available = module.metadata.dynamic.has_value();
+        summary.mod0_status = summary.mod0_available ? "available" : "absent";
+        summary.dynamic_status = summary.dynamic_available ? "available" : "absent";
+        summary.provider_index_eligible = module.symbols.has_value();
         if (module.metadata.dynamic)
         {
             for (const auto& entry : module.metadata.dynamic->entries)
@@ -422,6 +588,7 @@ ProcessImageSummary ProcessImage::summary() const
                 std::unique(summary.dynamic_tags.begin(), summary.dynamic_tags.end()),
                 summary.dynamic_tags.end());
         }
+        if (!module.identity.executable_ranges.empty()) ++result.executable_module_count;
         result.modules.push_back(std::move(summary));
     }
     result.bindings = bindings_;
@@ -434,7 +601,7 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
     if (inputs.empty())
     {
         return Result<ProcessImage>::failure(
-            make_error(ErrorCode::InvalidArgument, "process image requires at least one module"));
+            make_error(ErrorCode::ModuleSetEmpty, "process image requires at least one module"));
     }
     if (options.primary_module.empty())
     {
@@ -447,6 +614,21 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
         return Result<ProcessImage>::failure(make_error(
             ErrorCode::InvalidArgument, "module alignment must be a non-zero power of two"));
     }
+    if (options.module_set_coherence == ModuleSetCoherence::Conflicting)
+    {
+        return Result<ProcessImage>::failure(make_error(
+            ErrorCode::ModuleSetIdentityConflict,
+            "process image cannot be constructed from a conflicting executable module set"));
+    }
+    if (!stable_report_label(options.module_set_source) ||
+        !stable_report_label(options.module_set_coherence_basis) ||
+        !std::all_of(options.ignored_module_entries.begin(), options.ignored_module_entries.end(),
+                     [](const auto& entry) { return stable_report_label(entry); }))
+    {
+        return Result<ProcessImage>::failure(make_error(
+            ErrorCode::InvalidArgument,
+            "process module-set provenance contains an unsafe report label"));
+    }
 
     try
     {
@@ -457,11 +639,13 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
         std::set<std::string> names;
         for (const auto& input : ordered)
         {
-            if (input.logical_name.empty() || !names.insert(input.logical_name).second)
+            if (!stable_report_label(input.logical_name) ||
+                !stable_report_label(input.name_provenance) ||
+                !names.insert(input.logical_name).second)
             {
                 return Result<ProcessImage>::failure(make_error(
                     ErrorCode::DuplicateModuleIdentity,
-                    "process image contains an empty or duplicate logical module identity"));
+                    "process image contains an unsafe, empty, or duplicate logical module identity"));
             }
             if (input.file_bytes.empty())
             {
@@ -486,7 +670,9 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
             const auto image = format::materialize_nso(input.file_bytes, header.value(),
                                                         options.module_options.materialization_limits);
             if (!image) return Result<ProcessImage>::failure(image.error());
-            staged.push_back(StagedModule{input.logical_name, header.value(), std::move(image).value(),
+            staged.push_back(StagedModule{input.logical_name, input.name_provenance,
+                                          static_cast<std::uint64_t>(input.file_bytes.size()),
+                                          header.value(), std::move(image).value(),
                                           digest.value(), input.explicit_base.value_or(0U),
                                           input.explicit_base ? ModuleBaseProvenance::ExplicitAnalysisBase
                                                               : ModuleBaseProvenance::DeterministicAnalysisLayout});
@@ -591,7 +777,23 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
         ProcessImage result;
         result.memory_ = std::move(staged_memory);
         result.primary_module_ = options.primary_module;
-        result.provider_search_complete_ = options.provider_search_complete;
+        result.completeness_ = options.module_set_completeness;
+        result.completeness_basis_ = options.module_set_completeness_basis;
+        if (options.provider_search_complete &&
+            result.completeness_ == ModuleSetCompleteness::Incomplete)
+        {
+            // Preserve the M13 boolean while making its weaker provenance
+            // explicit in every M14 report.
+            result.completeness_ = ModuleSetCompleteness::DeclaredComplete;
+            result.completeness_basis_ = ModuleSetCompletenessBasis::ExplicitLocalAssertion;
+        }
+        result.provider_search_complete_ = result.completeness_ != ModuleSetCompleteness::Incomplete;
+        result.coherence_ = options.module_set_coherence;
+        result.coherence_basis_ = options.module_set_coherence_basis;
+        result.source_ = options.module_set_source;
+        result.ignored_module_entries_ = options.ignored_module_entries;
+        result.relocations_planned_ = options.plan_relocations;
+        result.executable_state_valid_ = options.plan_relocations && options.apply_relocations;
         result.modules_.reserve(staged.size());
 
         for (const auto& source : staged)
@@ -651,7 +853,8 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
             identity.llvm_version = "disabled";
             identity.feature_flags = {"process_image", "guest_symbol_namespace",
                                       "transactional_cross_module_relocations"};
-            ProcessModule module{std::move(identity), source.base_provenance, source.image,
+            ProcessModule module{std::move(identity), source.name_provenance, source.input_size,
+                                 source.base_provenance, source.image,
                                  metadata.value(), std::move(symbols), std::move(relocations),
                                  0U, {}, {}, {}, {}};
             for (const auto& region : result.memory_.regions())
@@ -670,7 +873,7 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
                     }
                 }
             }
-            const auto seeded = add_seeds(module, module_options);
+            const auto seeded = add_seeds(module, module_options, result.memory_);
             if (!seeded) return Result<ProcessImage>::failure(seeded.error());
             if (module.symbols) module.unresolved_imports = module.symbols->imports();
             result.modules_.push_back(std::move(module));
@@ -686,12 +889,14 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
                     module.identity.module, module.identity.guest_base, &module.symbols.value()});
             }
         }
-        const auto symbol_namespace = ProcessSymbolNamespace::build(
+        const auto symbol_namespace = ProcessSymbolNamespace::build_audited(
             result.memory_, std::span<const ProcessSymbolSource>(symbol_sources));
         if (!symbol_namespace) return Result<ProcessImage>::failure(symbol_namespace.error());
+        result.symbol_namespace_ = symbol_namespace.value();
 
         std::vector<loader::AppliedRelocation> pending;
         std::vector<std::pair<std::size_t, std::size_t>> pending_owner;
+        if (options.plan_relocations)
         for (std::size_t module_index = 0U; module_index < result.modules_.size(); ++module_index)
         {
             auto& module = result.modules_[module_index];
@@ -702,9 +907,31 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
                 if (relocation.type == format::AArch64RelocationType::None) continue;
                 if (relocation.type == format::AArch64RelocationType::Unknown)
                 {
+                    std::string symbol_name;
+                    if (module.symbols)
+                    {
+                        if (const auto* symbol = module.symbols->at(relocation.symbol_index))
+                            symbol_name = symbol->name;
+                    }
                     return Result<ProcessImage>::failure(make_error(
                         ErrorCode::UnsupportedRelocationType,
-                        "process image contains an unsupported AArch64 relocation"));
+                        "unsupported relocation in module '" + module.identity.module + "' at index " +
+                            std::to_string(relocation_index) + ": type " +
+                            std::string(format::aarch64_relocation_type_name(relocation.type)) +
+                            " (raw " + std::to_string(relocation.raw_type) + "), offset 0x" +
+                            [&]() {
+                                constexpr char digits[] = "0123456789abcdef";
+                                std::string hex;
+                                auto value = relocation.offset;
+                                do
+                                {
+                                    hex.push_back(digits[value & 0xfU]);
+                                    value >>= 4U;
+                                } while (value != 0U);
+                                std::reverse(hex.begin(), hex.end());
+                                return hex;
+                            }() +
+                            (symbol_name.empty() ? std::string{} : ", symbol '" + symbol_name + "'")));
                 }
                 const auto target = validate_relocation_target(result.memory_, relocation,
                                                                relocation_index);
@@ -737,8 +964,8 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
                     }
                     else
                     {
-                        lookup = symbol_namespace.value().lookup(
-                            symbol->name, options.provider_search_complete);
+                        lookup = result.symbol_namespace_.lookup(
+                            symbol->name, result.completeness_, result.completeness_basis_);
                         ProcessBinding binding;
                         binding.consumer_module = module.identity.module;
                         binding.consumer_symbol_index = relocation.symbol_index;

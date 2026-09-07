@@ -14,12 +14,64 @@
 namespace switchrecomp::analysis
 {
 
+enum class ModuleSetCompleteness : std::uint8_t
+{
+    Incomplete,
+    DeclaredComplete,
+    ManifestVerifiedComplete,
+};
+
+[[nodiscard]] std::string_view module_set_completeness_name(
+    ModuleSetCompleteness completeness) noexcept;
+
+enum class ModuleSetCompletenessBasis : std::uint8_t
+{
+    LegacyConfigFalse,
+    ExplicitLocalAssertion,
+    ExplicitInventory,
+    LocalManifestMatch,
+    TargetManifestMatch,
+    DirectoryScanOnly,
+    Unknown,
+};
+
+[[nodiscard]] std::string_view module_set_completeness_basis_name(
+    ModuleSetCompletenessBasis basis) noexcept;
+
+enum class ModuleSetCoherence : std::uint8_t
+{
+    Verified,
+    PartiallyVerified,
+    Unverified,
+    Conflicting,
+};
+
+[[nodiscard]] std::string_view module_set_coherence_name(ModuleSetCoherence coherence) noexcept;
+
+enum class ProviderEligibility : std::uint8_t
+{
+    Eligible,
+    NoName,
+    Undefined,
+    LocalBinding,
+    IneligibleBinding,
+    HiddenVisibility,
+    InvalidAddress,
+    OutsideProcessMemory,
+    NonExecutable,
+    UnsupportedType,
+};
+
+[[nodiscard]] std::string_view provider_eligibility_name(
+    ProviderEligibility eligibility) noexcept;
+
 enum class ProviderResolutionStatus : std::uint8_t
 {
     ResolvedGuestModule,
     AmbiguousGuestProvider,
     NotFoundInSuppliedModules,
     ProviderSearchIncomplete,
+    ProviderIneligible,
     InvalidProviderDefinition,
 };
 
@@ -31,6 +83,7 @@ struct ProcessModuleInput
     std::string logical_name;
     std::span<const std::byte> file_bytes;
     std::optional<memory::GuestAddress> explicit_base;
+    std::string name_provenance = "explicit_configuration";
 };
 
 struct ProcessImageOptions
@@ -42,6 +95,17 @@ struct ProcessImageOptions
     std::optional<memory::GuestAddress> reserved_stack_base;
     memory::GuestSize reserved_stack_size = 0U;
     bool provider_search_complete = false;
+    ModuleSetCompleteness module_set_completeness = ModuleSetCompleteness::Incomplete;
+    ModuleSetCompletenessBasis module_set_completeness_basis =
+        ModuleSetCompletenessBasis::LegacyConfigFalse;
+    ModuleSetCoherence module_set_coherence = ModuleSetCoherence::Unverified;
+    std::string module_set_coherence_basis = "unknown";
+    std::string module_set_source = "explicit";
+    std::vector<std::string> ignored_module_entries;
+    // Inventory tools can deliberately stop after parsing/analysis metadata.
+    // Such a ProcessImage is useful for evidence, but is not an executable
+    // relocation-applied process state.
+    bool plan_relocations = true;
     bool apply_relocations = true;
     PreparedModuleOptions module_options;
 };
@@ -49,6 +113,8 @@ struct ProcessImageOptions
 struct ProcessModule
 {
     ModuleIdentity identity;
+    std::string name_provenance = "explicit_configuration";
+    std::uint64_t input_size = 0U;
     ModuleBaseProvenance base_provenance = ModuleBaseProvenance::ExplicitAnalysisBase;
     format::NsoImage image;
     format::ModuleMetadata metadata;
@@ -75,11 +141,31 @@ struct ProviderCandidate
     bool executable = false;
 };
 
+struct ProviderOccurrence
+{
+    std::string module;
+    std::uint32_t symbol_index = 0U;
+    std::string symbol;
+    bool defined = false;
+    format::SymbolBinding binding = format::SymbolBinding::Unknown;
+    format::SymbolType type = format::SymbolType::Unknown;
+    format::SymbolVisibility visibility = format::SymbolVisibility::Unknown;
+    std::uint16_t section_index = 0U;
+    std::uint64_t value = 0U;
+    std::optional<memory::GuestAddress> address;
+    bool executable = false;
+    bool eligible = false;
+    ProviderEligibility eligibility = ProviderEligibility::UnsupportedType;
+};
+
 struct ProviderLookup
 {
     ProviderResolutionStatus status = ProviderResolutionStatus::NotFoundInSuppliedModules;
     std::vector<ProviderCandidate> candidates;
+    std::vector<ProviderOccurrence> occurrences;
     std::optional<std::size_t> selected_candidate;
+    ModuleSetCompleteness completeness = ModuleSetCompleteness::Incomplete;
+    ModuleSetCompletenessBasis completeness_basis = ModuleSetCompletenessBasis::LegacyConfigFalse;
 };
 
 struct ProcessSymbolSource
@@ -94,15 +180,26 @@ class ProcessSymbolNamespace
   public:
     [[nodiscard]] static Result<ProcessSymbolNamespace> build(
         const memory::GuestMemory& memory, std::span<const ProcessSymbolSource> sources);
+    // M14 audited construction retains non-provider occurrences and their
+    // exclusion reasons. The legacy build() remains strict for M13 callers.
+    [[nodiscard]] static Result<ProcessSymbolNamespace> build_audited(
+        const memory::GuestMemory& memory, std::span<const ProcessSymbolSource> sources);
     [[nodiscard]] ProviderLookup lookup(std::string_view name,
                                         bool search_complete) const;
+    [[nodiscard]] ProviderLookup lookup(std::string_view name,
+                                        ModuleSetCompleteness completeness,
+                                        ModuleSetCompletenessBasis basis) const;
     [[nodiscard]] const std::vector<ProviderCandidate>& candidates() const noexcept
     {
         return candidates_;
     }
 
   private:
+    [[nodiscard]] static Result<ProcessSymbolNamespace> build_impl(
+        const memory::GuestMemory& memory, std::span<const ProcessSymbolSource> sources,
+        bool strict_invalid_providers);
     std::vector<ProviderCandidate> candidates_;
+    std::vector<ProviderOccurrence> occurrences_;
 };
 
 struct ProcessBinding
@@ -143,6 +240,8 @@ struct ProcessModuleSummary
     };
 
     std::string logical_name;
+    std::string name_provenance;
+    std::uint64_t input_size = 0U;
     std::string sha256;
     std::string build_id;
     std::uint32_t nso_version = 0U;
@@ -162,6 +261,9 @@ struct ProcessModuleSummary
     std::size_t unresolved_relocations = 0U;
     bool mod0_available = false;
     bool dynamic_available = false;
+    std::string mod0_status;
+    std::string dynamic_status;
+    bool provider_index_eligible = false;
     std::vector<std::string> dynamic_tags;
 };
 
@@ -170,8 +272,19 @@ struct ProcessImageSummary
     std::string primary_module;
     std::string layout_mode = "deterministic_analysis_layout";
     bool provider_search_complete = false;
+    ModuleSetCompleteness completeness = ModuleSetCompleteness::Incomplete;
+    ModuleSetCompletenessBasis completeness_basis = ModuleSetCompletenessBasis::LegacyConfigFalse;
+    ModuleSetCoherence coherence = ModuleSetCoherence::Unverified;
+    std::string coherence_basis = "unknown";
+    std::string source = "explicit";
+    std::size_t module_count = 0U;
+    std::size_t executable_module_count = 0U;
+    bool relocations_planned = true;
+    bool transactional_relocation_success = true;
+    std::vector<std::string> ignored_module_entries;
     std::vector<ProcessModuleSummary> modules;
     std::vector<ProcessBinding> bindings;
+    std::optional<ProviderLookup> focus_provider;
 };
 
 class ProcessImage
@@ -189,8 +302,13 @@ class ProcessImage
     {
         return bindings_;
     }
+    [[nodiscard]] ProviderLookup lookup_provider(std::string_view name) const;
     [[nodiscard]] std::vector<loader::UnresolvedRelocation> unresolved_relocations() const;
     [[nodiscard]] ProcessImageSummary summary() const;
+    [[nodiscard]] bool executable_state_valid() const noexcept
+    {
+        return executable_state_valid_;
+    }
 
   private:
     friend Result<ProcessImage> load_process_image(
@@ -199,6 +317,15 @@ class ProcessImage
     memory::GuestMemory memory_;
     std::string primary_module_;
     bool provider_search_complete_ = false;
+    ModuleSetCompleteness completeness_ = ModuleSetCompleteness::Incomplete;
+    ModuleSetCompletenessBasis completeness_basis_ = ModuleSetCompletenessBasis::LegacyConfigFalse;
+    ModuleSetCoherence coherence_ = ModuleSetCoherence::Unverified;
+    std::string coherence_basis_ = "unknown";
+    std::string source_ = "explicit";
+    bool relocations_planned_ = true;
+    bool executable_state_valid_ = true;
+    std::vector<std::string> ignored_module_entries_;
+    ProcessSymbolNamespace symbol_namespace_;
     std::vector<ProcessModule> modules_;
     std::vector<ProcessBinding> bindings_;
 };

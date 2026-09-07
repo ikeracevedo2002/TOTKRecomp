@@ -1646,6 +1646,16 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         }
     }
     result.final_cpu = cpu_;
+    if (process_image_ != nullptr)
+    {
+        for (const auto& binding : process_image_->bindings())
+        {
+            if (!binding.provider_address || !binding.applied) continue;
+            result.provider_guest_code_entered |= std::find(
+                result.executed_functions.begin(), result.executed_functions.end(),
+                binding.provider_address.value()) != result.executed_functions.end();
+        }
+    }
     result.runtime.dso_modules_registered = runtime_state_.dso_modules_registered();
     if (running_)
     {
@@ -1732,6 +1742,8 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
             }
             modules.push_back(json{
                 {"logical_name", module.logical_name},
+                {"name_provenance", module.name_provenance},
+                {"input_size", module.input_size},
                 {"sha256", module.sha256},
                 {"build_id", module.build_id},
                 {"nso_version", module.nso_version},
@@ -1744,7 +1756,10 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                 {"mapped_ranges", std::move(ranges)},
                 {"mappings", std::move(mappings)},
                 {"metadata", json{{"mod0", module.mod0_available},
+                                   {"mod0_status", module.mod0_status},
                                    {"dynamic", module.dynamic_available},
+                                   {"dynamic_status", module.dynamic_status},
+                                   {"provider_index_eligible", module.provider_index_eligible},
                                    {"dynamic_tags", module.dynamic_tags}}},
                 {"dynamic_symbols", json{{"total", module.dynamic_symbol_count},
                                           {"defined", module.defined_symbol_count},
@@ -1770,6 +1785,26 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                           {"address", hex_address(candidate.address)},
                                           {"executable", candidate.executable}});
             }
+            json occurrences = json::array();
+            for (const auto& occurrence : binding.provider.occurrences)
+            {
+                occurrences.push_back(json{{"module", occurrence.module},
+                                           {"symbol_index", occurrence.symbol_index},
+                                           {"symbol", occurrence.symbol},
+                                           {"defined", occurrence.defined},
+                                           {"binding", format::symbol_binding_name(occurrence.binding)},
+                                           {"type", format::symbol_type_name(occurrence.type)},
+                                           {"visibility", format::symbol_visibility_name(occurrence.visibility)},
+                                           {"section_index", occurrence.section_index},
+                                           {"value", hex_address(occurrence.value)},
+                                           {"address", occurrence.address
+                                                            ? json(hex_address(occurrence.address.value()))
+                                                            : json(nullptr)},
+                                           {"executable", occurrence.executable},
+                                           {"eligible", occurrence.eligible},
+                                           {"eligibility", analysis::provider_eligibility_name(
+                                                                occurrence.eligibility)}});
+            }
             bindings.push_back(json{
                 {"consumer_module", binding.consumer_module},
                 {"consumer_symbol_index", binding.consumer_symbol_index},
@@ -1790,12 +1825,88 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                 {"resolution_basis", binding.resolution_basis},
                 {"confidence", binding.confidence},
                 {"applied", binding.applied},
-                {"candidates", std::move(candidates)}});
+                {"candidates", std::move(candidates)},
+                {"occurrences", std::move(occurrences)},
+                {"completeness", analysis::module_set_completeness_name(binding.provider.completeness)},
+                {"completeness_basis", analysis::module_set_completeness_basis_name(
+                                            binding.provider.completeness_basis)}});
         }
+        const auto focus = [&]() {
+            json focus_occurrences = json::array();
+            json focus_candidates = json::array();
+            const auto lookup = result.process->focus_provider.value_or(analysis::ProviderLookup{});
+            for (const auto& occurrence : lookup.occurrences)
+            {
+                focus_occurrences.push_back(json{{"module", occurrence.module},
+                                                 {"symbol_index", occurrence.symbol_index},
+                                                 {"symbol", occurrence.symbol},
+                                                 {"defined", occurrence.defined},
+                                                 {"binding", format::symbol_binding_name(occurrence.binding)},
+                                                 {"type", format::symbol_type_name(occurrence.type)},
+                                                 {"visibility", format::symbol_visibility_name(occurrence.visibility)},
+                                                 {"section_index", occurrence.section_index},
+                                                 {"value", hex_address(occurrence.value)},
+                                                 {"guest_address", occurrence.address
+                                                                       ? json(hex_address(occurrence.address.value()))
+                                                                       : json(nullptr)},
+                                                 {"executable", occurrence.executable},
+                                                 {"eligible", occurrence.eligible},
+                                                 {"eligibility", analysis::provider_eligibility_name(
+                                                                      occurrence.eligibility)}});
+            }
+            for (const auto& candidate : lookup.candidates)
+                focus_candidates.push_back(json{{"module", candidate.module},
+                                                {"symbol_index", candidate.symbol_index},
+                                                {"symbol", candidate.symbol},
+                                                {"binding", format::symbol_binding_name(candidate.binding)},
+                                                {"type", format::symbol_type_name(candidate.type)},
+                                                {"visibility", format::symbol_visibility_name(candidate.visibility)},
+                                                {"value", hex_address(candidate.value)},
+                                                {"guest_address", hex_address(candidate.address)},
+                                                {"executable", candidate.executable}});
+            json provider = nullptr;
+            if (lookup.selected_candidate && lookup.selected_candidate.value() < lookup.candidates.size())
+            {
+                const auto& selected = lookup.candidates[lookup.selected_candidate.value()];
+                provider = json{{"module", selected.module},
+                                {"symbol_index", selected.symbol_index},
+                                {"guest_address", hex_address(selected.address)}};
+            }
+            bool host_handler_used = false;
+            for (const auto& import : result.runtime.imports)
+                host_handler_used |= import.provenance.symbol.name == "__nnmusl_init_dso";
+            return json{{"__nnmusl_init_dso", json{
+                {"occurrences", std::move(focus_occurrences)},
+                {"eligible_provider_candidates", std::move(focus_candidates)},
+                {"result", analysis::provider_resolution_status_name(lookup.status)},
+                {"search_complete", lookup.completeness != analysis::ModuleSetCompleteness::Incomplete},
+                {"completeness", analysis::module_set_completeness_name(lookup.completeness)},
+                {"completeness_basis", analysis::module_set_completeness_basis_name(lookup.completeness_basis)},
+                {"provider", std::move(provider)},
+                {"selected_candidate", lookup.selected_candidate
+                                             ? json(lookup.selected_candidate.value()) : json(nullptr)},
+                {"provider_guest_code_entered", result.provider_guest_code_entered},
+                {"host_handler_used", host_handler_used}}}};
+        }();
         process = json{{"primary_module", result.process->primary_module},
                        {"layout_mode", result.process->layout_mode},
                        {"provider_search_complete", result.process->provider_search_complete},
-                       {"modules", std::move(modules)}, {"bindings", std::move(bindings)}};
+                       {"module_set", json{{"source", result.process->source},
+                                            {"completeness", analysis::module_set_completeness_name(
+                                                                  result.process->completeness)},
+                                            {"completeness_basis", analysis::module_set_completeness_basis_name(
+                                                                  result.process->completeness_basis)},
+                                            {"coherence", analysis::module_set_coherence_name(
+                                                                  result.process->coherence)},
+                                            {"coherence_basis", result.process->coherence_basis},
+                                            {"module_count", result.process->module_count},
+                                            {"executable_module_count", result.process->executable_module_count},
+                                            {"relocations_planned", result.process->relocations_planned},
+                                            {"transactional_relocation_success",
+                                             result.process->transactional_relocation_success},
+                                            {"ignored_entries", result.process->ignored_module_entries}}},
+                       {"modules", std::move(modules)}, {"bindings", std::move(bindings)},
+                       {"focus_symbols", std::move(focus)}};
     }
     json value{{"schema_version", ExecutionSessionResult::schema_version},
                 {"module", json{{"logical_name", result.identity.module},
@@ -1850,6 +1961,7 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                     {"ir_operations", result.ir_operations},
                                     {"guest_blocks", result.guest_blocks},
                                     {"maximum_call_depth", result.maximum_call_depth},
+                                    {"provider_guest_code_entered", result.provider_guest_code_entered},
                                     {"diagnostic", result.diagnostic}}},
                 {"budgets", json{{"max_ir_operations", result.options.budgets.max_ir_operations},
                                   {"max_function_transitions", result.options.budgets.max_function_transitions},

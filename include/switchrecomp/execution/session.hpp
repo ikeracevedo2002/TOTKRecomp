@@ -234,7 +234,7 @@ struct RuntimeExecutionSummary
 
 struct ExecutionSessionResult
 {
-    static constexpr std::uint32_t schema_version = 3U;
+    static constexpr std::uint32_t schema_version = 4U;
 
     analysis::ModuleIdentity identity;
     EntrySelection entry;
@@ -261,6 +261,7 @@ struct ExecutionSessionResult
     std::string current_function_module;
     std::string stop_module;
     std::optional<analysis::ProcessImageSummary> process;
+    bool provider_guest_code_entered = false;
     std::vector<memory::GuestAddress> executed_functions;
     std::vector<std::string> executed_function_modules;
     std::size_t direct_calls = 0U;

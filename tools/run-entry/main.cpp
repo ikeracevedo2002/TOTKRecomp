@@ -1,5 +1,7 @@
 #include "switchrecomp/execution/session.hpp"
+#include "switchrecomp/analysis/module_set.hpp"
 #include "switchrecomp/analysis/process_image.hpp"
+#include "switchrecomp/target/manifest.hpp"
 #include "switchrecomp/version.hpp"
 
 #include <charconv>
@@ -41,13 +43,14 @@ enum class ExitCode : int
     return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size();
 }
 
-[[nodiscard]] bool read_file(const std::filesystem::path& path, std::vector<std::byte>& bytes)
+[[nodiscard]] bool read_file(const std::filesystem::path& path, std::size_t max_size,
+                             std::vector<std::byte>& bytes)
 {
     std::ifstream input(path, std::ios::binary);
     if (!input) return false;
     input.seekg(0, std::ios::end);
     const auto end = input.tellg();
-    if (end < 0) return false;
+    if (end < 0 || static_cast<std::uint64_t>(end) > max_size) return false;
     input.seekg(0, std::ios::beg);
     bytes.resize(static_cast<std::size_t>(end));
     if (!bytes.empty())
@@ -56,6 +59,48 @@ enum class ExitCode : int
         return input.good() || input.eof();
     }
     return true;
+}
+
+[[nodiscard]] Result<void> apply_target_manifest(
+    const nlohmann::json& root, analysis::ModuleSetIngestionOptions& options)
+{
+    if (!root.contains("target_manifest") || !root.at("target_manifest").is_string())
+        return Result<void>::success();
+    std::vector<std::byte> bytes;
+    if (!read_file(root.at("target_manifest").get<std::string>(), 1024U * 1024U, bytes))
+    {
+        return Result<void>::failure(make_error(
+            ErrorCode::ModuleManifestMismatch, "target manifest could not be read"));
+    }
+    const auto manifest = target::parse_manifest(std::string_view(
+        reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+    if (!manifest) return Result<void>::failure(manifest.error());
+    if (manifest.value().support_status == target::SupportStatus::Template)
+    {
+        if (options.completeness == analysis::ModuleSetCompleteness::ManifestVerifiedComplete)
+            return Result<void>::failure(make_error(
+                ErrorCode::ModuleManifestMismatch,
+                "a template target manifest cannot establish manifest-verified completeness"));
+        return Result<void>::success();
+    }
+    if (manifest.value().support_status == target::SupportStatus::Unsupported)
+    {
+        return Result<void>::failure(make_error(
+            ErrorCode::ModuleManifestMismatch, "target manifest marks this target unsupported"));
+    }
+    options.expected_logical_names.clear();
+    options.expected_modules.clear();
+    for (const auto& module : manifest.value().modules)
+    {
+        options.expected_logical_names.push_back(module.name);
+        options.expected_modules.push_back(analysis::ModuleSetIngestionOptions::ExpectedModule{
+            module.name, module.sha256, module.build_id, module.expected_size});
+    }
+    options.completeness = analysis::ModuleSetCompleteness::ManifestVerifiedComplete;
+    options.completeness_basis = analysis::ModuleSetCompletenessBasis::TargetManifestMatch;
+    options.coherence = analysis::ModuleSetCoherence::Verified;
+    options.coherence_basis = "target_manifest_identity_match";
+    return Result<void>::success();
 }
 
 void help(std::ostream& output)
@@ -71,6 +116,7 @@ void help(std::ostream& output)
               "  --module-base ADDR             Analysis-selected guest base.\n"
               "  --module NAME=PATH             Add a process module (repeatable).\n"
               "  --local-config PATH             Read a local-only multi-module config.\n"
+              "  --module-directory PATH        Scan a prepared non-recursive module directory.\n"
               "  --module-base-for NAME=ADDR    Set one process module analysis base.\n"
               "  --entry KIND                   dt-init, dt-fini, text-start, process.\n"
               "  --entry-address ADDR           Unverified analyst address.\n"
@@ -133,6 +179,16 @@ int main(int argc, char** argv)
     std::map<std::string, std::uint64_t> configured_bases;
     std::string configured_primary = "main";
     bool provider_search_complete = false;
+    analysis::ModuleSetCompleteness module_set_completeness =
+        analysis::ModuleSetCompleteness::Incomplete;
+    analysis::ModuleSetCompletenessBasis module_set_completeness_basis =
+        analysis::ModuleSetCompletenessBasis::LegacyConfigFalse;
+    analysis::ModuleSetCoherence module_set_coherence = analysis::ModuleSetCoherence::Unverified;
+    std::string module_set_coherence_basis = "unknown";
+    std::string module_set_source = "explicit";
+    std::vector<std::string> expected_module_names;
+    std::vector<analysis::ModuleSetIngestionOptions::ExpectedModule> expected_modules;
+    std::filesystem::path module_directory;
     analysis::PreparedModuleOptions load_options;
     execution::ExecutionSessionOptions execution_options;
     analysis::FunctionMapOptions function_options;
@@ -165,6 +221,11 @@ int main(int argc, char** argv)
         if (take_value(index, argc, argv, "--local-config", value))
         {
             local_config_path = value;
+            continue;
+        }
+        if (take_value(index, argc, argv, "--module-directory", value))
+        {
+            module_directory = value;
             continue;
         }
         if (take_value(index, argc, argv, "--module", value))
@@ -293,7 +354,7 @@ int main(int argc, char** argv)
     if (!local_config_path.empty())
     {
         std::vector<std::byte> config_bytes;
-        if (!read_file(local_config_path, config_bytes))
+        if (!read_file(local_config_path, 4U * 1024U * 1024U, config_bytes))
         {
             std::cerr << "unable to read local config\n";
             return static_cast<int>(ExitCode::InfrastructureFailure);
@@ -302,12 +363,25 @@ int main(int argc, char** argv)
         {
             const auto root = nlohmann::json::parse(
                 std::string(reinterpret_cast<const char*>(config_bytes.data()), config_bytes.size()));
-            if (!root.contains("modules") || !root.at("modules").is_object())
+            const auto module_set = root.contains("module_set") && root.at("module_set").is_object()
+                                        ? root.at("module_set") : nlohmann::json::object();
+            const bool directory_source =
+                (module_set.contains("source") && module_set.at("source").is_string() &&
+                 module_set.at("source").get<std::string>() == "directory") ||
+                (module_set.contains("directory") && module_set.at("directory").is_string());
+            if (module_set.contains("directory") && module_set.at("directory").is_string())
+                module_directory = module_set.at("directory").get<std::string>();
+            const auto& module_object = module_set.contains("modules") &&
+                                                module_set.at("modules").is_object()
+                                            ? module_set.at("modules")
+                                            : root.value("modules", nlohmann::json::object());
+            if (!directory_source && !module_object.is_object())
             {
                 std::cerr << "local config modules must be an object\n";
                 return static_cast<int>(ExitCode::InvalidArguments);
             }
-            for (const auto& [name, path] : root.at("modules").items())
+            if (!directory_source)
+            for (const auto& [name, path] : module_object.items())
             {
                 if (!path.is_string())
                 {
@@ -320,14 +394,26 @@ int main(int argc, char** argv)
             {
                 configured_primary = root.at("primary_module").get<std::string>();
             }
+            if (module_set.contains("primary_module") && module_set.at("primary_module").is_string())
+                configured_primary = module_set.at("primary_module").get<std::string>();
             if (root.contains("provider_search_complete") &&
                 root.at("provider_search_complete").is_boolean())
             {
                 provider_search_complete = root.at("provider_search_complete").get<bool>();
+                if (provider_search_complete)
+                {
+                    module_set_completeness = analysis::ModuleSetCompleteness::DeclaredComplete;
+                    module_set_completeness_basis =
+                        analysis::ModuleSetCompletenessBasis::ExplicitLocalAssertion;
+                }
             }
-            if (root.contains("module_bases") && root.at("module_bases").is_object())
+            const auto& base_object = module_set.contains("module_bases") &&
+                                              module_set.at("module_bases").is_object()
+                                          ? module_set.at("module_bases")
+                                          : root.value("module_bases", nlohmann::json::object());
+            if (base_object.is_object())
             {
-                for (const auto& [name, base] : root.at("module_bases").items())
+                for (const auto& [name, base] : base_object.items())
                 {
                     std::uint64_t parsed = 0U;
                     if (base.is_number_unsigned()) parsed = base.get<std::uint64_t>();
@@ -344,6 +430,107 @@ int main(int argc, char** argv)
                     configured_bases[name] = parsed;
                 }
             }
+            if (module_set.is_object())
+            {
+                if (module_set.contains("source") && module_set.at("source").is_string())
+                {
+                    module_set_source = module_set.at("source").get<std::string>();
+                }
+                // The directory path is captured before module entries are parsed.
+                if (module_set.contains("completeness") && module_set.at("completeness").is_string())
+                {
+                    const auto completeness = module_set.at("completeness").get<std::string>();
+                    if (completeness == "declared_complete")
+                        module_set_completeness = analysis::ModuleSetCompleteness::DeclaredComplete;
+                    else if (completeness == "manifest_verified_complete")
+                        module_set_completeness = analysis::ModuleSetCompleteness::ManifestVerifiedComplete;
+                    else if (completeness == "incomplete")
+                        module_set_completeness = analysis::ModuleSetCompleteness::Incomplete;
+                }
+                if (module_set.contains("basis") && module_set.at("basis").is_string())
+                {
+                    const auto basis = module_set.at("basis").get<std::string>();
+                    if (basis == "explicit_inventory")
+                        module_set_completeness_basis = analysis::ModuleSetCompletenessBasis::ExplicitInventory;
+                    else if (basis == "explicit_local_assertion")
+                        module_set_completeness_basis = analysis::ModuleSetCompletenessBasis::ExplicitLocalAssertion;
+                    else if (basis == "local_manifest_match")
+                        module_set_completeness_basis = analysis::ModuleSetCompletenessBasis::LocalManifestMatch;
+                    else if (basis == "target_manifest_match")
+                        module_set_completeness_basis = analysis::ModuleSetCompletenessBasis::TargetManifestMatch;
+                    else if (basis == "directory_scan_only")
+                        module_set_completeness_basis = analysis::ModuleSetCompletenessBasis::DirectoryScanOnly;
+                }
+                if (module_set_completeness != analysis::ModuleSetCompleteness::Incomplete &&
+                    module_set_completeness_basis == analysis::ModuleSetCompletenessBasis::LegacyConfigFalse)
+                    module_set_completeness_basis = analysis::ModuleSetCompletenessBasis::ExplicitInventory;
+                if (module_set.contains("expected_modules") && module_set.at("expected_modules").is_array())
+                {
+                    for (const auto& expected : module_set.at("expected_modules"))
+                    {
+                        if (expected.is_string())
+                            expected_module_names.push_back(expected.get<std::string>());
+                        else if (expected.is_object() && expected.contains("name") &&
+                                 expected.contains("sha256") && expected.contains("build_id") &&
+                                 expected.at("name").is_string() && expected.at("sha256").is_string() &&
+                                 expected.at("build_id").is_string())
+                        {
+                            std::optional<std::uint64_t> expected_size;
+                            if (expected.contains("expected_size"))
+                            {
+                                if (!expected.at("expected_size").is_number_unsigned())
+                                {
+                                    std::cerr << "invalid expected module size\n";
+                                    return static_cast<int>(ExitCode::InvalidArguments);
+                                }
+                                expected_size = expected.at("expected_size").get<std::uint64_t>();
+                            }
+                            expected_modules.push_back(
+                                analysis::ModuleSetIngestionOptions::ExpectedModule{
+                                    expected.at("name").get<std::string>(),
+                                    expected.at("sha256").get<std::string>(),
+                                    expected.at("build_id").get<std::string>(), expected_size});
+                            expected_module_names.push_back(expected.at("name").get<std::string>());
+                        }
+                        else
+                        {
+                            std::cerr << "invalid expected module identity\n";
+                            return static_cast<int>(ExitCode::InvalidArguments);
+                        }
+                    }
+                }
+                if (module_set.contains("coherence") && module_set.at("coherence").is_string())
+                {
+                    const auto coherence = module_set.at("coherence").get<std::string>();
+                    if (coherence == "verified") module_set_coherence = analysis::ModuleSetCoherence::Verified;
+                    else if (coherence == "partially_verified") module_set_coherence = analysis::ModuleSetCoherence::PartiallyVerified;
+                    else if (coherence == "conflicting") module_set_coherence = analysis::ModuleSetCoherence::Conflicting;
+                }
+                if (module_set.contains("coherence_basis") && module_set.at("coherence_basis").is_string())
+                    module_set_coherence_basis = module_set.at("coherence_basis").get<std::string>();
+            }
+            analysis::ModuleSetIngestionOptions manifest_options;
+            manifest_options.completeness = module_set_completeness;
+            const auto manifest = apply_target_manifest(root, manifest_options);
+            if (!manifest)
+            {
+                print_error(manifest.error());
+                return static_cast<int>(ExitCode::InfrastructureFailure);
+            }
+            if (root.contains("target_manifest") && root.at("target_manifest").is_string())
+            {
+                module_set_completeness = manifest_options.completeness;
+                module_set_completeness_basis = manifest_options.completeness_basis;
+                module_set_coherence = manifest_options.coherence;
+                module_set_coherence_basis = manifest_options.coherence_basis;
+                expected_module_names = manifest_options.expected_logical_names;
+                expected_modules = manifest_options.expected_modules;
+            }
+            if (directory_source && module_directory.empty())
+            {
+                std::cerr << "module_set directory source requires a directory\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
         }
         catch (const std::exception& error)
         {
@@ -352,14 +539,15 @@ int main(int argc, char** argv)
         }
     }
 
-    const bool process_mode = !configured_modules.empty();
+    const bool process_mode = !configured_modules.empty() || !module_directory.empty();
     if (process_mode)
     {
-        if (local_config_path.empty() && configured_primary == "main" && module_name != "main")
+        if (local_config_path.empty() && configured_primary == "main" && module_name != "main" &&
+            module_directory.empty())
         {
             configured_primary = module_name;
         }
-        if (!input_path.empty())
+        if (!input_path.empty() && module_directory.empty())
         {
             bool has_main = false;
             for (const auto& module : configured_modules) has_main |= module.first == configured_primary;
@@ -378,34 +566,74 @@ int main(int argc, char** argv)
         if (configured_primary.empty()) configured_primary = "main";
         bool has_primary = false;
         for (const auto& module : configured_modules) has_primary |= module.first == configured_primary;
-        if (!has_primary)
+        if (!has_primary && module_directory.empty())
         {
             std::cerr << "primary process module is not configured\n";
             return static_cast<int>(ExitCode::InvalidArguments);
         }
 
-        std::vector<std::vector<std::byte>> module_bytes;
-        module_bytes.reserve(configured_modules.size());
-        std::vector<analysis::ProcessModuleInput> module_inputs;
-        module_inputs.reserve(configured_modules.size());
-        for (const auto& [name, path] : configured_modules)
+        analysis::ModuleSetInventory inventory;
+        if (!module_directory.empty())
         {
-            module_bytes.emplace_back();
-            if (!read_file(path, module_bytes.back()))
+            analysis::DirectoryInventoryOptions inventory_options;
+            inventory_options.source = "directory";
+            inventory_options.completeness = module_set_completeness;
+            inventory_options.completeness_basis = module_set_completeness_basis;
+            inventory_options.coherence = module_set_coherence;
+            inventory_options.coherence_basis = module_set_coherence_basis;
+            inventory_options.expected_logical_names = expected_module_names;
+            inventory_options.expected_modules = expected_modules;
+            inventory_options.explicit_bases = configured_bases;
+            if (module_set_completeness == analysis::ModuleSetCompleteness::Incomplete &&
+                module_set_completeness_basis == analysis::ModuleSetCompletenessBasis::LegacyConfigFalse)
+                inventory_options.completeness_basis = analysis::ModuleSetCompletenessBasis::DirectoryScanOnly;
+            const auto scanned = analysis::scan_prepared_module_directory(module_directory, inventory_options);
+            if (!scanned) { print_error(scanned.error()); return static_cast<int>(ExitCode::InfrastructureFailure); }
+            inventory = std::move(scanned).value();
+            configured_modules.clear();
+            for (const auto& module : inventory.modules)
+                configured_modules.emplace_back(module.logical_name, std::filesystem::path{});
+        }
+        else
+        {
+            std::vector<analysis::ModuleSetFileInput> file_inputs;
+            file_inputs.reserve(configured_modules.size());
+            for (const auto& [name, path] : configured_modules)
             {
-                std::cerr << "unable to read process module " << name << '\n';
-                return static_cast<int>(ExitCode::InfrastructureFailure);
+                const auto found = configured_bases.find(name);
+                file_inputs.push_back(analysis::ModuleSetFileInput{
+                    name, path, found == configured_bases.end() ? std::nullopt
+                                                                 : std::optional<memory::GuestAddress>(found->second)});
             }
-            std::optional<std::uint64_t> explicit_base;
-            if (const auto found = configured_bases.find(name); found != configured_bases.end())
-            {
-                explicit_base = found->second;
-            }
-            module_inputs.push_back(analysis::ProcessModuleInput{name, module_bytes.back(), explicit_base});
+            analysis::ModuleSetIngestionOptions inventory_options;
+            inventory_options.source = module_set_source;
+            inventory_options.completeness = module_set_completeness;
+            inventory_options.completeness_basis = module_set_completeness_basis;
+            inventory_options.coherence = module_set_coherence;
+            inventory_options.coherence_basis = module_set_coherence_basis;
+            inventory_options.expected_logical_names = expected_module_names;
+            inventory_options.expected_modules = expected_modules;
+            const auto loaded = analysis::ingest_module_files(file_inputs, inventory_options);
+            if (!loaded) { print_error(loaded.error()); return static_cast<int>(ExitCode::InfrastructureFailure); }
+            inventory = std::move(loaded).value();
+        }
+        std::vector<analysis::ProcessModuleInput> module_inputs = inventory.process_inputs();
+        bool inventory_has_primary = false;
+        for (const auto& module : inventory.modules) inventory_has_primary |= module.logical_name == configured_primary;
+        if (!inventory_has_primary)
+        {
+            std::cerr << "primary process module is not present in the ingested module set\n";
+            return static_cast<int>(ExitCode::InvalidArguments);
         }
         analysis::ProcessImageOptions process_options;
         process_options.primary_module = configured_primary;
         process_options.provider_search_complete = provider_search_complete;
+        process_options.module_set_completeness = inventory.completeness;
+        process_options.module_set_completeness_basis = inventory.completeness_basis;
+        process_options.module_set_coherence = inventory.coherence;
+        process_options.module_set_coherence_basis = inventory.coherence_basis;
+        process_options.module_set_source = inventory.source;
+        process_options.ignored_module_entries = inventory.ignored_entries;
         process_options.module_options = load_options;
         process_options.module_options.module_base = 0U;
         process_options.module_options.module_name = "";
@@ -516,7 +744,7 @@ int main(int argc, char** argv)
     }
     if (analyst_address && entry_name == "dt-init") entry_name = "analyst";
     std::vector<std::byte> bytes;
-    if (!read_file(input_path, bytes))
+    if (!read_file(input_path, 512U * 1024U * 1024U, bytes))
     {
         std::cerr << "unable to read input module\n";
         return static_cast<int>(ExitCode::InfrastructureFailure);
