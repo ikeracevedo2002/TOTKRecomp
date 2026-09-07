@@ -30,11 +30,10 @@ Milestones 15 and 16 established the following facts, which were preserved:
 
 * branch: `milestone-17-post-umulh-provider-frontier`
 * exact base SHA: `297768205e44c617b4eaf3f714ef30d2e97d733c`
-* exact final head SHA: recorded in the final Git handoff after the final
-  documentation commit
-* commits: M17 implementation, diagnostic execution, tests, and evidence
-  documentation
-* PR: recorded after branch push
+* exact implementation head SHA: `a9c79f25496a1cbe3159062c11f8914ea4f61ac2`
+* commits: `a9c79f2` — M17 implementation, diagnostic execution, tests, and
+  evidence documentation; follow-up commits record PR/CI metadata
+* PR: [#22](https://github.com/ikeracevedo2002/TOTKRecomp/pull/22)
 
 ### Baseline and executable set
 
@@ -184,9 +183,12 @@ bytes.
 * ASan/UBSan: `211/211` passed in the existing `build-asan` configuration
 * TSan: `211/211` passed in the existing `build-tsan` configuration
 * local compiler: AppleClang via `/usr/bin/c++`; no local GCC claim
-* GCC CI: required by `.github/workflows/ci.yml`; result recorded after PR CI
-* LLVM 18 CI: required by `.github/workflows/ci.yml`; result recorded after PR CI
-* MSVC CI: required by `.github/workflows/ci.yml`; result recorded after PR CI
+* GCC CI: pending at this documentation snapshot; required by
+  `.github/workflows/ci.yml`
+* LLVM 18 CI: pending at this documentation snapshot; required by
+  `.github/workflows/ci.yml`
+* MSVC CI: pending at this documentation snapshot; required by
+  `.github/workflows/ci.yml`
 
 ## Dependencies
 
