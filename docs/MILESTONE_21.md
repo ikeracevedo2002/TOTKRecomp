@@ -2,9 +2,9 @@
 
 ## Status and Git
 
-M21 is complete locally and is submitted as stacked PR #26 against the still
-open M20 branch. The branch was created directly from the exact M20 head; no
-rebase or lineage change was performed.
+M21 is complete locally and in the final-head CI run for stacked PR #26 against
+the still open M20 branch. The branch was created directly from the exact M20
+head; no rebase or lineage change was performed.
 
 | Field | Value |
 | --- | --- |
@@ -154,9 +154,12 @@ Local validation:
 | AppleClang standard build | `245/245` passed |
 | AppleClang ASan/UBSan | `245/245` passed |
 | AppleClang TSan | `245/245` passed |
-| GCC | CI check pending at this documentation revision |
-| LLVM 18.1.3 | CI check pending; not installed locally |
-| MSVC | CI check pending; not available locally |
+| GCC | passed in PR #26 run `34244244437` |
+| LLVM 18.1.3 | passed in PR #26 run `34244244437` |
+| MSVC | passed in PR #26 run `34244244437` |
+
+The same PR run also passed the Linux GCC ASan/UBSan and TSan jobs. The local
+AppleClang sanitizer runs independently passed the same 245-test suite.
 
 New dependencies: `0`. No proprietary game files, private reports, private
 configuration, or machine-specific absolute paths were committed. Local
