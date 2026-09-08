@@ -242,6 +242,7 @@ struct ExecutedGuestInstruction
     std::string module;
     std::string mnemonic;
     std::string instruction_id;
+    std::uint32_t opcode = 0U;
     bool executed = false;
     std::optional<memory::GuestAddress> next_guest_pc;
     std::string destination_register;
@@ -259,11 +260,31 @@ struct ExecutedGuestInstruction
     std::size_t call_depth = 0U;
 };
 
+struct SmulhFrontierEvidence
+{
+    bool reached = false;
+    std::string module;
+    memory::GuestAddress pc = 0U;
+    std::uint32_t opcode = 0U;
+    std::string instruction;
+    std::string destination_register;
+    std::string lhs_register;
+    std::string rhs_register;
+    std::uint64_t lhs_raw = 0U;
+    std::int64_t lhs_signed = 0;
+    std::uint64_t rhs_raw = 0U;
+    std::int64_t rhs_signed = 0;
+    std::uint64_t expected_high64 = 0U;
+    std::uint64_t actual_high64 = 0U;
+    bool match = false;
+    std::optional<memory::GuestAddress> next_guest_pc;
+};
+
 struct ExecutionSessionResult
 {
-    // M20 adds typed function-entry certification and relocation-slot
-    // provenance to deterministic execution reports.
-    static constexpr std::uint32_t schema_version = 7U;
+    // M21 adds a typed signed multiply-high frontier record to the
+    // deterministic execution report.
+    static constexpr std::uint32_t schema_version = 8U;
 
     analysis::ModuleIdentity identity;
     EntrySelection entry;
@@ -306,12 +327,14 @@ struct ExecutionSessionResult
     std::size_t guest_blocks = 0U;
     std::size_t guest_instruction_count = 0U;
     std::size_t instructions_after_former_blocker = 0U;
+    std::size_t instructions_after_smulh = 0U;
     std::size_t maximum_call_depth = 0U;
     std::vector<CallStackFrame> call_stack;
     std::vector<memory::GuestAddress> observation_targets;
     std::vector<memory::GuestAddress> instruction_observation_targets;
     std::vector<ExecutedGuestInstruction> executed_guest_instructions;
     std::vector<ExecutedGuestInstruction> instruction_evidence;
+    SmulhFrontierEvidence smulh_frontier;
     std::vector<analysis::IndirectTargetAssessment> indirect_target_discovery;
     std::vector<ExecutionEvent> events;
     RuntimeExecutionSummary runtime;

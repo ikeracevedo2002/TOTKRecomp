@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <iomanip>
 #include <limits>
 #include <nlohmann/json.hpp>
@@ -46,6 +47,23 @@ using json = nlohmann::json;
                        static_cast<std::uint64_t>(static_cast<std::uint32_t>(cross_high));
     return left_high * right_high + (cross_low >> 32U) + (cross_high >> 32U) +
            (carry >> 32U);
+}
+
+[[nodiscard]] std::uint64_t independent_smulh_oracle(std::uint64_t left,
+                                                     std::uint64_t right) noexcept
+{
+    auto high = independent_umulh_oracle(left, right);
+    constexpr auto sign_bit = std::uint64_t{1} << 63U;
+    if ((left & sign_bit) != 0U) high -= right;
+    if ((right & sign_bit) != 0U) high -= left;
+    return high;
+}
+
+[[nodiscard]] std::string hex_opcode(std::uint32_t opcode)
+{
+    std::ostringstream output;
+    output << "0x" << std::hex << std::setw(8) << std::setfill('0') << opcode;
+    return output.str();
 }
 
 [[nodiscard]] std::string architectural_register_name(const aarch64::Register& reg)
@@ -1043,35 +1061,63 @@ void ExecutionSession::prepare_observation_targets()
 {
     observation_targets_.clear();
     instruction_observation_targets_.clear();
-    if (process_image_ == nullptr) return;
-
-    // The historical observation_targets field remains the UMULH-only set.
-    // M19's richer instruction observations are derived from the same parsed
-    // CFG and use a separate additive target list for move-wide instructions.
-    for (const auto& binding : process_image_->bindings())
+    if (process_image_ != nullptr)
     {
-        if (binding.symbol != "__nnmusl_init_dso" || !binding.provider_address || !binding.applied)
-            continue;
-        const auto* record = function_record(binding.provider_address.value());
-        if (record == nullptr || !record->cfg) continue;
-        for (const auto& [unused, block] : record->cfg->blocks)
+        // The historical observation_targets field remains the UMULH-only set.
+        // M19's richer instruction observations are derived from the same parsed
+        // CFG and use a separate additive target list for move-wide instructions.
+        for (const auto& binding : process_image_->bindings())
         {
-            (void)unused;
-            for (const auto& instruction : block.instructions)
+            if (binding.symbol != "__nnmusl_init_dso" || !binding.provider_address || !binding.applied)
+                continue;
+            const auto* record = function_record(binding.provider_address.value());
+            if (record == nullptr || !record->cfg) continue;
+            for (const auto& [unused, block] : record->cfg->blocks)
             {
-                if (instruction.id == aarch64::InstructionId::Umulh)
+                (void)unused;
+                for (const auto& instruction : block.instructions)
                 {
-                    observation_targets_.push_back(instruction.address);
-                    instruction_observation_targets_.push_back(instruction.address);
-                }
-                else if (instruction.id == aarch64::InstructionId::Movz ||
-                         instruction.id == aarch64::InstructionId::Movn ||
-                         instruction.id == aarch64::InstructionId::Movk)
-                {
-                    instruction_observation_targets_.push_back(instruction.address);
+                    if (instruction.id == aarch64::InstructionId::Umulh)
+                    {
+                        observation_targets_.push_back(instruction.address);
+                        instruction_observation_targets_.push_back(instruction.address);
+                    }
+                    else if (instruction.id == aarch64::InstructionId::Movz ||
+                             instruction.id == aarch64::InstructionId::Movn ||
+                             instruction.id == aarch64::InstructionId::Movk)
+                    {
+                        instruction_observation_targets_.push_back(instruction.address);
+                    }
                 }
             }
         }
+    }
+
+    // SMULH observations are collected from finalized guest ownership rather
+    // than from a game-specific address. This keeps the typed frontier useful
+    // for any process image while retaining the historical UMULH target set.
+    const auto collect_smulh = [&](const analysis::FinalizedFunctionMap& map) {
+        for (const auto& function : map.functions())
+        {
+            if (!function.cfg) continue;
+            for (const auto& [unused, block] : function.cfg->blocks)
+            {
+                (void)unused;
+                for (const auto& instruction : block.instructions)
+                {
+                    if (instruction.id == aarch64::InstructionId::Smulh)
+                        instruction_observation_targets_.push_back(instruction.address);
+                }
+            }
+        }
+    };
+    if (process_function_map_ != nullptr)
+    {
+        for (const auto& map : process_function_map_->maps()) collect_smulh(map);
+    }
+    else if (function_map_ != nullptr)
+    {
+        collect_smulh(*function_map_);
     }
     std::sort(observation_targets_.begin(), observation_targets_.end());
     observation_targets_.erase(
@@ -1081,8 +1127,6 @@ void ExecutionSession::prepare_observation_targets()
     instruction_observation_targets_.erase(
         std::unique(instruction_observation_targets_.begin(), instruction_observation_targets_.end()),
         instruction_observation_targets_.end());
-    if (instruction_observation_targets_.size() > 32U)
-        instruction_observation_targets_.resize(32U);
 }
 
 std::optional<ExecutedGuestInstruction> ExecutionSession::describe_observed_instruction(
@@ -1131,7 +1175,8 @@ std::optional<ExecutedGuestInstruction> ExecutionSession::describe_observed_inst
             (instruction.id != aarch64::InstructionId::Movz &&
              instruction.id != aarch64::InstructionId::Movn &&
              instruction.id != aarch64::InstructionId::Movk &&
-             instruction.id != aarch64::InstructionId::Umulh))
+             instruction.id != aarch64::InstructionId::Umulh &&
+             instruction.id != aarch64::InstructionId::Smulh))
             continue;
         ExecutedGuestInstruction result;
         result.guest_pc = guest_pc;
@@ -1140,6 +1185,7 @@ std::optional<ExecutedGuestInstruction> ExecutionSession::describe_observed_inst
                               ? std::string(aarch64::instruction_id_name(instruction.id))
                               : instruction.disassembly;
         result.instruction_id = std::string(aarch64::instruction_id_name(instruction.id));
+        result.opcode = instruction.opcode;
         result.executed = true;
         result.call_depth = call_depth;
         if (!instruction.operands.empty() &&
@@ -1167,7 +1213,9 @@ std::optional<ExecutedGuestInstruction> ExecutionSession::describe_observed_inst
             const auto next = checked_add_u64(guest_pc, 4U);
             if (next) result.next_guest_pc = next.value();
         }
-        if (instruction.id == aarch64::InstructionId::Umulh && instruction.operands.size() >= 3U &&
+        if ((instruction.id == aarch64::InstructionId::Umulh ||
+             instruction.id == aarch64::InstructionId::Smulh) &&
+            instruction.operands.size() >= 3U &&
             instruction.operands[1].kind == aarch64::OperandKind::Register &&
             instruction.operands[2].kind == aarch64::OperandKind::Register)
         {
@@ -1179,9 +1227,11 @@ std::optional<ExecutedGuestInstruction> ExecutionSession::describe_observed_inst
             result.pre_registers.push_back(
                 ExecutedGuestInstruction::RegisterValue{architectural_register_name(right),
                                                         architectural_register_value(observation.pre_state, right)});
-            const auto expected = independent_umulh_oracle(
-                architectural_register_value(observation.pre_state, left),
-                architectural_register_value(observation.pre_state, right));
+            const auto left_value = architectural_register_value(observation.pre_state, left);
+            const auto right_value = architectural_register_value(observation.pre_state, right);
+            const auto expected = instruction.id == aarch64::InstructionId::Smulh
+                                      ? independent_smulh_oracle(left_value, right_value)
+                                      : independent_umulh_oracle(left_value, right_value);
             result.expected_high64 = expected;
             if (!instruction.operands.empty() &&
                 instruction.operands.front().kind == aarch64::OperandKind::Register)
@@ -2096,6 +2146,8 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     }
     bool former_blocker_seen = false;
     std::optional<memory::GuestAddress> former_blocker_pc;
+    bool smulh_seen = false;
+    std::optional<memory::GuestAddress> smulh_pc;
     while (running_)
     {
         const auto function_result = lift_for_execution(current_.function_entry, result);
@@ -2138,8 +2190,32 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
                                                                     current_.call_depth))
             {
                 result.instruction_evidence.push_back(observed.value());
-                if (observed->instruction_id == "umulh")
+                if (observed->instruction_id == "umulh" || observed->instruction_id == "smulh")
                     result.executed_guest_instructions.push_back(observed.value());
+                if (observed->instruction_id == "smulh" && !result.smulh_frontier.reached &&
+                    observed->pre_registers.size() >= 2U && observed->post_registers.size() >= 1U &&
+                    observed->expected_high64 && observed->actual_high64)
+                {
+                    const auto& lhs = observed->pre_registers[0];
+                    const auto& rhs = observed->pre_registers[1];
+                    result.smulh_frontier.reached = true;
+                    result.smulh_frontier.module = observed->module;
+                    result.smulh_frontier.pc = observed->guest_pc;
+                    result.smulh_frontier.opcode = observed->opcode;
+                    result.smulh_frontier.instruction = observed->mnemonic;
+                    result.smulh_frontier.destination_register = observed->destination_register;
+                    result.smulh_frontier.lhs_register = lhs.name;
+                    result.smulh_frontier.rhs_register = rhs.name;
+                    result.smulh_frontier.lhs_raw = lhs.value;
+                    result.smulh_frontier.lhs_signed = std::bit_cast<std::int64_t>(lhs.value);
+                    result.smulh_frontier.rhs_raw = rhs.value;
+                    result.smulh_frontier.rhs_signed = std::bit_cast<std::int64_t>(rhs.value);
+                    result.smulh_frontier.expected_high64 = observed->expected_high64.value();
+                    result.smulh_frontier.actual_high64 = observed->actual_high64.value();
+                    result.smulh_frontier.match = observed->result_matches.value_or(false);
+                    result.smulh_frontier.next_guest_pc = observed->next_guest_pc;
+                    smulh_pc = observed->guest_pc;
+                }
                 if (observed->module == "sdk" && observed->instruction_id == "movz" &&
                     observed->destination_register == "w0")
                     former_blocker_pc = observed->guest_pc;
@@ -2154,6 +2230,13 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
             }
             if (former_blocker_seen)
                 ++result.instructions_after_former_blocker;
+            if (smulh_seen)
+                ++result.instructions_after_smulh;
+            if (smulh_pc && guest_pc == smulh_pc.value())
+            {
+                smulh_seen = true;
+                continue;
+            }
         }
         if (result.guest_blocks > options_.budgets.max_guest_blocks)
         {
@@ -2319,6 +2402,7 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
             {"module", instruction.module},
             {"mnemonic", instruction.mnemonic},
             {"instruction_id", instruction.instruction_id},
+            {"opcode", hex_opcode(instruction.opcode)},
             {"executed", instruction.executed},
             {"next_guest_pc", instruction.next_guest_pc
                                   ? json(hex_address(instruction.next_guest_pc.value()))
@@ -2633,6 +2717,7 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                     {"guest_instruction_count", result.guest_instruction_count},
                                     {"instructions_after_former_blocker",
                                      result.instructions_after_former_blocker},
+                                    {"instructions_after_smulh", result.instructions_after_smulh},
                                     {"maximum_call_depth", result.maximum_call_depth},
                                     {"provider_guest_code_entered", result.provider_guest_code_entered},
                                     {"runtime_fallbacks_invoked", result.runtime.imports_handled},
@@ -2646,6 +2731,25 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                     {"executed_guest_instructions",
                                      std::move(executed_guest_instructions)},
                                     {"instruction_evidence", std::move(instruction_evidence)},
+                                    {"smulh_frontier", json{
+                                         {"reached", result.smulh_frontier.reached},
+                                         {"module", result.smulh_frontier.module},
+                                         {"pc", hex_address(result.smulh_frontier.pc)},
+                                         {"opcode", hex_opcode(result.smulh_frontier.opcode)},
+                                         {"instruction", result.smulh_frontier.instruction},
+                                         {"destination_register", result.smulh_frontier.destination_register},
+                                         {"lhs_register", result.smulh_frontier.lhs_register},
+                                         {"lhs_raw", hex_address(result.smulh_frontier.lhs_raw)},
+                                         {"lhs_signed", result.smulh_frontier.lhs_signed},
+                                         {"rhs_register", result.smulh_frontier.rhs_register},
+                                         {"rhs_raw", hex_address(result.smulh_frontier.rhs_raw)},
+                                         {"rhs_signed", result.smulh_frontier.rhs_signed},
+                                         {"expected_high64", hex_address(result.smulh_frontier.expected_high64)},
+                                         {"actual_high64", hex_address(result.smulh_frontier.actual_high64)},
+                                         {"match", result.smulh_frontier.match},
+                                         {"next_guest_pc", result.smulh_frontier.next_guest_pc
+                                                               ? json(hex_address(result.smulh_frontier.next_guest_pc.value()))
+                                                               : json(nullptr)}}},
                                     {"indirect_target_discovery", std::move(indirect_target_discovery)},
                                     {"diagnostic", result.diagnostic}}},
                 {"budgets", json{{"max_ir_operations", result.options.budgets.max_ir_operations},
