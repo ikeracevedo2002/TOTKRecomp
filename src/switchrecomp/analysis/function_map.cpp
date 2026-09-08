@@ -653,6 +653,10 @@ bool function_owns_address(const FunctionRecord& function, GuestAddress address)
 
 bool is_boundary_worthy_function_seed(const FunctionSeed& seed) noexcept
 {
+    if (seed.source == FunctionDiscoverySource::ObservedIndirectTarget)
+    {
+        return true;
+    }
     if (seed.source == FunctionDiscoverySource::TextStartCandidate ||
         seed.source == FunctionDiscoverySource::Heuristic)
     {
@@ -680,6 +684,7 @@ std::string_view function_discovery_source_name(FunctionDiscoverySource source) 
     case FunctionDiscoverySource::AnalystSeed: return "analyst_seed";
     case FunctionDiscoverySource::ManualOverride: return "manual_override";
     case FunctionDiscoverySource::JumpTable: return "jump_table";
+    case FunctionDiscoverySource::ObservedIndirectTarget: return "observed_indirect_target";
     case FunctionDiscoverySource::Heuristic: return "heuristic";
     }
     return "unknown";

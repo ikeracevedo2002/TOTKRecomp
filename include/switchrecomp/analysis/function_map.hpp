@@ -25,6 +25,7 @@ enum class FunctionDiscoverySource : std::uint8_t
     AnalystSeed,
     ManualOverride,
     JumpTable,
+    ObservedIndirectTarget,
     Heuristic,
 };
 

@@ -2,6 +2,7 @@
 
 #include "switchrecomp/analysis/whole_module.hpp"
 #include "switchrecomp/analysis/process_image.hpp"
+#include "switchrecomp/analysis/indirect_target.hpp"
 #include "switchrecomp/common/result.hpp"
 #include "switchrecomp/interpreter/interpreter.hpp"
 #include "switchrecomp/runtime/execution.hpp"
@@ -248,7 +249,7 @@ struct ExecutedGuestInstruction
 
 struct ExecutionSessionResult
 {
-    static constexpr std::uint32_t schema_version = 5U;
+    static constexpr std::uint32_t schema_version = 6U;
 
     analysis::ModuleIdentity identity;
     EntrySelection entry;
@@ -272,6 +273,9 @@ struct ExecutionSessionResult
     std::optional<memory::GuestAddress> target;
     std::string target_register;
     std::string target_provenance;
+    std::optional<std::uint32_t> diagnostic_opcode;
+    std::string diagnostic_instruction_id;
+    std::string diagnostic_instruction;
     std::optional<ImportBoundary> import_boundary;
     std::string diagnostic;
     std::string current_function_module;
@@ -290,6 +294,7 @@ struct ExecutionSessionResult
     std::vector<CallStackFrame> call_stack;
     std::vector<memory::GuestAddress> observation_targets;
     std::vector<ExecutedGuestInstruction> executed_guest_instructions;
+    std::vector<analysis::IndirectTargetAssessment> indirect_target_discovery;
     std::vector<ExecutionEvent> events;
     RuntimeExecutionSummary runtime;
 };

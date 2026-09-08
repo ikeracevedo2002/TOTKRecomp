@@ -214,6 +214,7 @@ add_library(switchrecomp-analysis
     src/switchrecomp/analysis/cfg_analyzer.cpp
     src/switchrecomp/analysis/coverage.cpp
     src/switchrecomp/analysis/function_map.cpp
+    src/switchrecomp/analysis/indirect_target.cpp
     src/switchrecomp/analysis/module_set.cpp
     src/switchrecomp/analysis/process_image.cpp
 )
@@ -445,6 +446,7 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/milestone14_module_set_tests.cpp
         tests/milestone15_closure_tests.cpp
         tests/milestone16_umulh_tests.cpp
+        tests/milestone18_indirect_target_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE

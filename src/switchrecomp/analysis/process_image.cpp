@@ -13,6 +13,7 @@
 #include <limits>
 #include <new>
 #include <set>
+#include <sstream>
 #include <string_view>
 #include <utility>
 
@@ -23,6 +24,13 @@ namespace
 {
 
 using GuestAddress = memory::GuestAddress;
+
+[[nodiscard]] std::string hex_address(GuestAddress address)
+{
+    std::ostringstream output;
+    output << "0x" << std::hex << address;
+    return output.str();
+}
 
 struct StagedModule
 {
@@ -225,6 +233,27 @@ struct StagedModule
                 FunctionConfidence::Confirmed, std::nullopt,
                 symbol.name.empty() ? std::nullopt : std::optional<std::string>(symbol.name),
                 "defined dynamic function symbol"});
+        }
+        for (const auto& relocation : module.relocations)
+        {
+            const auto* symbol = module.symbols->at(relocation.symbol_index);
+            if (symbol == nullptr || !symbol->is_defined() ||
+                symbol->type != format::SymbolType::Function)
+            {
+                continue;
+            }
+            const auto address = symbol_address(*symbol, module.identity.guest_base);
+            if (!address) return Result<void>::failure(address.error());
+            const auto executable = memory.is_executable(address.value(), 4U);
+            if (!executable || !executable.value()) continue;
+            module.seeds.push_back(FunctionSeed{
+                address.value(), FunctionDiscoverySource::RelocationReference,
+                FunctionConfidence::High, std::nullopt,
+                symbol->name.empty() ? std::nullopt
+                                     : std::optional<std::string>(symbol->name),
+                "relocation-backed executable function pointer at " +
+                    hex_address(relocation.target_address) + ", " +
+                    std::string(format::aarch64_relocation_type_name(relocation.type))});
         }
     }
     module.seeds.insert(module.seeds.end(), options.seeds.begin(), options.seeds.end());

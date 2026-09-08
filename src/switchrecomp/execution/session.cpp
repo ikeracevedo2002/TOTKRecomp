@@ -1,5 +1,6 @@
 #include "switchrecomp/execution/session.hpp"
 
+#include "switchrecomp/aarch64/decoder.hpp"
 #include "switchrecomp/common/checked_arithmetic.hpp"
 
 #include <algorithm>
@@ -31,6 +32,122 @@ using json = nlohmann::json;
 [[nodiscard]] json range_json(const analysis::GuestAddressRange& range)
 {
     return json{{"base", hex_address(range.base)}, {"size", range.size}};
+}
+
+[[nodiscard]] json indirect_target_assessment_json(
+    const analysis::IndirectTargetAssessment& assessment)
+{
+    const auto& observed = assessment.observed;
+    const auto& validation = assessment.validation;
+    const auto& decision = assessment.decision;
+    json static_evidence = json::array();
+    for (const auto& item : assessment.static_evidence)
+    {
+        static_evidence.push_back(json{
+            {"source", analysis::function_discovery_source_name(item.source)},
+            {"confidence", analysis::function_confidence_name(item.confidence)},
+            {"detail", item.detail}});
+    }
+    json candidate_ranges = json::array();
+    for (const auto& range : validation.candidate_owned_code_ranges)
+        candidate_ranges.push_back(range_json(range));
+    json overlap_ranges = json::array();
+    for (const auto& range : validation.overlap_ranges)
+        overlap_ranges.push_back(range_json(range));
+    json direct_calls = json::array();
+    for (const auto target : validation.direct_call_targets)
+        direct_calls.push_back(hex_address(target));
+    json unresolved = json::array();
+    for (const auto& item : validation.unresolved_control_flow)
+    {
+        unresolved.push_back(json{{"pc", hex_address(item.address)},
+                                  {"kind", aarch64::control_flow_kind_name(item.kind)},
+                                  {"reason", item.reason}});
+    }
+    json first_instruction = nullptr;
+    if (validation.cfg && !validation.cfg->blocks.empty() &&
+        !validation.cfg->blocks.begin()->second.instructions.empty())
+    {
+        const auto& instruction = validation.cfg->blocks.begin()->second.instructions.front();
+        first_instruction = json{{"pc", hex_address(instruction.address)},
+                                  {"id", aarch64::instruction_id_name(instruction.id)},
+                                  {"instruction", instruction.disassembly}};
+    }
+    json last_instruction = nullptr;
+    if (validation.cfg)
+    {
+        const aarch64::DecodedInstruction* last = nullptr;
+        for (const auto& [unused, block] : validation.cfg->blocks)
+        {
+            (void)unused;
+            for (const auto& instruction : block.instructions)
+            {
+                if (last == nullptr || instruction.address > last->address) last = &instruction;
+            }
+        }
+        if (last != nullptr)
+        {
+            last_instruction = json{{"pc", hex_address(last->address)},
+                                    {"id", aarch64::instruction_id_name(last->id)},
+                                    {"instruction", last->disassembly}};
+        }
+    }
+    json analysis_error = nullptr;
+    if (validation.analysis_error)
+    {
+        analysis_error = json{{"code", error_code_name(validation.analysis_error->code)},
+                              {"message", validation.analysis_error->message}};
+    }
+    return json{
+        {"source_module", observed.source_module},
+        {"source_function", hex_address(observed.source_function)},
+        {"source_pc", hex_address(observed.source_pc)},
+        {"control_flow", analysis::indirect_control_flow_kind_name(observed.control_flow)},
+        {"target_register", observed.target_register},
+        {"target", hex_address(observed.target)},
+        {"target_module", validation.target_module.empty() ? observed.target_module
+                                                              : validation.target_module},
+        {"pointer_provenance", json{
+            {"kind", analysis::indirect_target_pointer_provenance_name(
+                          observed.pointer_provenance)},
+            {"address", observed.guest_load_address
+                             ? json(hex_address(observed.guest_load_address.value()))
+                             : json(nullptr)}}},
+        {"observation_count", observed.observation_count},
+        {"static_evidence", std::move(static_evidence)},
+        {"address_validation", json{{"nonzero", validation.nonzero},
+                                     {"aligned", validation.aligned},
+                                     {"mapped", validation.mapped},
+                                     {"executable", validation.executable},
+                                     {"unique_module_owner", validation.unique_module_owner},
+                                     {"target_module_base", validation.target_module_base
+                                                                  ? json(hex_address(*validation.target_module_base))
+                                                                  : json(nullptr)}}},
+        {"ownership", json{{"status", analysis::indirect_target_ownership_name(
+                                         validation.ownership)},
+                            {"existing_canonical_entry", validation.existing_canonical_entry
+                                                               ? json(hex_address(*validation.existing_canonical_entry))
+                                                               : json(nullptr)},
+                            {"candidate_owned_code_ranges", std::move(candidate_ranges)},
+                            {"overlap_ranges", std::move(overlap_ranges)}}},
+        {"cfg_validation", json{{"status", analysis::indirect_target_cfg_status_name(
+                                              validation.cfg_status)},
+                                 {"blocks", validation.blocks},
+                                 {"instructions", validation.instructions},
+                                 {"edges", validation.edges},
+                                 {"first_instruction", std::move(first_instruction)},
+                                 {"last_instruction", std::move(last_instruction)},
+                                 {"direct_call_targets", std::move(direct_calls)},
+                                 {"unresolved_indirect_flow", std::move(unresolved)},
+                                 {"analysis_error", std::move(analysis_error)}}},
+        {"decision", json{{"kind", analysis::indirect_target_decision_name(decision.kind)},
+                           {"confidence", analysis::function_confidence_name(decision.confidence)},
+                           {"eligible_for_promotion", decision.eligible_for_promotion},
+                           {"promoted", decision.promoted},
+                           {"canonical_entry", decision.canonical_entry
+                                                   ? json(hex_address(*decision.canonical_entry))
+                                                   : json(nullptr)},
+                           {"reason", decision.reason}}}};
 }
 
 [[nodiscard]] json cpu_json(const runtime::CpuState& cpu)
@@ -1097,6 +1214,23 @@ Result<void> ExecutionSession::stop(ExecutionSessionResult& result, ExecutionSto
     result.target = target;
     result.target_register = boundary == nullptr ? "" : boundary->boundary.target_register;
     result.target_provenance = boundary == nullptr ? "" : boundary->boundary.target_provenance;
+    if (reason == ExecutionStopReason::UnsupportedInstruction && boundary != nullptr &&
+        memory_ != nullptr)
+    {
+        const auto decoder = aarch64::AArch64Decoder::create();
+        if (decoder)
+        {
+            const auto instruction = aarch64::fetch_and_decode(
+                *memory_, *decoder.value(), boundary->boundary.source_guest_pc);
+            if (instruction)
+            {
+                result.diagnostic_opcode = instruction.value().opcode;
+                result.diagnostic_instruction_id =
+                    aarch64::instruction_id_name(instruction.value().id);
+                result.diagnostic_instruction = instruction.value().disassembly;
+            }
+        }
+    }
     result.final_cpu = cpu_;
     result.current_function = current_.function_entry;
     result.current_function_module = module_name_for(current_.function_entry);
@@ -1181,6 +1315,22 @@ Result<void> ExecutionSession::classify_target(const runtime::ExecutionResult& b
         return stop(result, ExecutionStopReason::InvalidIndirectTarget,
                     "indirect target is zero or not AArch64 aligned", target, &boundary);
     }
+    analysis::ObservedIndirectTarget observed;
+    observed.source_module = module_name_for(current_.function_entry);
+    observed.source_function = current_.function_entry;
+    observed.source_pc = payload.source_guest_pc;
+    observed.control_flow = call ? analysis::IndirectControlFlowKind::Call
+                                 : analysis::IndirectControlFlowKind::Branch;
+    observed.target_register = payload.target_register;
+    observed.target = target;
+    observed.target_module = module_name_for(target);
+    observed.pointer_provenance = payload.has_provenance_address
+                                      ? analysis::IndirectTargetPointerProvenanceKind::GuestLoad
+                                      : analysis::IndirectTargetPointerProvenanceKind::Unknown;
+    if (payload.has_provenance_address) observed.guest_load_address = payload.provenance_address;
+    const auto assessment = analysis::assess_indirect_target(
+        observed, *memory_, function_map_, process_function_map_, process_image_);
+    if (assessment) result.indirect_target_discovery.push_back(assessment.value());
     const auto* record = function_record(target);
     if (process_image_ != nullptr && process_image_->module_for_address(target, 4U) == nullptr)
     {
@@ -1922,6 +2072,11 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
     json observation_targets = json::array();
     for (const auto target : result.observation_targets)
         observation_targets.push_back(hex_address(target));
+    json indirect_target_discovery = json::array();
+    for (const auto& assessment : result.indirect_target_discovery)
+    {
+        indirect_target_discovery.push_back(indirect_target_assessment_json(assessment));
+    }
     json process = nullptr;
     if (result.process)
     {
@@ -2185,6 +2340,11 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                     {"target", result.target ? json(hex_address(result.target.value())) : json(nullptr)},
                                     {"target_register", result.target_register},
                                     {"target_provenance", result.target_provenance},
+                                    {"diagnostic_opcode", result.diagnostic_opcode
+                                                                ? json(result.diagnostic_opcode.value())
+                                                                : json(nullptr)},
+                                    {"diagnostic_instruction_id", result.diagnostic_instruction_id},
+                                    {"diagnostic_instruction", result.diagnostic_instruction},
                                     {"executed_functions", std::move(executed)},
                                     {"executed_functions_with_modules", std::move(executed_with_modules)},
                                     {"direct_calls", result.direct_calls},
@@ -2198,6 +2358,7 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                     {"observation_targets", std::move(observation_targets)},
                                     {"executed_guest_instructions",
                                      std::move(executed_guest_instructions)},
+                                    {"indirect_target_discovery", std::move(indirect_target_discovery)},
                                     {"diagnostic", result.diagnostic}}},
                 {"budgets", json{{"max_ir_operations", result.options.budgets.max_ir_operations},
                                   {"max_function_transitions", result.options.budgets.max_function_transitions},
