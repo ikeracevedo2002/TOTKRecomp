@@ -3129,6 +3129,7 @@ bool is_instruction_liftable(aarch64::InstructionId id) noexcept
     case aarch64::InstructionId::Msub:
     case aarch64::InstructionId::Mneg:
     case aarch64::InstructionId::Umulh:
+    case aarch64::InstructionId::Smulh:
     case aarch64::InstructionId::Adr:
     case aarch64::InstructionId::Adrp:
     case aarch64::InstructionId::Ldr:

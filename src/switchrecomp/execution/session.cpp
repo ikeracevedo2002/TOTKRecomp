@@ -84,7 +84,59 @@ using json = nlohmann::json;
         static_evidence.push_back(json{
             {"source", analysis::function_discovery_source_name(item.source)},
             {"confidence", analysis::function_confidence_name(item.confidence)},
+            {"kind", analysis::function_entry_evidence_kind_name(item.kind)},
+            {"strength", analysis::function_entry_evidence_strength_name(item.strength)},
             {"detail", item.detail}});
+    }
+    json entry_evidence = json::array();
+    for (const auto& item : assessment.entry_evidence)
+    {
+        entry_evidence.push_back(json{
+            {"kind", analysis::function_entry_evidence_kind_name(item.kind)},
+            {"strength", analysis::function_entry_evidence_strength_name(item.strength)},
+            {"source_module", item.source_module},
+            {"source_address", item.source_address ? json(hex_address(*item.source_address)) : json(nullptr)},
+            {"target_module", item.target_module},
+            {"target", hex_address(item.target)},
+            {"relocation_index", item.relocation_index ? json(*item.relocation_index) : json(nullptr)},
+            {"relocation_type", item.relocation_type
+                                     ? json(format::aarch64_relocation_type_name(*item.relocation_type))
+                                     : json(nullptr)},
+            {"relocation_source", item.relocation_source
+                                       ? json(format::relocation_source_name(*item.relocation_source))
+                                       : json(nullptr)},
+            {"symbol_index", item.symbol_index ? json(*item.symbol_index) : json(nullptr)},
+            {"symbol_name", item.symbol_name},
+            {"target_declared_function", item.target_declared_function},
+            {"slot_value_verified", item.slot_value_verified},
+            {"detail", item.detail}});
+    }
+    json rejected_evidence = json::array();
+    for (const auto& item : assessment.rejected_evidence)
+    {
+        rejected_evidence.push_back(json{
+            {"reason", analysis::function_entry_evidence_rejection_name(item.kind)},
+            {"evidence_kind", analysis::function_entry_evidence_kind_name(item.evidence_kind)},
+            {"source_module", item.source_module},
+            {"source_address", item.source_address ? json(hex_address(*item.source_address)) : json(nullptr)},
+            {"detail", item.detail}});
+    }
+    json relocation_provenance = json::array();
+    for (const auto& item : validation.relocation_provenance)
+    {
+        relocation_provenance.push_back(json{
+            {"source_module", item.source_module},
+            {"source_slot", hex_address(item.source_slot)},
+            {"relocation_index", item.relocation_index},
+            {"relocation_type", format::aarch64_relocation_type_name(item.relocation.type)},
+            {"relocation_source", format::relocation_source_name(item.relocation.source)},
+            {"resolved_target", item.resolved_target ? json(hex_address(*item.resolved_target)) : json(nullptr)},
+            {"target_module", item.target_module},
+            {"symbol_index", item.symbol_index ? json(*item.symbol_index) : json(nullptr)},
+            {"symbol_name", item.symbol_name},
+            {"target_declared_function", item.target_declared_function},
+            {"slot_value_verified", item.slot_value_verified},
+            {"resolution_error", item.resolution_error ? json(*item.resolution_error) : json(nullptr)}});
     }
     json candidate_ranges = json::array();
     for (const auto& range : validation.candidate_owned_code_ranges)
@@ -103,13 +155,20 @@ using json = nlohmann::json;
                                   {"reason", item.reason}});
     }
     json first_instruction = nullptr;
-    if (validation.cfg && !validation.cfg->blocks.empty() &&
-        !validation.cfg->blocks.begin()->second.instructions.empty())
+    if (validation.cfg && !validation.cfg->blocks.empty())
     {
-        const auto& instruction = validation.cfg->blocks.begin()->second.instructions.front();
-        first_instruction = json{{"pc", hex_address(instruction.address)},
-                                  {"id", aarch64::instruction_id_name(instruction.id)},
-                                  {"instruction", instruction.disassembly}};
+        const auto entry_block = validation.cfg->blocks.find(observed.target);
+        const auto block = entry_block == validation.cfg->blocks.end()
+                               ? validation.cfg->blocks.begin()
+                               : entry_block;
+        if (!block->second.instructions.empty())
+        {
+            const auto& instruction = block->second.instructions.front();
+            first_instruction = json{{"pc", hex_address(instruction.address)},
+                                      {"opcode", instruction.opcode},
+                                      {"id", aarch64::instruction_id_name(instruction.id)},
+                                      {"instruction", instruction.disassembly}};
+        }
     }
     json last_instruction = nullptr;
     if (validation.cfg)
@@ -153,6 +212,41 @@ using json = nlohmann::json;
                              : json(nullptr)}}},
         {"observation_count", observed.observation_count},
         {"static_evidence", std::move(static_evidence)},
+        {"observed_entry_evidence", [&]() {
+             json items = json::array();
+             for (const auto& item : observed.entry_evidence)
+             {
+                 items.push_back(json{{"kind", analysis::function_entry_evidence_kind_name(item.kind)},
+                                      {"strength", analysis::function_entry_evidence_strength_name(item.strength)},
+                                      {"detail", item.detail}});
+             }
+             return items;
+         }()},
+        {"entry_evidence", std::move(entry_evidence)},
+        {"rejected_evidence", std::move(rejected_evidence)},
+        {"certification", json{{"status", analysis::function_certification_status_name(
+                                              assessment.certification.status)},
+                                {"certified", assessment.certification.certified},
+                                {"confidence", analysis::function_confidence_name(
+                                                    assessment.certification.confidence)},
+                                {"reason", assessment.certification.reason},
+                                {"canonical_entry", decision.canonical_entry
+                                                         ? json(hex_address(*decision.canonical_entry))
+                                                         : json(nullptr)},
+                                {"newly_promoted", decision.promoted},
+                                {"guest_code_entered", assessment.guest_code_entered},
+                                {"first_guest_pc", assessment.first_guest_pc
+                                                         ? json(hex_address(*assessment.first_guest_pc))
+                                                         : json(nullptr)},
+                                {"first_guest_opcode", assessment.first_guest_opcode
+                                                              ? json(*assessment.first_guest_opcode)
+                                                              : json(nullptr)},
+                                {"next_guest_pc", assessment.next_guest_pc
+                                                       ? json(hex_address(*assessment.next_guest_pc))
+                                                       : json(nullptr)}}},
+        {"candidate", json{{"module", assessment.candidate.module},
+                             {"entry", hex_address(assessment.candidate.entry)},
+                             {"guest_code_entered", assessment.guest_code_entered}}},
         {"address_validation", json{{"nonzero", validation.nonzero},
                                      {"aligned", validation.aligned},
                                      {"mapped", validation.mapped},
@@ -160,7 +254,15 @@ using json = nlohmann::json;
                                      {"unique_module_owner", validation.unique_module_owner},
                                      {"target_module_base", validation.target_module_base
                                                                   ? json(hex_address(*validation.target_module_base))
-                                                                  : json(nullptr)}}},
+                                                                  : json(nullptr)},
+                                     {"pointer_slot", validation.pointer_slot
+                                                           ? json(hex_address(*validation.pointer_slot))
+                                                           : json(nullptr)},
+                                     {"pointer_slot_module", validation.pointer_slot_module},
+                                     {"pointer_slot_relocation_found", validation.pointer_slot_relocation_found},
+                                     {"pointer_slot_value_verified", validation.pointer_slot_value_verified},
+                                     {"pointer_target_declared_function", validation.pointer_target_declared_function},
+                                     {"relocation_provenance", std::move(relocation_provenance)}}},
         {"ownership", json{{"status", analysis::indirect_target_ownership_name(
                                          validation.ownership)},
                             {"existing_canonical_entry", validation.existing_canonical_entry
@@ -1445,7 +1547,9 @@ Result<void> ExecutionSession::classify_target(const runtime::ExecutionResult& b
         return stop(result, ExecutionStopReason::InvalidCrossModuleTarget,
                     "target is not owned by exactly one loaded process module", target, &boundary);
     }
-    if (record != nullptr && record->translation_status == analysis::TranslationStatus::Conflict)
+    if (record != nullptr &&
+        (record->translation_status == analysis::TranslationStatus::Conflict ||
+         record->entry_trust_status == analysis::FunctionEntryTrustStatus::Conflict))
     {
         return stop(result, ExecutionStopReason::FunctionOwnershipConflict,
                     "target belongs to a precise function ownership conflict", target, &boundary);
@@ -1456,7 +1560,7 @@ Result<void> ExecutionSession::classify_target(const runtime::ExecutionResult& b
         return stop(result, ExecutionStopReason::InvalidIndirectTarget,
                     "indirect target is not mapped executable guest code", target, &boundary);
     }
-    if (record == nullptr)
+    if (record == nullptr || record->entry_trust_status != analysis::FunctionEntryTrustStatus::Trusted)
     {
         return stop(result, ExecutionStopReason::UnknownGuestFunction,
                     "aligned executable target is not an exact trusted function entry", target, &boundary);
@@ -1466,7 +1570,27 @@ Result<void> ExecutionSession::classify_target(const runtime::ExecutionResult& b
     {
         return stop(result, classify_error(eligible.error()), eligible.error().message, target, &boundary);
     }
-    return call ? dispatch_call(boundary, result) : dispatch_transfer(boundary, result);
+    const auto dispatched = call ? dispatch_call(boundary, result)
+                                 : dispatch_transfer(boundary, result);
+    if (dispatched && !result.indirect_target_discovery.empty())
+    {
+        auto& assessment = result.indirect_target_discovery.back();
+        assessment.guest_code_entered = true;
+        if (assessment.validation.cfg)
+        {
+            const auto block = assessment.validation.cfg->blocks.find(target);
+            if (block != assessment.validation.cfg->blocks.end() &&
+                !block->second.instructions.empty())
+            {
+                const auto& first = block->second.instructions.front();
+                assessment.first_guest_pc = first.address;
+                assessment.first_guest_opcode = first.opcode;
+                const auto next = checked_add_u64(first.address, 4U);
+                if (next) assessment.next_guest_pc = next.value();
+            }
+        }
+    }
+    return dispatched;
 }
 
 Result<void> ExecutionSession::dispatch_call(const runtime::ExecutionResult& boundary,
@@ -2511,6 +2635,7 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                      result.instructions_after_former_blocker},
                                     {"maximum_call_depth", result.maximum_call_depth},
                                     {"provider_guest_code_entered", result.provider_guest_code_entered},
+                                    {"runtime_fallbacks_invoked", result.runtime.imports_handled},
                                     {"observation_targets", std::move(observation_targets)},
                                     {"instruction_observation_targets", [&]() {
                                          json targets = json::array();

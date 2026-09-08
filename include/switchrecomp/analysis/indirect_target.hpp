@@ -2,6 +2,7 @@
 
 #include "switchrecomp/analysis/function_map.hpp"
 #include "switchrecomp/analysis/process_image.hpp"
+#include "switchrecomp/format/elf_rela.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -79,11 +80,143 @@ enum class IndirectTargetDecisionKind : std::uint8_t
 [[nodiscard]] std::string_view indirect_target_decision_name(
     IndirectTargetDecisionKind decision) noexcept;
 
+// Function-entry evidence is deliberately richer than the legacy discovery
+// source/confidence pair.  It records both the semantic kind of proof and the
+// exact guest-side object that supplied it; no host pointer is representable.
+enum class FunctionEntryEvidenceKind : std::uint8_t
+{
+    SymbolFunction,
+    DynamicSymbolFunction,
+    DirectCallTarget,
+    RelocationFunctionTarget,
+    RelocatedFunctionPointer,
+    ExportedFunction,
+    KnownProviderEntry,
+    BoundedCfgCandidate,
+    ObservedIndirectCall,
+    GuestLoadedPointer,
+};
+
+[[nodiscard]] std::string_view function_entry_evidence_kind_name(
+    FunctionEntryEvidenceKind kind) noexcept;
+
+enum class FunctionEntryEvidenceStrength : std::uint8_t
+{
+    Exact,
+    Supporting,
+};
+
+[[nodiscard]] std::string_view function_entry_evidence_strength_name(
+    FunctionEntryEvidenceStrength strength) noexcept;
+
+struct FunctionEntryEvidence
+{
+    FunctionEntryEvidenceKind kind = FunctionEntryEvidenceKind::BoundedCfgCandidate;
+    FunctionEntryEvidenceStrength strength = FunctionEntryEvidenceStrength::Supporting;
+    std::string source_module;
+    std::optional<memory::GuestAddress> source_address;
+    std::string target_module;
+    memory::GuestAddress target = 0U;
+    std::optional<std::size_t> relocation_index;
+    std::optional<format::AArch64RelocationType> relocation_type;
+    std::optional<format::RelocationSource> relocation_source;
+    std::optional<std::uint32_t> symbol_index;
+    std::string symbol_name;
+    bool target_declared_function = false;
+    bool slot_value_verified = false;
+    std::string detail;
+
+    friend bool operator==(const FunctionEntryEvidence&, const FunctionEntryEvidence&) = default;
+};
+
+enum class FunctionEntryEvidenceRejectionKind : std::uint8_t
+{
+    NotFunctionMetadata,
+    ProvenanceMismatch,
+    InvalidRelocation,
+    InsufficientEvidence,
+};
+
+[[nodiscard]] std::string_view function_entry_evidence_rejection_name(
+    FunctionEntryEvidenceRejectionKind kind) noexcept;
+
+struct FunctionEntryEvidenceRejection
+{
+    FunctionEntryEvidenceRejectionKind kind = FunctionEntryEvidenceRejectionKind::InsufficientEvidence;
+    FunctionEntryEvidenceKind evidence_kind = FunctionEntryEvidenceKind::BoundedCfgCandidate;
+    std::string source_module;
+    std::optional<memory::GuestAddress> source_address;
+    std::string detail;
+};
+
+struct RelocationFunctionPointerProvenance
+{
+    std::string source_module;
+    memory::GuestAddress source_slot = 0U;
+    std::size_t relocation_index = 0U;
+    format::Relocation relocation{};
+    std::optional<memory::GuestAddress> resolved_target;
+    std::string target_module;
+    std::optional<std::uint32_t> symbol_index;
+    std::string symbol_name;
+    bool target_declared_function = false;
+    bool slot_value_verified = false;
+    std::optional<std::string> resolution_error;
+};
+
+// Resolves only loader-visible guest relocation provenance for one exact
+// storage slot. An empty result means the slot has no recorded relocation;
+// it never means that an executable value is a function pointer.
+[[nodiscard]] Result<std::vector<RelocationFunctionPointerProvenance>>
+inspect_relocation_function_pointer_provenance(const ProcessImage& process_image,
+                                               memory::GuestAddress source_slot,
+                                               memory::GuestAddress expected_target);
+
+enum class FunctionCertificationStatus : std::uint8_t
+{
+    Certified,
+    InsufficientEvidence,
+    NotExecutable,
+    Misaligned,
+    OutsideKnownModule,
+    ConflictsWithExistingFunction,
+    OverlapsExistingFunction,
+    DecodeFailed,
+    CFGIncomplete,
+    AmbiguousOwnership,
+    BoundsExceeded,
+    InvalidProvenance,
+};
+
+[[nodiscard]] std::string_view function_certification_status_name(
+    FunctionCertificationStatus status) noexcept;
+
+struct FunctionCandidate
+{
+    std::string module;
+    memory::GuestAddress entry = 0U;
+    std::vector<GuestAddressRange> owned_code_ranges;
+    std::optional<ControlFlowGraph> cfg;
+    std::vector<FunctionEntryEvidence> evidence;
+};
+
+struct FunctionCertificationResult
+{
+    FunctionCertificationStatus status = FunctionCertificationStatus::InsufficientEvidence;
+    bool certified = false;
+    FunctionConfidence confidence = FunctionConfidence::Low;
+    std::string reason;
+    std::vector<FunctionEntryEvidence> accepted_evidence;
+    std::vector<FunctionEntryEvidenceRejection> rejected_evidence;
+};
+
 struct IndirectTargetStaticEvidence
 {
     FunctionDiscoverySource source = FunctionDiscoverySource::Heuristic;
     FunctionConfidence confidence = FunctionConfidence::Low;
     std::string detail;
+    FunctionEntryEvidenceKind kind = FunctionEntryEvidenceKind::BoundedCfgCandidate;
+    FunctionEntryEvidenceStrength strength = FunctionEntryEvidenceStrength::Supporting;
 
     friend bool operator==(const IndirectTargetStaticEvidence&,
                            const IndirectTargetStaticEvidence&) = default;
@@ -102,6 +235,7 @@ struct ObservedIndirectTarget
         IndirectTargetPointerProvenanceKind::Unknown;
     std::optional<memory::GuestAddress> guest_load_address;
     std::vector<IndirectTargetStaticEvidence> static_evidence;
+    std::vector<FunctionEntryEvidence> entry_evidence;
     std::size_t observation_count = 1U;
 
     friend bool operator==(const ObservedIndirectTarget&, const ObservedIndirectTarget&) = default;
@@ -128,6 +262,12 @@ struct IndirectTargetValidation
     std::vector<memory::GuestAddress> direct_call_targets;
     std::vector<UnresolvedControlFlow> unresolved_control_flow;
     std::optional<Error> analysis_error;
+    std::optional<memory::GuestAddress> pointer_slot;
+    std::string pointer_slot_module;
+    bool pointer_slot_relocation_found = false;
+    bool pointer_slot_value_verified = false;
+    bool pointer_target_declared_function = false;
+    std::vector<RelocationFunctionPointerProvenance> relocation_provenance;
 };
 
 struct IndirectTargetDecision
@@ -144,8 +284,16 @@ struct IndirectTargetAssessment
 {
     ObservedIndirectTarget observed;
     std::vector<IndirectTargetStaticEvidence> static_evidence;
+    std::vector<FunctionEntryEvidence> entry_evidence;
+    std::vector<FunctionEntryEvidenceRejection> rejected_evidence;
     IndirectTargetValidation validation;
     IndirectTargetDecision decision;
+    FunctionCandidate candidate;
+    FunctionCertificationResult certification;
+    bool guest_code_entered = false;
+    std::optional<memory::GuestAddress> first_guest_pc;
+    std::optional<std::uint32_t> first_guest_opcode;
+    std::optional<memory::GuestAddress> next_guest_pc;
 };
 
 struct IndirectTargetDiscoveryOptions

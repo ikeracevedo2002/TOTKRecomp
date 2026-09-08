@@ -328,6 +328,7 @@ using json = nlohmann::json;
                {"ownership_bytes", ownership_bytes ? ownership_bytes.value() : 0U},
                {"source", function_discovery_source_name(function.primary_source)},
                {"confidence", function_confidence_name(function.confidence)},
+               {"entry_trust_status", function_entry_trust_status_name(function.entry_trust_status)},
                {"name", function.name.value_or(function.synthetic_id)},
                {"evidence", std::move(evidence)},
                {"block_count", blocks.size()},

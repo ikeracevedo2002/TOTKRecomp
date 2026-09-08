@@ -237,6 +237,10 @@ using GuestAddress = memory::GuestAddress;
         record.confidence = seed.confidence;
         record.primary_source = seed.source;
     }
+    if (is_boundary_worthy_function_seed(seed))
+    {
+        record.entry_trust_status = FunctionEntryTrustStatus::Trusted;
+    }
     return Result<void>::success();
 }
 
@@ -265,6 +269,9 @@ using GuestAddress = memory::GuestAddress;
         record.canonical_entry = canonical;
         record.primary_source = seed.source;
         record.confidence = seed.confidence;
+        record.entry_trust_status = is_boundary_worthy_function_seed(seed)
+                                        ? FunctionEntryTrustStatus::Trusted
+                                        : FunctionEntryTrustStatus::Candidate;
         record.entries.push_back(canonical);
         if (seed.entry != canonical) record.entries.push_back(seed.entry);
         record.translation_status = TranslationStatus::Discovered;
@@ -735,6 +742,17 @@ std::string_view translation_status_name(TranslationStatus status) noexcept
     return "unknown";
 }
 
+std::string_view function_entry_trust_status_name(FunctionEntryTrustStatus status) noexcept
+{
+    switch (status)
+    {
+    case FunctionEntryTrustStatus::Candidate: return "candidate";
+    case FunctionEntryTrustStatus::Trusted: return "trusted";
+    case FunctionEntryTrustStatus::Conflict: return "conflict";
+    }
+    return "candidate";
+}
+
 std::string_view failure_category_name(FailureCategory category) noexcept
 {
     switch (category)
@@ -1146,12 +1164,14 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
         if (first != result.functions_.end() && first->canonical_entry == conflict.first_function)
         {
             first->confidence = FunctionConfidence::Conflict;
+            first->entry_trust_status = FunctionEntryTrustStatus::Conflict;
             first->translation_status = TranslationStatus::Conflict;
         }
         if (second != result.functions_.end() &&
             second->canonical_entry == conflict.second_function)
         {
             second->confidence = FunctionConfidence::Conflict;
+            second->entry_trust_status = FunctionEntryTrustStatus::Conflict;
             second->translation_status = TranslationStatus::Conflict;
         }
     }
@@ -1181,6 +1201,13 @@ Result<void> validate_finalized_function_map(const FinalizedFunctionMap& map)
         {
             return Result<void>::failure(
                 make_error(ErrorCode::InvalidFormat, "function map contains incomplete function identity"));
+        }
+        if ((function.translation_status == TranslationStatus::Conflict) !=
+            (function.entry_trust_status == FunctionEntryTrustStatus::Conflict))
+        {
+            return Result<void>::failure(make_error(
+                ErrorCode::FunctionBoundaryConflict,
+                "function map trust status does not match its conflict status"));
         }
         if (!first && function.canonical_entry <= previous)
         {

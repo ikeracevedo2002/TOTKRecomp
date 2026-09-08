@@ -85,6 +85,20 @@ enum class TranslationStatus : std::uint8_t
     Conflict,
 };
 
+// A discovered record can exist in the map before it is allowed to serve as
+// an indirect-call ownership boundary.  Keeping this separate from
+// FunctionConfidence prevents executable-looking candidates from becoming
+// trusted merely because they were decoded.
+enum class FunctionEntryTrustStatus : std::uint8_t
+{
+    Candidate,
+    Trusted,
+    Conflict,
+};
+
+[[nodiscard]] std::string_view function_entry_trust_status_name(
+    FunctionEntryTrustStatus status) noexcept;
+
 enum class FailureCategory : std::uint8_t
 {
     DecodeFailure,
@@ -200,6 +214,7 @@ struct FunctionRecord
     std::vector<memory::GuestAddress> direct_calls;
     std::vector<CallSite> indirect_calls;
     std::vector<UnresolvedControlFlow> unresolved_control_flow;
+    FunctionEntryTrustStatus entry_trust_status = FunctionEntryTrustStatus::Candidate;
     TranslationStatus translation_status = TranslationStatus::Discovered;
     std::vector<UnsupportedRecord> unsupported;
     std::vector<FunctionDiagnostic> diagnostics;

@@ -826,15 +826,30 @@ int main(int argc, char** argv)
         }
         for (const auto& promoted : promoted_targets)
         {
+            auto merged = promoted;
+            const auto runtime_assessment = std::find_if(
+                final_result.indirect_target_discovery.begin(),
+                final_result.indirect_target_discovery.end(),
+                [&](const auto& item) {
+                    return item.observed.target == promoted.observed.target &&
+                           item.observed.source_pc == promoted.observed.source_pc;
+                });
+            if (runtime_assessment != final_result.indirect_target_discovery.end())
+            {
+                merged.guest_code_entered = runtime_assessment->guest_code_entered;
+                merged.first_guest_pc = runtime_assessment->first_guest_pc;
+                merged.first_guest_opcode = runtime_assessment->first_guest_opcode;
+                merged.next_guest_pc = runtime_assessment->next_guest_pc;
+            }
             final_result.indirect_target_discovery.erase(
                 std::remove_if(final_result.indirect_target_discovery.begin(),
                                final_result.indirect_target_discovery.end(),
                                [&](const auto& item) {
                                    return item.observed.target == promoted.observed.target &&
                                           item.observed.source_pc == promoted.observed.source_pc;
-                               }),
+                }),
                 final_result.indirect_target_discovery.end());
-            final_result.indirect_target_discovery.push_back(promoted);
+            final_result.indirect_target_discovery.push_back(std::move(merged));
         }
         const auto report = execution::render_execution_report_json(final_result);
         if (!report_path.empty())

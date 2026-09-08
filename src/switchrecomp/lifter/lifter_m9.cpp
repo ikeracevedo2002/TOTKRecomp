@@ -376,7 +376,8 @@ Result<ir::Function> lift_function(const analysis::ControlFlowGraph& cfg, const 
         for (std::uint32_t index = 0U; index < block.instructions.size(); ++index)
         {
             const auto result = block.instructions[index].result;
-            if (result != ir::invalid_value && result < function.values().size())
+            if (result != ir::invalid_value && result < function.values().size() &&
+                function.values()[result].kind == ir::ValueKind::Instruction)
             {
                 function.values()[result].defining_block = block.id;
                 function.values()[result].instruction_index = index;

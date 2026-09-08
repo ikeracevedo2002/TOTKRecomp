@@ -261,7 +261,9 @@ struct ExecutedGuestInstruction
 
 struct ExecutionSessionResult
 {
-    static constexpr std::uint32_t schema_version = 6U;
+    // M20 adds typed function-entry certification and relocation-slot
+    // provenance to deterministic execution reports.
+    static constexpr std::uint32_t schema_version = 7U;
 
     analysis::ModuleIdentity identity;
     EntrySelection entry;
