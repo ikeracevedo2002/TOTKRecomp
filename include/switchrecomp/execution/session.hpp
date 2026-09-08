@@ -241,10 +241,21 @@ struct ExecutedGuestInstruction
     memory::GuestAddress guest_pc = 0U;
     std::string module;
     std::string mnemonic;
+    std::string instruction_id;
     bool executed = false;
     std::optional<memory::GuestAddress> next_guest_pc;
     std::string destination_register;
     std::vector<std::string> source_registers;
+    struct RegisterValue
+    {
+        std::string name;
+        std::uint64_t value = 0U;
+    };
+    std::vector<RegisterValue> pre_registers;
+    std::vector<RegisterValue> post_registers;
+    std::optional<std::uint64_t> expected_high64;
+    std::optional<std::uint64_t> actual_high64;
+    std::optional<bool> result_matches;
     std::size_t call_depth = 0U;
 };
 
@@ -291,10 +302,14 @@ struct ExecutionSessionResult
     std::size_t returns = 0U;
     std::size_t ir_operations = 0U;
     std::size_t guest_blocks = 0U;
+    std::size_t guest_instruction_count = 0U;
+    std::size_t instructions_after_former_blocker = 0U;
     std::size_t maximum_call_depth = 0U;
     std::vector<CallStackFrame> call_stack;
     std::vector<memory::GuestAddress> observation_targets;
+    std::vector<memory::GuestAddress> instruction_observation_targets;
     std::vector<ExecutedGuestInstruction> executed_guest_instructions;
+    std::vector<ExecutedGuestInstruction> instruction_evidence;
     std::vector<analysis::IndirectTargetAssessment> indirect_target_discovery;
     std::vector<ExecutionEvent> events;
     RuntimeExecutionSummary runtime;
@@ -367,7 +382,7 @@ class ExecutionSession
     [[nodiscard]] std::string module_name_for(memory::GuestAddress entry) const;
     void prepare_observation_targets();
     [[nodiscard]] std::optional<ExecutedGuestInstruction> describe_observed_instruction(
-        memory::GuestAddress guest_pc, std::size_t call_depth) const;
+        const runtime::ObservedInstructionExecution& observation, std::size_t call_depth) const;
 
     memory::GuestMemory* memory_ = nullptr;
     const analysis::FinalizedFunctionMap* function_map_ = nullptr;
@@ -382,6 +397,7 @@ class ExecutionSession
     ExecutionLoadSummary load_summary_;
     std::map<memory::GuestAddress, LiftCacheEntry> lift_cache_;
     std::vector<memory::GuestAddress> observation_targets_;
+    std::vector<memory::GuestAddress> instruction_observation_targets_;
     std::vector<SessionFrame> suspended_frames_;
     SessionFrame current_;
     runtime::CpuState cpu_{};

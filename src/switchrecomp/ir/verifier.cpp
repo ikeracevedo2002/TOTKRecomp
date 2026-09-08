@@ -66,9 +66,13 @@ namespace
 
 [[nodiscard]] bool constant_fits(Type type, std::uint64_t value) noexcept
 {
-    if (type == f32_type() || type == f64_type() || type == v128_type())
+    if (type == f32_type() || type == f64_type())
     {
-        return type == v128_type() || type.bit_width() == 32U || type.bit_width() == 64U;
+        return true;
+    }
+    if (type == v128_type())
+    {
+        return true;
     }
     if (!valid_integer_type(type))
     {
@@ -347,6 +351,7 @@ Result<void> verify(const Function& function)
             {
             case Opcode::Constant:
                 if (instruction.operands.size() != 0U || instruction.result_type.is_void() ||
+                    (!instruction.result_type.is_vector() && instruction.constant_high != 0U) ||
                     !constant_fits(instruction.result_type, instruction.constant))
                 {
                     checked = invalid("constant has invalid operands, type, or value");

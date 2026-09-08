@@ -29,6 +29,44 @@ using json = nlohmann::json;
     return output.str();
 }
 
+[[nodiscard]] std::uint64_t independent_umulh_oracle(std::uint64_t left,
+                                                     std::uint64_t right) noexcept
+{
+    // Four 32-bit partial products provide an independent report-time oracle;
+    // this deliberately does not call the production UMULH helper.
+    const auto left_low = static_cast<std::uint64_t>(static_cast<std::uint32_t>(left));
+    const auto left_high = left >> 32U;
+    const auto right_low = static_cast<std::uint64_t>(static_cast<std::uint32_t>(right));
+    const auto right_high = right >> 32U;
+    const auto low_product = left_low * right_low;
+    const auto cross_low = left_low * right_high;
+    const auto cross_high = left_high * right_low;
+    const auto carry = (low_product >> 32U) +
+                       static_cast<std::uint64_t>(static_cast<std::uint32_t>(cross_low)) +
+                       static_cast<std::uint64_t>(static_cast<std::uint32_t>(cross_high));
+    return left_high * right_high + (cross_low >> 32U) + (cross_high >> 32U) +
+           (carry >> 32U);
+}
+
+[[nodiscard]] std::string architectural_register_name(const aarch64::Register& reg)
+{
+    auto architectural = reg;
+    if (architectural.kind == aarch64::RegisterKind::General &&
+        architectural.width == aarch64::RegisterWidth::W32)
+    {
+        architectural.width = aarch64::RegisterWidth::X64;
+    }
+    return aarch64::register_name(architectural);
+}
+
+[[nodiscard]] std::uint64_t architectural_register_value(
+    const runtime::CpuState& cpu, const aarch64::Register& reg) noexcept
+{
+    if (reg.is_zero) return 0U;
+    if (reg.is_stack_pointer) return cpu.sp;
+    return reg.index < cpu.x.size() ? cpu.x[reg.index] : 0U;
+}
+
 [[nodiscard]] json range_json(const analysis::GuestAddressRange& range)
 {
     return json{{"base", hex_address(range.base)}, {"size", range.size}};
@@ -902,11 +940,12 @@ std::string ExecutionSession::module_name_for(GuestAddress entry) const
 void ExecutionSession::prepare_observation_targets()
 {
     observation_targets_.clear();
+    instruction_observation_targets_.clear();
     if (process_image_ == nullptr) return;
 
-    // M17 observes only the selected guest provider's scalar UMULH sites. The
-    // set is derived from parsed CFGs, never from a hard-coded executable
-    // address, and is capped before entering the interpreter.
+    // The historical observation_targets field remains the UMULH-only set.
+    // M19's richer instruction observations are derived from the same parsed
+    // CFG and use a separate additive target list for move-wide instructions.
     for (const auto& binding : process_image_->bindings())
     {
         if (binding.symbol != "__nnmusl_init_dso" || !binding.provider_address || !binding.applied)
@@ -919,8 +958,16 @@ void ExecutionSession::prepare_observation_targets()
             for (const auto& instruction : block.instructions)
             {
                 if (instruction.id == aarch64::InstructionId::Umulh)
+                {
                     observation_targets_.push_back(instruction.address);
-                if (observation_targets_.size() >= 32U) return;
+                    instruction_observation_targets_.push_back(instruction.address);
+                }
+                else if (instruction.id == aarch64::InstructionId::Movz ||
+                         instruction.id == aarch64::InstructionId::Movn ||
+                         instruction.id == aarch64::InstructionId::Movk)
+                {
+                    instruction_observation_targets_.push_back(instruction.address);
+                }
             }
         }
     }
@@ -928,11 +975,18 @@ void ExecutionSession::prepare_observation_targets()
     observation_targets_.erase(
         std::unique(observation_targets_.begin(), observation_targets_.end()),
         observation_targets_.end());
+    std::sort(instruction_observation_targets_.begin(), instruction_observation_targets_.end());
+    instruction_observation_targets_.erase(
+        std::unique(instruction_observation_targets_.begin(), instruction_observation_targets_.end()),
+        instruction_observation_targets_.end());
+    if (instruction_observation_targets_.size() > 32U)
+        instruction_observation_targets_.resize(32U);
 }
 
 std::optional<ExecutedGuestInstruction> ExecutionSession::describe_observed_instruction(
-    GuestAddress guest_pc, std::size_t call_depth) const
+    const runtime::ObservedInstructionExecution& observation, std::size_t call_depth) const
 {
+    const auto guest_pc = observation.guest_pc;
     const analysis::FunctionRecord* owner = nullptr;
     const analysis::BasicBlock* owner_block = nullptr;
     const auto inspect_map = [&](const analysis::FinalizedFunctionMap& map) {
@@ -971,7 +1025,11 @@ std::optional<ExecutedGuestInstruction> ExecutionSession::describe_observed_inst
     for (std::size_t index = 0U; index < owner_block->instructions.size(); ++index)
     {
         const auto& instruction = owner_block->instructions[index];
-        if (instruction.address != guest_pc || instruction.id != aarch64::InstructionId::Umulh)
+        if (instruction.address != guest_pc ||
+            (instruction.id != aarch64::InstructionId::Movz &&
+             instruction.id != aarch64::InstructionId::Movn &&
+             instruction.id != aarch64::InstructionId::Movk &&
+             instruction.id != aarch64::InstructionId::Umulh))
             continue;
         ExecutedGuestInstruction result;
         result.guest_pc = guest_pc;
@@ -979,6 +1037,7 @@ std::optional<ExecutedGuestInstruction> ExecutionSession::describe_observed_inst
         result.mnemonic = instruction.disassembly.empty()
                               ? std::string(aarch64::instruction_id_name(instruction.id))
                               : instruction.disassembly;
+        result.instruction_id = std::string(aarch64::instruction_id_name(instruction.id));
         result.executed = true;
         result.call_depth = call_depth;
         if (!instruction.operands.empty() &&
@@ -993,7 +1052,11 @@ std::optional<ExecutedGuestInstruction> ExecutionSession::describe_observed_inst
             if (operand.kind == aarch64::OperandKind::Register)
                 result.source_registers.push_back(aarch64::register_name(operand.reg));
         }
-        if (index + 1U < owner_block->instructions.size())
+        if (observation.next_guest_pc)
+        {
+            result.next_guest_pc = observation.next_guest_pc;
+        }
+        else if (index + 1U < owner_block->instructions.size())
         {
             result.next_guest_pc = owner_block->instructions[index + 1U].address;
         }
@@ -1001,6 +1064,49 @@ std::optional<ExecutedGuestInstruction> ExecutionSession::describe_observed_inst
         {
             const auto next = checked_add_u64(guest_pc, 4U);
             if (next) result.next_guest_pc = next.value();
+        }
+        if (instruction.id == aarch64::InstructionId::Umulh && instruction.operands.size() >= 3U &&
+            instruction.operands[1].kind == aarch64::OperandKind::Register &&
+            instruction.operands[2].kind == aarch64::OperandKind::Register)
+        {
+            const auto& left = instruction.operands[1].reg;
+            const auto& right = instruction.operands[2].reg;
+            result.pre_registers.push_back(
+                ExecutedGuestInstruction::RegisterValue{architectural_register_name(left),
+                                                        architectural_register_value(observation.pre_state, left)});
+            result.pre_registers.push_back(
+                ExecutedGuestInstruction::RegisterValue{architectural_register_name(right),
+                                                        architectural_register_value(observation.pre_state, right)});
+            const auto expected = independent_umulh_oracle(
+                architectural_register_value(observation.pre_state, left),
+                architectural_register_value(observation.pre_state, right));
+            result.expected_high64 = expected;
+            if (!instruction.operands.empty() &&
+                instruction.operands.front().kind == aarch64::OperandKind::Register)
+            {
+                const auto& destination = instruction.operands.front().reg;
+                result.post_registers.push_back(
+                    ExecutedGuestInstruction::RegisterValue{
+                        architectural_register_name(destination),
+                        architectural_register_value(observation.post_state, destination)});
+                result.actual_high64 = architectural_register_value(observation.post_state, destination);
+                result.result_matches = result.actual_high64.value() == expected;
+            }
+        }
+        else if ((instruction.id == aarch64::InstructionId::Movz ||
+                  instruction.id == aarch64::InstructionId::Movn ||
+                  instruction.id == aarch64::InstructionId::Movk) &&
+                 !instruction.operands.empty() &&
+                 instruction.operands.front().kind == aarch64::OperandKind::Register)
+        {
+            const auto& destination = instruction.operands.front().reg;
+            const auto name = architectural_register_name(destination);
+            result.pre_registers.push_back(
+                ExecutedGuestInstruction::RegisterValue{name,
+                                                        architectural_register_value(observation.pre_state, destination)});
+            result.post_registers.push_back(
+                ExecutedGuestInstruction::RegisterValue{name,
+                                                        architectural_register_value(observation.post_state, destination)});
         }
         return result;
     }
@@ -1216,8 +1322,7 @@ Result<void> ExecutionSession::stop(ExecutionSessionResult& result, ExecutionSto
     result.target = target;
     result.target_register = boundary == nullptr ? "" : boundary->boundary.target_register;
     result.target_provenance = boundary == nullptr ? "" : boundary->boundary.target_provenance;
-    if (reason == ExecutionStopReason::UnsupportedInstruction && boundary != nullptr &&
-        memory_ != nullptr)
+    if (boundary != nullptr && memory_ != nullptr)
     {
         const auto decoder = aarch64::AArch64Decoder::create();
         if (decoder)
@@ -1821,6 +1926,7 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     }
     prepare_observation_targets();
     result.observation_targets = observation_targets_;
+    result.instruction_observation_targets = instruction_observation_targets_;
     if (!record_event(result, ExecutionEvent{0U, ExecutionEventKind::SessionStart, 0U, 0U, 0U,
                                                false, 0U,
                                                runtime::ExecutionBoundaryKind::None, {}, {}, {}, {}}) ||
@@ -1864,6 +1970,8 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         running_ = false;
         return Result<ExecutionSessionResult>::failure(entered.error());
     }
+    bool former_blocker_seen = false;
+    std::optional<memory::GuestAddress> former_blocker_pc;
     while (running_)
     {
         const auto function_result = lift_for_execution(current_.function_entry, result);
@@ -1884,7 +1992,7 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         interpreter_options.max_ir_operations =
             options_.budgets.max_ir_operations - result.ir_operations;
         interpreter_options.observed_guest_pcs =
-            std::span<const memory::GuestAddress>(observation_targets_);
+            std::span<const memory::GuestAddress>(instruction_observation_targets_);
         interpreter_options.max_observed_guest_pcs = 32U;
         const auto step = interpreter::execute_until_boundary(
             *function, cpu_, runtime_, current_.interpreter, interpreter_options);
@@ -1895,15 +2003,33 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         }
         result.ir_operations += step.value().executed_operations;
         result.guest_blocks += step.value().executed_blocks;
-        for (const auto observed_pc : step.value().observed_guest_pcs)
+        result.guest_instruction_count += step.value().executed_guest_instructions;
+        for (const auto& observed_execution : step.value().observed_instruction_executions)
         {
             const auto already_recorded = std::find_if(
-                result.executed_guest_instructions.begin(), result.executed_guest_instructions.end(),
-                [&](const auto& observed) { return observed.guest_pc == observed_pc; });
-            if (already_recorded != result.executed_guest_instructions.end()) continue;
-            if (const auto observed = describe_observed_instruction(observed_pc,
+                result.instruction_evidence.begin(), result.instruction_evidence.end(),
+                [&](const auto& observed) { return observed.guest_pc == observed_execution.guest_pc; });
+            if (already_recorded != result.instruction_evidence.end()) continue;
+            if (const auto observed = describe_observed_instruction(observed_execution,
                                                                     current_.call_depth))
-                result.executed_guest_instructions.push_back(observed.value());
+            {
+                result.instruction_evidence.push_back(observed.value());
+                if (observed->instruction_id == "umulh")
+                    result.executed_guest_instructions.push_back(observed.value());
+                if (observed->module == "sdk" && observed->instruction_id == "movz" &&
+                    observed->destination_register == "w0")
+                    former_blocker_pc = observed->guest_pc;
+            }
+        }
+        for (const auto guest_pc : step.value().executed_guest_pcs)
+        {
+            if (former_blocker_pc && guest_pc == former_blocker_pc.value())
+            {
+                former_blocker_seen = true;
+                continue;
+            }
+            if (former_blocker_seen)
+                ++result.instructions_after_former_blocker;
         }
         if (result.guest_blocks > options_.budgets.max_guest_blocks)
         {
@@ -2054,24 +2180,48 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                             ? result.executed_function_modules[index]
                             : std::string{}}});
     }
-    json executed_guest_instructions = json::array();
-    for (const auto& instruction : result.executed_guest_instructions)
-    {
+    const auto instruction_json = [](const ExecutedGuestInstruction& instruction) {
         json source_registers = json::array();
         for (const auto& register_name : instruction.source_registers)
             source_registers.push_back(register_name);
-        executed_guest_instructions.push_back(json{
+        const auto register_values_json = [](const auto& values) {
+            json result = json::array();
+            for (const auto& value : values)
+                result.push_back(json{{"name", value.name}, {"value", hex_address(value.value)}});
+            return result;
+        };
+        return json{
             {"guest_pc", hex_address(instruction.guest_pc)},
             {"module", instruction.module},
             {"mnemonic", instruction.mnemonic},
+            {"instruction_id", instruction.instruction_id},
             {"executed", instruction.executed},
             {"next_guest_pc", instruction.next_guest_pc
                                   ? json(hex_address(instruction.next_guest_pc.value()))
                                   : json(nullptr)},
             {"destination_register", instruction.destination_register},
             {"source_registers", std::move(source_registers)},
-            {"call_depth", instruction.call_depth}});
+            {"pre_registers", register_values_json(instruction.pre_registers)},
+            {"post_registers", register_values_json(instruction.post_registers)},
+            {"expected_high64", instruction.expected_high64
+                                    ? json(hex_address(instruction.expected_high64.value()))
+                                    : json(nullptr)},
+            {"actual_high64", instruction.actual_high64
+                                  ? json(hex_address(instruction.actual_high64.value()))
+                                  : json(nullptr)},
+            {"result_matches", instruction.result_matches
+                                    ? json(instruction.result_matches.value())
+                                    : json(nullptr)},
+            {"call_depth", instruction.call_depth}};
+    };
+    json executed_guest_instructions = json::array();
+    for (const auto& instruction : result.executed_guest_instructions)
+    {
+        executed_guest_instructions.push_back(instruction_json(instruction));
     }
+    json instruction_evidence = json::array();
+    for (const auto& instruction : result.instruction_evidence)
+        instruction_evidence.push_back(instruction_json(instruction));
     json observation_targets = json::array();
     for (const auto target : result.observation_targets)
         observation_targets.push_back(hex_address(target));
@@ -2356,11 +2506,21 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                     {"returns", result.returns},
                                     {"ir_operations", result.ir_operations},
                                     {"guest_blocks", result.guest_blocks},
+                                    {"guest_instruction_count", result.guest_instruction_count},
+                                    {"instructions_after_former_blocker",
+                                     result.instructions_after_former_blocker},
                                     {"maximum_call_depth", result.maximum_call_depth},
                                     {"provider_guest_code_entered", result.provider_guest_code_entered},
                                     {"observation_targets", std::move(observation_targets)},
+                                    {"instruction_observation_targets", [&]() {
+                                         json targets = json::array();
+                                         for (const auto target : result.instruction_observation_targets)
+                                             targets.push_back(hex_address(target));
+                                         return targets;
+                                     }()},
                                     {"executed_guest_instructions",
                                      std::move(executed_guest_instructions)},
+                                    {"instruction_evidence", std::move(instruction_evidence)},
                                     {"indirect_target_discovery", std::move(indirect_target_discovery)},
                                     {"diagnostic", result.diagnostic}}},
                 {"budgets", json{{"max_ir_operations", result.options.budgets.max_ir_operations},

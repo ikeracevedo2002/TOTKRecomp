@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -56,13 +57,26 @@ struct ExecutionOptions
     std::size_t max_observed_guest_pcs = 32U;
 };
 
+struct ObservedInstructionExecution
+{
+    std::uint64_t guest_pc = 0U;
+    CpuState pre_state{};
+    CpuState post_state{};
+    std::optional<std::uint64_t> next_guest_pc;
+};
+
 struct ExecutionResult
 {
     ExecutionStatus status = ExecutionStatus::Returned;
     std::size_t executed_operations = 0U;
     std::size_t executed_blocks = 0U;
+    std::size_t executed_guest_instructions = 0U;
     std::uint64_t final_guest_pc = 0U;
     std::vector<std::uint64_t> observed_guest_pcs;
+    std::vector<ObservedInstructionExecution> observed_instruction_executions;
+    // Internal execution trace used by the session to derive bounded counts;
+    // it is intentionally not serialized into public reports.
+    std::vector<std::uint64_t> executed_guest_pcs;
     ExecutionBoundary boundary;
 };
 

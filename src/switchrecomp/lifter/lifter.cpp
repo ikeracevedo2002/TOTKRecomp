@@ -165,20 +165,6 @@ class FunctionLifter
             {
                 return Result<ir::Function>::failure(set_block.error());
             }
-            if (stopped_at_unsupported_)
-            {
-                ir::Terminator trap;
-                trap.kind = ir::TerminatorKind::Trap;
-                trap.source = ir::SourceLocation{source_block.instructions.empty()
-                                                       ? address
-                                                       : source_block.instructions.front().address,
-                                                   0U, {}};
-                trap.trap_reason =
-                    "unsupported_instruction:unlifted CFG block after the first diagnostic boundary";
-                const auto stopped = builder_.set_terminator(std::move(trap));
-                if (!stopped) return Result<ir::Function>::failure(stopped.error());
-                continue;
-            }
             const auto lifted = lift_block(source_block);
             if (!lifted)
             {
@@ -217,7 +203,6 @@ class FunctionLifter
         trap.source = source_location(instruction);
         trap.trap_reason = "unsupported_instruction:" + error.message;
         const auto stopped = builder_.set_terminator(std::move(trap));
-        if (stopped) stopped_at_unsupported_ = true;
         return stopped;
     }
 
@@ -1467,24 +1452,39 @@ class FunctionLifter
         {
             return Result<void>::failure(unsupported(instruction, "expected register and 16-bit immediate"));
         }
-        const auto type = type_for_width(instruction.operands[0].reg.width);
-        const auto immediate = static_cast<std::int64_t>((instruction.opcode >> 5U) & 0xffffU);
-        const auto shift = static_cast<std::uint8_t>(((instruction.opcode >> 21U) & 0x3U) * 16U);
-        const auto max_shift = type == ir::i32_type() ? 16U : 48U;
-        if (immediate < 0 || immediate > 0xffff ||
-            (instruction.operands[1].shift_kind != aarch64::ShiftKind::None &&
-             instruction.operands[1].shift_kind != aarch64::ShiftKind::Lsl) ||
-            shift > max_shift || (shift % 16U) != 0U)
+        const auto& destination = instruction.operands[0].reg;
+        if (destination.kind != aarch64::RegisterKind::General || !destination.valid() ||
+            destination.index > 31U || destination.is_stack_pointer ||
+            (destination.width != aarch64::RegisterWidth::W32 &&
+             destination.width != aarch64::RegisterWidth::X64))
+        {
+            return Result<void>::failure(
+                unsupported(instruction, "destination is not a scalar W/X general-purpose register"));
+        }
+        const auto type = type_for_width(destination.width);
+        const auto& immediate_operand = instruction.operands[1];
+        if (immediate_operand.immediate < 0 || immediate_operand.immediate > 0xffff ||
+            (immediate_operand.shift_kind != aarch64::ShiftKind::None &&
+             immediate_operand.shift_kind != aarch64::ShiftKind::Lsl))
         {
             return Result<void>::failure(unsupported(instruction, "invalid MOVZ/MOVK immediate or shift"));
         }
+        const auto shift = immediate_operand.shift;
+        const bool legal_shift = type == ir::i32_type()
+                                     ? shift == 0U || shift == 16U
+                                     : shift == 0U || shift == 16U || shift == 32U || shift == 48U;
+        if ((immediate_operand.shift_kind == aarch64::ShiftKind::None && shift != 0U) || !legal_shift)
+        {
+            return Result<void>::failure(unsupported(instruction, "invalid MOVZ/MOVK immediate or shift"));
+        }
+        const auto immediate = static_cast<std::uint64_t>(immediate_operand.immediate);
+        const auto width_mask = type == ir::i32_type()
+                                    ? static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())
+                                    : std::numeric_limits<std::uint64_t>::max();
+        const auto shifted = (immediate << shift) & width_mask;
         if (!keep)
         {
-            auto value = static_cast<std::uint64_t>(immediate) << shift;
-            if (negate)
-            {
-                value = ~value;
-            }
+            const auto value = negate ? (~shifted & width_mask) : shifted;
             const auto constant_value = constant(type, value, instruction);
             if (!constant_value)
             {
@@ -1497,12 +1497,9 @@ class FunctionLifter
         {
             return Result<void>::failure(old.error());
         }
-        const auto mask = type == ir::i32_type()
-                              ? static_cast<std::uint64_t>(~(std::uint32_t{0xffff} << shift))
-                              : ~(std::uint64_t{0xffff} << shift);
+        const auto mask = width_mask ^ (std::uint64_t{0xffff} << shift);
         const auto mask_value = constant(type, mask, instruction);
-        const auto insert_value = constant(
-            type, static_cast<std::uint64_t>(immediate) << shift, instruction);
+        const auto insert_value = constant(type, shifted, instruction);
         if (!mask_value || !insert_value)
         {
             return Result<void>::failure(!mask_value ? mask_value.error() : insert_value.error());
@@ -3067,7 +3064,6 @@ class FunctionLifter
     ir::Builder builder_;
     std::map<GuestAddress, ir::BlockId> block_ids_;
     std::size_t operations_for_instruction_ = 0U;
-    bool stopped_at_unsupported_ = false;
 };
 
 } // namespace

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -124,6 +125,14 @@ Result<runtime::ExecutionResult> execute_until_boundary(
         frame.reset(function);
     }
     runtime::ExecutionResult result;
+    std::optional<runtime::ObservedInstructionExecution> pending_observation;
+    const auto flush_observation = [&](std::optional<std::uint64_t> next_guest_pc) {
+        if (!pending_observation) return;
+        pending_observation->post_state = cpu;
+        pending_observation->next_guest_pc = next_guest_pc;
+        result.observed_instruction_executions.push_back(std::move(pending_observation.value()));
+        pending_observation.reset();
+    };
 
     while (true)
     {
@@ -146,10 +155,17 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                 return Result<runtime::ExecutionResult>::success(std::move(result));
             }
             ++result.executed_operations;
-            if (instruction.opcode == ir::Opcode::SetPc &&
-                result.observed_guest_pcs.size() < options.max_observed_guest_pcs &&
+            const bool observe_instruction = instruction.opcode == ir::Opcode::SetPc &&
                 std::find(options.observed_guest_pcs.begin(), options.observed_guest_pcs.end(),
-                          instruction.source.guest_pc) != options.observed_guest_pcs.end() &&
+                          instruction.source.guest_pc) != options.observed_guest_pcs.end();
+            if (instruction.opcode == ir::Opcode::SetPc)
+            {
+                flush_observation(instruction.source.guest_pc);
+                ++result.executed_guest_instructions;
+                result.executed_guest_pcs.push_back(instruction.source.guest_pc);
+            }
+            if (observe_instruction &&
+                result.observed_guest_pcs.size() < options.max_observed_guest_pcs &&
                 std::find(result.observed_guest_pcs.begin(), result.observed_guest_pcs.end(),
                           instruction.source.guest_pc) == result.observed_guest_pcs.end())
             {
@@ -184,6 +200,17 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                 break;
             case ir::Opcode::SetPc:
                 cpu.pc = instruction.source.guest_pc;
+                if (observe_instruction &&
+                    std::find_if(result.observed_instruction_executions.begin(),
+                                 result.observed_instruction_executions.end(),
+                                 [&](const auto& observed) {
+                                     return observed.guest_pc == instruction.source.guest_pc;
+                                 }) == result.observed_instruction_executions.end())
+                {
+                    pending_observation = runtime::ObservedInstructionExecution{};
+                    pending_observation->guest_pc = instruction.source.guest_pc;
+                    pending_observation->pre_state = cpu;
+                }
                 break;
             case ir::Opcode::ReadRegister:
             {
@@ -828,6 +855,8 @@ Result<runtime::ExecutionResult> execute_until_boundary(
             result.boundary = runtime::ExecutionBoundary{
                 runtime::ExecutionBoundaryKind::Return, terminator.source.guest_pc, cpu.pc,
                 cpu.pc != 0U, ir::invalid_block, 0U, function.guest_entry(), false, 0U, {}, {}};
+            flush_observation(cpu.pc == 0U ? std::nullopt
+                                          : std::optional<std::uint64_t>(cpu.pc));
             return Result<runtime::ExecutionResult>::success(result);
         case ir::TerminatorKind::DirectCall:
         case ir::TerminatorKind::FunctionTransfer:
@@ -871,6 +900,8 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                 provenance.kind == InterpreterValueProvenance::Kind::GuestLoad,
                 provenance.address, std::move(target_provenance),
                 terminator.target_register ? ir::register_name(terminator.target_register.value()) : ""};
+            flush_observation(cpu.pc == 0U ? std::nullopt
+                                          : std::optional<std::uint64_t>(cpu.pc));
             return Result<runtime::ExecutionResult>::success(result);
         }
         case ir::TerminatorKind::Trap:
@@ -883,6 +914,7 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                     function.guest_entry(), false, 0U,
                     terminator.trap_reason.substr(std::string("unsupported_instruction:").size()), {}};
                 result.final_guest_pc = cpu.pc;
+                flush_observation(std::nullopt);
                 return Result<runtime::ExecutionResult>::success(std::move(result));
             }
             (void)runtime::switchrecomp_runtime_trap(&runtime, terminator.trap_reason.c_str());
@@ -894,6 +926,7 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                     ir::invalid_block, 0U, function.guest_entry(), false, 0U,
                     runtime.last_error.message, {}};
                 result.final_guest_pc = cpu.pc;
+                flush_observation(std::nullopt);
                 return Result<runtime::ExecutionResult>::success(std::move(result));
             }
             return runtime_failure(runtime);

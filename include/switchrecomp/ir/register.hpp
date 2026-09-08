@@ -21,7 +21,8 @@ struct GuestRegister
 
     [[nodiscard]] bool valid() const noexcept
     {
-        return index <= 31U && !(is_stack_pointer && is_zero) &&
+        const bool valid_width = width == RegisterWidth::W32 || width == RegisterWidth::X64;
+        return valid_width && index <= 31U && !(is_stack_pointer && is_zero) &&
                (is_stack_pointer || is_zero || index < 31U);
     }
 

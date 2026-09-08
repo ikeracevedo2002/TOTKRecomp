@@ -594,7 +594,8 @@ namespace
            cs_insn_group(handle, &instruction, ARM64_GRP_RET) != 0U;
 }
 
-[[nodiscard]] Operand normalize_operand(const cs_arm64_op& operand, const cs_arm64& detail)
+[[nodiscard]] Operand normalize_operand(const cs_arm64_op& operand, const cs_arm64& detail,
+                                        InstructionId instruction_id, std::uint32_t opcode)
 {
     Operand result;
     result.arrangement = from_capstone_arrangement(operand.vas);
@@ -636,6 +637,16 @@ namespace
     case ARM64_OP_CIMM:
         result.kind = OperandKind::Immediate;
         result.immediate = operand.imm;
+        if ((instruction_id == InstructionId::Movz || instruction_id == InstructionId::Movn ||
+             instruction_id == InstructionId::Movk) && detail.op_count == 2U)
+        {
+            // Capstone prints some MOVN aliases as a signed final constant.
+            // The normalized operand is the architectural imm16 field shared
+            // by the move-wide encodings, not that formatted alias value.
+            result.immediate = static_cast<std::int64_t>((opcode >> 5U) & 0xffffU);
+            result.shift = static_cast<std::uint8_t>(((opcode >> 21U) & 0x3U) * 16U);
+            result.shift_kind = result.shift == 0U ? ShiftKind::None : ShiftKind::Lsl;
+        }
         break;
     case ARM64_OP_MEM:
         result.kind = OperandKind::Memory;
@@ -1015,7 +1026,7 @@ Result<DecodedInstruction> AArch64Decoder::decode(GuestAddress address,
     result.operands.reserve(detail.op_count);
     for (std::uint8_t index = 0U; index < detail.op_count; ++index)
     {
-        result.operands.push_back(normalize_operand(detail.operands[index], detail));
+        result.operands.push_back(normalize_operand(detail.operands[index], detail, result.id, opcode));
     }
     for (std::size_t index = 0U; index < result.operands.size(); ++index)
     {
