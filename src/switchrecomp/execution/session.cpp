@@ -709,6 +709,8 @@ const char* execution_stop_reason_name(ExecutionStopReason reason) noexcept
     case ExecutionStopReason::EventLimitExceeded: return "event_limit_exceeded";
     case ExecutionStopReason::GuestBlockLimitExceeded: return "guest_block_limit_exceeded";
     case ExecutionStopReason::InvalidCrossModuleTarget: return "invalid_cross_module_target";
+    case ExecutionStopReason::IndirectTargetRefinementBudgetExceeded:
+        return "indirect_target_refinement_budget_exceeded";
     }
     return "unknown";
 }
@@ -1260,7 +1262,8 @@ Result<void> ExecutionSession::stop(ExecutionSessionResult& result, ExecutionSto
     if (reason == ExecutionStopReason::UnresolvedImport) event_kind = ExecutionEventKind::ImportBoundary;
     else if (reason == ExecutionStopReason::UnresolvedIndirectControlFlow ||
              reason == ExecutionStopReason::UnknownGuestFunction ||
-             reason == ExecutionStopReason::InvalidIndirectTarget)
+             reason == ExecutionStopReason::InvalidIndirectTarget ||
+             reason == ExecutionStopReason::IndirectTargetRefinementBudgetExceeded)
         event_kind = ExecutionEventKind::IndirectBoundary;
     else if (reason == ExecutionStopReason::MemoryFault) event_kind = ExecutionEventKind::MemoryFault;
     else if (reason == ExecutionStopReason::RuntimeImportUnimplemented ||

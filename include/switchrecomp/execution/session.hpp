@@ -66,6 +66,7 @@ enum class ExecutionStopReason
     EventLimitExceeded,
     GuestBlockLimitExceeded,
     InvalidCrossModuleTarget,
+    IndirectTargetRefinementBudgetExceeded,
 };
 
 [[nodiscard]] const char* execution_stop_reason_name(ExecutionStopReason reason) noexcept;

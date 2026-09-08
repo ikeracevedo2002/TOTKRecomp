@@ -784,6 +784,10 @@ int main(int argc, char** argv)
                 }
             }
             analysis::sort_observed_indirect_targets(candidates);
+            const bool refinement_budget_exhausted =
+                !candidates.empty() &&
+                (new_indirect_candidates >= max_new_indirect_candidates ||
+                 refinement_passes >= max_refinement_passes);
             bool refined = false;
             for (const auto& candidate : candidates)
             {
@@ -808,6 +812,14 @@ int main(int argc, char** argv)
                 break;
             }
             if (refined) continue;
+
+            if (refinement_budget_exhausted)
+            {
+                run_result.stop_reason =
+                    execution::ExecutionStopReason::IndirectTargetRefinementBudgetExceeded;
+                run_result.diagnostic =
+                    "indirect target refinement pass or candidate limit exhausted";
+            }
 
             final_result = std::move(run_result);
             break;
