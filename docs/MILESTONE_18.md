@@ -14,9 +14,11 @@ reach the real `UMULH` instruction.
 * exact base SHA: `8ab6d1201be8eadcdd84352577780fbf5e763c23`
 * exact final head SHA (implementation before documentation handoff):
   `e162bfc`
-* PR: to be filled after push
+* evidence handoff head before PR metadata update: `3c7507e`
+* PR: [#23](https://github.com/ikeracevedo2002/TOTKRecomp/pull/23)
 * commits: `5b9cd9e` (analysis/data model/refinement), `e162bfc`
-  (execution integration and tests), plus the evidence/documentation handoff
+  (execution integration and tests), `3c7507e` (evidence/documentation), plus
+  the final PR/CI metadata update
 
 The branch was fetched, verified at the required M17 commit, checked out from
 that commit, and created before source changes. The pre-change complete suite
