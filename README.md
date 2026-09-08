@@ -149,6 +149,7 @@ On a multi-config generator, use `build/Debug/nso-inspect`.
 - [Milestone 13 multi-module provider resolution](docs/MILESTONE_13.md)
 - [Milestone 14 complete executable-set ingestion and provider closure](docs/MILESTONE_14.md)
 - [Milestone 15 real executable-set closure and `__nnmusl_init_dso`](docs/MILESTONE_15.md)
+- [Milestone 19 move-wide semantics and real UMULH frontier](docs/MILESTONE_19.md)
 - [AArch64 support matrix and coverage workflow](docs/AARCH64_SUPPORT.md)
 - [Build notes](docs/BUILD.md)
 - [Dependency policy](docs/DEPENDENCIES.md)
