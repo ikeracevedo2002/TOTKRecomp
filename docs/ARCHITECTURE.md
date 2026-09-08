@@ -2093,6 +2093,18 @@ evidence is what raises confidence to confirmed. See
 [MILESTONE_18.md](MILESTONE_18.md) for the private-input evidence ledger and
 the exact next execution boundary.
 
+The outer refinement driver uses a deterministic pending worklist rather than
+rescanning all historical observations as new discoveries. Its typed finite
+limits separately bound rounds, target candidates, candidate assessments,
+successful promotions, and immutable map rebuilds. A work item includes the
+target module/address and source/control-flow/pointer provenance; repeated
+unchanged observations are coalesced while their guest-side provenance and
+observation count remain auditable. A promotion changes the immutable map and
+advances a generation; only a later observation whose certification result can
+have changed is reconsidered. Exhaustion is reported with the exact dimension,
+consumed value, limit, and pending work, and never authorizes uncertified guest
+execution. See [MILESTONE_23.md](MILESTONE_23.md).
+
 ### Future milestone — Filesystem and asset loading
 
 **Goal:** Mount user-provided game data and implement the required streaming path.
