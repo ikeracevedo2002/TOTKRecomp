@@ -168,6 +168,25 @@ TEST_CASE("M23 genuine candidate, promotion, and map-rebuild exhaustion remain t
                 IndirectTargetRefinementBudgetDimension::MapRebuilds);
     }
 
+    SECTION("promotion limit")
+    {
+        IndirectTargetRefinementBudgets budgets;
+        budgets.max_promotions = 1U;
+        IndirectTargetRefinementWorklist worklist(budgets);
+        REQUIRE(worklist.observe(assessment(observed(0x6150U))).accepted);
+        REQUIRE(worklist.observe(assessment(observed(0x6154U))).accepted);
+        promote_next(worklist);
+        const auto pending = worklist.pending_candidates();
+        REQUIRE(pending.size() == 1U);
+        const auto identity = analysis::indirect_target_candidate_identity(pending.front());
+        REQUIRE(worklist.begin_candidate_assessment(identity));
+        REQUIRE_FALSE(worklist.can_promote());
+        REQUIRE(worklist.summary().exhaustion.dimension ==
+                IndirectTargetRefinementBudgetDimension::Promotions);
+        REQUIRE(worklist.summary().exhaustion.consumed == 1U);
+        REQUIRE(worklist.summary().exhaustion.limit == 1U);
+    }
+
     SECTION("assessment limit")
     {
         IndirectTargetRefinementBudgets budgets;
