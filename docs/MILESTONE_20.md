@@ -5,8 +5,10 @@
 The branch is `milestone-20-indirect-function-entry-certification`. It was
 created from the exact M19 head `cb4110984b21184e81385b1e2b51d705f87d9437`,
 whose exact M19 base is `f571c21e7d306bfc80f3cba294bd4d31cfb2607e`.
-The final implementation and documentation commit SHAs are reported in the
-completion handoff because a commit cannot contain its own final SHA.
+The implementation commit is `bf8515f31011f49ecc0809a3cd5a23627514cb9a`.
+The final documentation commit SHA is reported in the completion handoff
+because a commit cannot contain its own final SHA. PR #25 is open against the
+M19 branch.
 
 The pre-change CTest baseline was 233/233. M20 adds eight focused test cases;
 the current suite is 241/241.
@@ -141,8 +143,8 @@ executable, or that arbitrary indirect calls are solved.
 | GCC | pass, 241/241 |
 | ASan + UBSan | pass, 241/241 |
 | TSan | pass, 241/241 |
-| LLVM 18 | unavailable locally; CI status in completion handoff |
-| MSVC | unavailable locally; CI status in completion handoff |
+| LLVM 18 | pass in PR #25 CI |
+| MSVC | pass in PR #25 CI |
 | New dependencies | 0 |
 
 Private NSO files, keys, local configuration, extracted executable data,
