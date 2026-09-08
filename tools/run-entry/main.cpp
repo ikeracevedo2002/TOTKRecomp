@@ -4,6 +4,7 @@
 #include "switchrecomp/target/manifest.hpp"
 #include "switchrecomp/version.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -700,14 +701,15 @@ int main(int argc, char** argv)
             }
             maps.push_back(std::move(map).value());
         }
-        const auto process_map = analysis::ProcessFunctionMap::build(std::move(maps));
-        if (!process_map)
+        const auto process_map_result = analysis::ProcessFunctionMap::build(std::move(maps));
+        if (!process_map_result)
         {
-            print_error(process_map.error());
+            print_error(process_map_result.error());
             return static_cast<int>(ExitCode::InfrastructureFailure);
         }
+        analysis::ProcessFunctionMap process_map = std::move(process_map_result).value();
         const auto* primary_map = [&]() -> const analysis::FinalizedFunctionMap* {
-            for (const auto& map : process_map.value().maps())
+            for (const auto& map : process_map.maps())
                 if (map.identity().module == configured_primary) return &map;
             return nullptr;
         }();
@@ -747,16 +749,82 @@ int main(int argc, char** argv)
             summary.relocations_applied += module.applied_relocations;
             summary.unresolved_relocations += module.unresolved_relocations.size();
         }
-        execution::ExecutionSession session(process.value().memory(), process_map.value(),
-                                            process.value(), execution_options, summary,
-                                            &runtime_imports);
-        const auto run = session.run(selected.value());
-        if (!run)
+        analysis::IndirectTargetDiscoveryOptions discovery_options;
+        discovery_options.budgets = function_options.budgets;
+        discovery_options.cfg = function_options.cfg;
+        constexpr std::size_t max_refinement_passes = 8U;
+        constexpr std::size_t max_new_indirect_candidates = 32U;
+        std::size_t refinement_passes = 0U;
+        std::size_t new_indirect_candidates = 0U;
+        std::vector<analysis::IndirectTargetAssessment> promoted_targets;
+        execution::ExecutionSessionResult final_result;
+        for (;;)
         {
-            print_error(run.error());
-            return static_cast<int>(ExitCode::InfrastructureFailure);
+            execution::ExecutionSession session(process.value().memory(), process_map,
+                                                process.value(), execution_options, summary,
+                                                &runtime_imports);
+            const auto run = session.run(selected.value());
+            if (!run)
+            {
+                print_error(run.error());
+                return static_cast<int>(ExitCode::InfrastructureFailure);
+            }
+            auto run_result = std::move(run).value();
+            std::vector<analysis::ObservedIndirectTarget> candidates;
+            if (run_result.stop_reason == execution::ExecutionStopReason::UnknownGuestFunction)
+            {
+                for (const auto& assessment : run_result.indirect_target_discovery)
+                {
+                    if (assessment.decision.eligible_for_promotion &&
+                        assessment.decision.kind ==
+                            analysis::IndirectTargetDecisionKind::TrustedNewEntry)
+                    {
+                        candidates.push_back(assessment.observed);
+                    }
+                }
+            }
+            analysis::sort_observed_indirect_targets(candidates);
+            bool refined = false;
+            for (const auto& candidate : candidates)
+            {
+                if (new_indirect_candidates >= max_new_indirect_candidates ||
+                    refinement_passes >= max_refinement_passes)
+                {
+                    break;
+                }
+                auto expansion = analysis::refine_process_function_map(
+                    process_map, process.value(), candidate, discovery_options);
+                if (!expansion)
+                {
+                    print_error(expansion.error());
+                    return static_cast<int>(ExitCode::InfrastructureFailure);
+                }
+                if (!expansion.value().assessment.decision.promoted) continue;
+                process_map = std::move(expansion.value().map);
+                promoted_targets.push_back(std::move(expansion.value().assessment));
+                ++new_indirect_candidates;
+                ++refinement_passes;
+                refined = true;
+                break;
+            }
+            if (refined) continue;
+
+            final_result = std::move(run_result);
+            break;
         }
-        const auto report = execution::render_execution_report_json(run.value());
+        for (const auto& promoted : promoted_targets)
+        {
+            final_result.indirect_target_discovery.erase(
+                std::remove_if(final_result.indirect_target_discovery.begin(),
+                               final_result.indirect_target_discovery.end(),
+                               [&](const auto& item) {
+                                   return item.observed.target == promoted.observed.target &&
+                                          item.observed.source_pc == promoted.observed.source_pc;
+                               }),
+                final_result.indirect_target_discovery.end());
+            final_result.indirect_target_discovery.push_back(promoted);
+        }
+        const auto report = execution::render_execution_report_json(final_result);
         if (!report_path.empty())
         {
             std::ofstream output(report_path, std::ios::binary);
@@ -765,8 +833,8 @@ int main(int argc, char** argv)
             if (!output) { std::cerr << "unable to finish report\n"; return static_cast<int>(ExitCode::InfrastructureFailure); }
         }
         if (emit_json) std::cout << report;
-        else std::cout << "STOPPED: " << execution::execution_stop_reason_name(run.value().stop_reason)
-                        << " pc=" << std::hex << run.value().stop_pc << std::dec << '\n';
+        else std::cout << "STOPPED: " << execution::execution_stop_reason_name(final_result.stop_reason)
+                        << " pc=" << std::hex << final_result.stop_pc << std::dec << '\n';
         return static_cast<int>(ExitCode::Success);
     }
 
