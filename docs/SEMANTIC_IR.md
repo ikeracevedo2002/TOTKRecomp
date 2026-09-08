@@ -35,6 +35,14 @@ bits 127:64 of the mathematical unsigned 64x64 product. The interpreter uses
 a portable 32-bit-limb implementation; LLVM lowers it with zero-extension to
 `i128`, multiplication, a logical shift by 64, and truncation to `i64`.
 
+`MulHighSigned` is the signed AArch64 counterpart used by `SMULH`. It has the
+same two-`i64`-operand and `i64`-result contract, but interprets both operands
+as signed two's-complement values and returns the upper 64 bits of their
+conceptual signed 128-bit product. The portable interpreter derives this from
+the existing unsigned high-half primitive with unsigned modulo-2^64 sign
+corrections; LLVM uses sign-extension to `i128`, multiplication, arithmetic
+right shift by 64, and truncation. Neither operation modifies NZCV.
+
 FP operations use raw-bit constants and typed `BitCast` instructions. Vector
 operations carry an explicit arrangement and lane index; vector values are
 never represented as host pointers in the IR. The verifier checks arrangement,

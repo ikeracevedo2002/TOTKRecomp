@@ -330,6 +330,20 @@ class FunctionLifter
                                           0, 0, 0, source_location(instruction)});
     }
 
+    [[nodiscard]] Result<ir::ValueId> mul_high_signed(ir::ValueId left, ir::ValueId right,
+                                                      ir::Type type,
+                                                      const DecodedInstruction& instruction)
+    {
+        if (type != ir::i64_type())
+        {
+            return Result<ir::ValueId>::failure(
+                unsupported(instruction, "SMULH requires X-register operands"));
+        }
+        return emit_value(ir::Instruction{ir::Opcode::MulHighSigned, ir::invalid_value, type,
+                                          {left, right}, {}, ir::Flag::N, ir::ConditionCode::Al,
+                                          0, 0, 0, source_location(instruction)});
+    }
+
     [[nodiscard]] Result<ir::ValueId> unary(ir::Opcode opcode, ir::ValueId value, ir::Type type,
                                             const DecodedInstruction& instruction)
     {
@@ -1693,9 +1707,19 @@ class FunctionLifter
         {
             return Result<void>::failure(unsupported(instruction, "expected multiply register operands"));
         }
-        if (instruction.id == aarch64::InstructionId::Umulh && instruction.operands.size() != 3U)
+        const bool high_multiply = instruction.id == aarch64::InstructionId::Umulh ||
+                                   instruction.id == aarch64::InstructionId::Smulh;
+        if (high_multiply && (instruction.operands.size() != 3U ||
+                              instruction.operands[0].reg.width != aarch64::RegisterWidth::X64 ||
+                              instruction.operands[1].kind != aarch64::OperandKind::Register ||
+                              instruction.operands[2].kind != aarch64::OperandKind::Register ||
+                              instruction.operands[1].reg.width != aarch64::RegisterWidth::X64 ||
+                              instruction.operands[2].reg.width != aarch64::RegisterWidth::X64))
         {
-            return Result<void>::failure(unsupported(instruction, "UMULH requires exactly three register operands"));
+            return Result<void>::failure(unsupported(
+                instruction, high_multiply && instruction.id == aarch64::InstructionId::Smulh
+                                 ? "SMULH requires exactly three X-register operands"
+                                 : "UMULH requires exactly three X-register operands"));
         }
         const auto type = type_for_width(instruction.operands[0].reg.width);
         const auto left = operand_value(instruction.operands[1], type, instruction);
@@ -1706,6 +1730,8 @@ class FunctionLifter
         }
         const auto product = instruction.id == aarch64::InstructionId::Umulh
                                  ? mul_high_unsigned(left.value(), right.value(), type, instruction)
+                             : instruction.id == aarch64::InstructionId::Smulh
+                                 ? mul_high_signed(left.value(), right.value(), type, instruction)
                                  : binary(ir::Opcode::Mul, left.value(), right.value(), type, instruction);
         if (!product)
         {
@@ -3024,6 +3050,7 @@ class FunctionLifter
         case aarch64::InstructionId::Msub:
         case aarch64::InstructionId::Mneg:
         case aarch64::InstructionId::Umulh:
+        case aarch64::InstructionId::Smulh:
             return lift_multiply(instruction);
         case aarch64::InstructionId::Adr:
         case aarch64::InstructionId::Adrp:

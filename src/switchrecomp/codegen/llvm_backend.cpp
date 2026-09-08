@@ -581,6 +581,7 @@ class ModuleLowerer
             return Result<void>::success();
         }
         case ir::Opcode::MulHighUnsigned:
+        case ir::Opcode::MulHighSigned:
         {
             const auto left = require_value(instruction.operands[0]);
             const auto right = require_value(instruction.operands[1]);
@@ -589,10 +590,17 @@ class ModuleLowerer
                 return Result<void>::failure(!left ? left.error() : right.error());
             }
             auto* wide_type = Type::getInt128Ty(context_);
-            auto* wide_left = builder_.CreateZExt(left.value(), wide_type, "umulh.left");
-            auto* wide_right = builder_.CreateZExt(right.value(), wide_type, "umulh.right");
+            const bool signed_multiply = instruction.opcode == ir::Opcode::MulHighSigned;
+            auto* wide_left = signed_multiply
+                                  ? builder_.CreateSExt(left.value(), wide_type, "smulh.left")
+                                  : builder_.CreateZExt(left.value(), wide_type, "umulh.left");
+            auto* wide_right = signed_multiply
+                                   ? builder_.CreateSExt(right.value(), wide_type, "smulh.right")
+                                   : builder_.CreateZExt(right.value(), wide_type, "umulh.right");
             auto* product = builder_.CreateMul(wide_left, wide_right, "umulh.product");
-            auto* high = builder_.CreateLShr(product, ConstantInt::get(wide_type, 64U), "umulh.high");
+            auto* high = signed_multiply
+                             ? builder_.CreateAShr(product, ConstantInt::get(wide_type, 64U), "smulh.high")
+                             : builder_.CreateLShr(product, ConstantInt::get(wide_type, 64U), "umulh.high");
             assign(instruction, builder_.CreateTrunc(high, Type::getInt64Ty(context_), "umulh.result"));
             return Result<void>::success();
         }

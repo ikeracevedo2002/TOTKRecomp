@@ -337,6 +337,7 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                 break;
             }
             case ir::Opcode::MulHighUnsigned:
+            case ir::Opcode::MulHighSigned:
             {
                 const auto left = read(instruction.operands[0]);
                 const auto right = read(instruction.operands[1]);
@@ -344,8 +345,10 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                 {
                     return Result<runtime::ExecutionResult>::failure(!left ? left.error() : right.error());
                 }
-                const auto stored = store_result(
-                    common::multiply_high_unsigned_64(left.value(), right.value()));
+                const auto high = instruction.opcode == ir::Opcode::MulHighUnsigned
+                                      ? common::multiply_high_unsigned_64(left.value(), right.value())
+                                      : common::multiply_high_signed_64(left.value(), right.value());
+                const auto stored = store_result(high);
                 if (!stored)
                 {
                     return Result<runtime::ExecutionResult>::failure(stored.error());

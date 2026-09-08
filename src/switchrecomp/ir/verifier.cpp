@@ -410,6 +410,7 @@ Result<void> verify(const Function& function)
                 break;
             }
             case Opcode::MulHighUnsigned:
+            case Opcode::MulHighSigned:
             {
                 const auto pair = require_same_integer_pair();
                 if (!pair)
@@ -418,7 +419,8 @@ Result<void> verify(const Function& function)
                 }
                 else if (pair.value() != i64_type() || instruction.result_type != i64_type())
                 {
-                    checked = invalid("mul_high_unsigned currently requires matching i64 operands and result");
+                    checked = invalid(std::string(opcode_name(instruction.opcode)) +
+                                      " requires matching i64 operands and result");
                 }
                 else
                 {

@@ -21,6 +21,8 @@ class Builder
                                                SourceLocation source = {});
     [[nodiscard]] Result<ValueId> mul_high_unsigned(ValueId left, ValueId right, Type type,
                                                      SourceLocation source = {});
+    [[nodiscard]] Result<ValueId> mul_high_signed(ValueId left, ValueId right, Type type,
+                                                   SourceLocation source = {});
     [[nodiscard]] Result<void> emit_void(Instruction instruction);
     [[nodiscard]] Result<void> set_terminator(Terminator terminator);
 

@@ -95,6 +95,17 @@ Result<ValueId> Builder::mul_high_unsigned(ValueId left, ValueId right, Type typ
     return emit(std::move(instruction));
 }
 
+Result<ValueId> Builder::mul_high_signed(ValueId left, ValueId right, Type type,
+                                          SourceLocation source)
+{
+    Instruction instruction;
+    instruction.opcode = Opcode::MulHighSigned;
+    instruction.result_type = type;
+    instruction.operands = {left, right};
+    instruction.source = std::move(source);
+    return emit(std::move(instruction));
+}
+
 Result<void> Builder::emit_void(Instruction instruction)
 {
     if (!instruction.result_type.is_void())

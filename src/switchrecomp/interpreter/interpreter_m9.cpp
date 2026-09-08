@@ -194,11 +194,15 @@ Result<runtime::ExecutionResult> execute(const ir::Function& function, runtime::
                 break;
             }
             case ir::Opcode::MulHighUnsigned:
+            case ir::Opcode::MulHighSigned:
             {
                 const auto left = read(0U), right = read(1U);
                 if (!left || !right)
                     return Result<runtime::ExecutionResult>::failure(!left ? left.error() : right.error());
-                if (const auto done = store(common::multiply_high_unsigned_64(left.value(), right.value())); !done)
+                const auto high = instruction.opcode == ir::Opcode::MulHighUnsigned
+                                      ? common::multiply_high_unsigned_64(left.value(), right.value())
+                                      : common::multiply_high_signed_64(left.value(), right.value());
+                if (const auto done = store(high); !done)
                     return Result<runtime::ExecutionResult>::failure(done.error());
                 break;
             }

@@ -53,6 +53,7 @@ enum class Opcode : std::uint8_t
     Sub,
     Mul,
     MulHighUnsigned,
+    MulHighSigned,
     And,
     Or,
     Xor,

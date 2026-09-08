@@ -37,4 +37,17 @@ namespace switchrecomp::common
     return high_product + (cross_left >> 32U) + (cross_right >> 32U) + carry;
 }
 
+// Returns the upper 64 bits of the mathematical signed 64x64 product as a
+// bit pattern. The correction terms are deliberately unsigned so that every
+// operation is defined modulo 2^64 on compilers without a native 128-bit type.
+[[nodiscard]] constexpr std::uint64_t multiply_high_signed_64(
+    std::uint64_t left, std::uint64_t right) noexcept
+{
+    auto high = multiply_high_unsigned_64(left, right);
+    constexpr auto sign_bit = std::uint64_t{1} << 63U;
+    if ((left & sign_bit) != 0U) high -= right;
+    if ((right & sign_bit) != 0U) high -= left;
+    return high;
+}
+
 } // namespace switchrecomp::common
