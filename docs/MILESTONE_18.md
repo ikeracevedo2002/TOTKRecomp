@@ -12,14 +12,14 @@ reach the real `UMULH` instruction.
 
 * branch: `milestone-18-indirect-target-discovery`
 * exact base SHA: `8ab6d1201be8eadcdd84352577780fbf5e763c23`
-* exact final implementation head SHA (before documentation handoff):
-  `e162bfc`
+* exact final code-bearing head SHA: `cb72638`
 * evidence handoff head before PR metadata update: `3c7507e`
 * PR/CI handoff head: `a2a48d5`
 * PR: [#23](https://github.com/ikeracevedo2002/TOTKRecomp/pull/23)
 * commits: `5b9cd9e` (analysis/data model/refinement), `e162bfc`
-  (execution integration and tests), `3c7507e` (evidence/documentation), plus
-  the final PR/CI metadata update
+  (execution integration and tests), `3c7507e` (evidence/documentation),
+  `a2a48d5` and `ecd7334` (PR/CI metadata), `cb72638` (typed bounded
+  refinement exhaustion)
 
 The branch was fetched, verified at the required M17 commit, checked out from
 that commit, and created before source changes. The pre-change complete suite
@@ -270,11 +270,11 @@ usernames, or proprietary bytes.
 * ASan/UBSan: `227/227` passed in `build-asan`
 * TSan: `227/227` passed in `build-tsan`
 * local compiler: AppleClang 17 via `/usr/bin/c++`; no local GCC claim
-* GCC CI: passed in run `34189380092`
-* LLVM 18 CI: passed in run `34189380092`
-* ASan/UBSan CI: passed in run `34189380092`
-* TSan CI: passed in run `34189380092`
-* MSVC CI: passed in run `34189380092`
+* GCC CI: passed in run `34190513803` (push run `34190509889` also passed)
+* LLVM 18 CI: passed in run `34190513803` (push run `34190509889` also passed)
+* ASan/UBSan CI: passed in run `34190513803` (push run `34190509889` also passed)
+* TSan CI: passed in run `34190513803` (push run `34190509889` also passed)
+* MSVC CI: passed in run `34190513803` (push run `34190509889` also passed)
 
 ## Dependencies
 
