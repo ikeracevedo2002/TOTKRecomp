@@ -90,6 +90,68 @@ using json = nlohmann::json;
     return json{{"base", hex_address(range.base)}, {"size", range.size}};
 }
 
+[[nodiscard]] json analysis_report_json(
+    const std::vector<analysis::AnalysisAccounting>& accounting)
+{
+    json modules = json::array();
+    json totals{{"initial_seeds", 0U},
+                {"normalized_unique_seeds", 0U},
+                {"duplicate_coalesced_seeds", 0U},
+                {"excluded_candidate_seeds", 0U},
+                {"discovered_canonical_functions", 0U},
+                {"candidate_function_entries", 0U},
+                {"trusted_function_entries", 0U},
+                {"cfg_analyzed", 0U},
+                {"functions_with_cfg", 0U},
+                {"direct_call_discoveries", 0U},
+                {"new_seeds_generated", 0U},
+                {"blocks", 0U},
+                {"instructions", 0U},
+                {"edges", 0U},
+                {"bytes_analyzed", 0U},
+                {"boundary_finalization_passes", 0U},
+                {"failed_functions", 0U},
+                {"function_boundary_conflicts", 0U},
+                {"work_remaining_at_exhaustion", 0U}};
+    const auto add_total = [&totals](const char* key, std::size_t value) {
+        totals[key] = totals[key].get<std::size_t>() + value;
+    };
+    std::optional<std::string> strategy;
+    bool same_strategy = true;
+    for (const auto& item : accounting)
+    {
+        modules.push_back(json::parse(analysis::render_analysis_accounting_json(item)));
+        const auto current_strategy = std::string(analysis::analysis_strategy_name(item.strategy));
+        if (!strategy)
+            strategy = current_strategy;
+        else if (strategy.value() != current_strategy)
+            same_strategy = false;
+        add_total("initial_seeds", item.initial_seed_count);
+        add_total("normalized_unique_seeds", item.normalized_unique_seed_count);
+        add_total("duplicate_coalesced_seeds", item.duplicate_coalesced_seed_count);
+        add_total("excluded_candidate_seeds", item.excluded_candidate_seed_count);
+        add_total("discovered_canonical_functions", item.discovered_canonical_functions);
+        add_total("candidate_function_entries", item.candidate_function_entries);
+        add_total("trusted_function_entries", item.trusted_function_entries);
+        add_total("cfg_analyzed", item.functions_cfg_analyzed);
+        add_total("functions_with_cfg", item.canonical_functions_with_cfg);
+        add_total("direct_call_discoveries", item.direct_call_discoveries);
+        add_total("new_seeds_generated", item.new_seeds_generated);
+        add_total("blocks", item.blocks_consumed);
+        add_total("instructions", item.instructions_consumed);
+        add_total("edges", item.edges_consumed);
+        add_total("bytes_analyzed", item.bytes_analyzed);
+        add_total("boundary_finalization_passes", item.boundary_finalization_passes);
+        add_total("failed_functions", item.failed_functions);
+        add_total("function_boundary_conflicts", item.function_boundary_conflicts);
+        add_total("work_remaining_at_exhaustion", item.work_remaining_at_exhaustion);
+    }
+    return json{{"strategy", same_strategy && strategy ? json(strategy.value()) : json("mixed")},
+                {"module_count", accounting.size()},
+                {"modules", std::move(modules)},
+                {"totals", std::move(totals)}};
+}
+
 [[nodiscard]] json ranges_json(const std::vector<analysis::GuestAddressRange>& ranges)
 {
     json result = json::array();
@@ -479,7 +541,9 @@ using json = nlohmann::json;
                            {"canonical_entry", decision.canonical_entry
                                                    ? json(hex_address(*decision.canonical_entry))
                                                    : json(nullptr)},
-                           {"reason", decision.reason}}}};
+                           {"reason", decision.reason}}},
+        {"map_generation", json{{"before", assessment.map_generation_before},
+                                 {"after", assessment.map_generation_after}}}};
 }
 
 [[nodiscard]] json refinement_candidate_identity_json(
@@ -2265,12 +2329,14 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     {
         for (const auto& map : process_function_map_->maps())
         {
+            result.analysis.push_back(map.accounting());
             result.analyzed_functions += map.functions().size();
             result.precise_conflicts += map.conflicts().size();
         }
     }
     else
     {
+        result.analysis.push_back(function_map_->accounting());
         result.analyzed_functions = function_map_->functions().size();
         result.precise_conflicts = function_map_->conflicts().size();
     }
@@ -2896,11 +2962,15 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                       {"guest_bindings_ambiguous", result.relocations.guest_bindings_ambiguous},
                                       {"guest_bindings_unresolved", result.relocations.guest_bindings_unresolved},
                                       {"cross_module_relocations", result.relocations.cross_module_relocations}}},
-                {"analysis", json{{"functions", result.analyzed_functions},
+                {"analysis", [&]() {
+                     auto analysis = analysis_report_json(result.analysis);
+                     analysis["legacy_totals"] = json{{"functions", result.analyzed_functions},
                                    {"conflicting_functions", result.conflicting_functions},
                                    {"conflict_records", result.precise_conflicts},
                                    {"precise_conflicts", result.precise_conflicts},
-                                   {"precise_owned_bytes", result.precise_owned_bytes}}},
+                                   {"precise_owned_bytes", result.precise_owned_bytes}};
+                     return analysis;
+                 }()},
                 {"metadata", module_metadata_json(result.module_metadata)},
                 {"entry", json{{"kind", entry_selection_kind_name(result.entry.kind)},
                                 {"address", hex_address(result.entry.address)},

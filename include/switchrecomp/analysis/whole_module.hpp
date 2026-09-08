@@ -100,6 +100,7 @@ struct UnsupportedSummary
 struct ModuleCoverage
 {
     AnalysisBudgets budgets;
+    AnalysisAccounting analysis;
     std::size_t executable_bytes = 0U;
     std::size_t decoded_instructions = 0U;
     std::size_t supported_instructions = 0U;

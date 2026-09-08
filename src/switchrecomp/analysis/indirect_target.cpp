@@ -741,6 +741,17 @@ void account_cfg(const ControlFlowGraph& cfg, IndirectTargetValidation& validati
     return seeds;
 }
 
+void set_rebuild_roots(FunctionMapOptions& options, const std::vector<FunctionSeed>& seeds)
+{
+    if (options.budgets.strategy != AnalysisStrategy::ExecutionClosure) return;
+    options.execution_closure_roots.clear();
+    for (const auto& seed : seeds)
+    {
+        options.execution_closure_roots.insert(seed.entry);
+        options.execution_closure_roots.insert(seed.canonical_entry.value_or(seed.entry));
+    }
+}
+
 void mark_refinement_failure(IndirectTargetAssessment& assessment, const Error& error)
 {
     assessment.validation.analysis_error = error;
@@ -1666,8 +1677,10 @@ Result<FunctionMapRefinement> refine_function_map(
                                  result.assessment.decision.confidence, std::nullopt, std::nullopt,
                                  "immutable refinement from runtime indirect target at " +
                                      hex_address(observed.source_pc)});
+    auto rebuild_options = map_options(options);
+    set_rebuild_roots(rebuild_options, seeds);
     const auto rebuilt = FunctionMapBuilder::build(
-        ModuleAnalysisInput{input.identity, input.memory, std::move(seeds)}, map_options(options));
+        ModuleAnalysisInput{input.identity, input.memory, std::move(seeds)}, rebuild_options);
     if (!rebuilt)
     {
         mark_refinement_failure(result.assessment, rebuilt.error());
@@ -1718,6 +1731,7 @@ Result<ProcessFunctionMapRefinement> refine_process_function_map(
 
     std::vector<FinalizedFunctionMap> maps;
     maps.reserve(process_image.modules().size());
+    bool target_module_rebuilt = false;
     for (const auto& existing_map : existing.maps())
     {
         const auto* module = process_image.module(existing_map.identity().module);
@@ -1731,15 +1745,46 @@ Result<ProcessFunctionMapRefinement> refine_process_function_map(
         auto seeds = seeds_from_finalized_map(existing_map);
         if (existing_map.identity().module == result.assessment.validation.target_module)
         {
+            target_module_rebuilt = true;
             seeds.push_back(FunctionSeed{
                 observed.target, FunctionDiscoverySource::ObservedIndirectTarget,
                 result.assessment.decision.confidence, std::nullopt, std::nullopt,
                 "immutable process refinement from runtime indirect target at " +
                     hex_address(observed.source_pc)});
         }
+        auto rebuild_options = map_options(options);
+        set_rebuild_roots(rebuild_options, seeds);
         const auto rebuilt = FunctionMapBuilder::build(
             ModuleAnalysisInput{module->identity, &process_image.memory(), std::move(seeds)},
-            map_options(options));
+            rebuild_options);
+        if (!rebuilt)
+        {
+            mark_refinement_failure(result.assessment, rebuilt.error());
+            return Result<ProcessFunctionMapRefinement>::success(std::move(result));
+        }
+        maps.push_back(std::move(rebuilt).value());
+    }
+    if (!target_module_rebuilt)
+    {
+        const auto* target_module = process_image.module(
+            result.assessment.validation.target_module);
+        if (target_module == nullptr)
+        {
+            mark_refinement_failure(result.assessment, make_error(
+                ErrorCode::InvalidCrossModuleTransfer,
+                "candidate target module is not present in the process image"));
+            return Result<ProcessFunctionMapRefinement>::success(std::move(result));
+        }
+        std::vector<FunctionSeed> seeds{FunctionSeed{
+            observed.target, FunctionDiscoverySource::ObservedIndirectTarget,
+            result.assessment.decision.confidence, std::nullopt, std::nullopt,
+            "immutable process refinement from runtime indirect target at " +
+                hex_address(observed.source_pc)}};
+        auto rebuild_options = map_options(options);
+        set_rebuild_roots(rebuild_options, seeds);
+        const auto rebuilt = FunctionMapBuilder::build(
+            ModuleAnalysisInput{target_module->identity, &process_image.memory(), std::move(seeds)},
+            rebuild_options);
         if (!rebuilt)
         {
             mark_refinement_failure(result.assessment, rebuilt.error());

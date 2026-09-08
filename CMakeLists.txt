@@ -223,6 +223,7 @@ target_include_directories(switchrecomp-analysis
 )
 target_link_libraries(switchrecomp-analysis
     PUBLIC switchrecomp-common switchrecomp-memory switchrecomp-aarch64
+           nlohmann_json::nlohmann_json
 )
 totkrecomp_enable_project_warnings(switchrecomp-analysis)
 totkrecomp_enable_sanitizers(switchrecomp-analysis)
@@ -452,6 +453,7 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/milestone21_smulh_tests.cpp
         tests/milestone22_indirect_boundary_tests.cpp
         tests/milestone23_indirect_refinement_tests.cpp
+        tests/milestone24_bounded_closure_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE

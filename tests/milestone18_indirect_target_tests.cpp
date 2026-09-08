@@ -445,7 +445,7 @@ TEST_CASE("M18 execution reports retain indirect target provenance and schema")
     fixture.value().map = refined.value().map;
     const auto result = run(fixture.value(), 0x1000U);
     REQUIRE(result);
-    REQUIRE(execution::ExecutionSessionResult::schema_version == 10U);
+    REQUIRE(execution::ExecutionSessionResult::schema_version == 11U);
     const auto report = execution::render_execution_report_json(result.value());
     REQUIRE(report.find("indirect_target_discovery") != std::string::npos);
     REQUIRE(report.find("0x0000000000003000") != std::string::npos);

@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <nlohmann/json.hpp>
 #include <set>
 #include <sstream>
 #include <string>
@@ -14,6 +15,212 @@
 
 namespace switchrecomp::analysis
 {
+
+std::string_view analysis_strategy_name(AnalysisStrategy strategy) noexcept
+{
+    switch (strategy)
+    {
+    case AnalysisStrategy::WholeModule: return "whole_module";
+    case AnalysisStrategy::ExecutionClosure: return "execution_closure";
+    }
+    return "unknown";
+}
+
+std::string_view analysis_budget_dimension_name(AnalysisBudgetDimension dimension) noexcept
+{
+    switch (dimension)
+    {
+    case AnalysisBudgetDimension::None: return "none";
+    case AnalysisBudgetDimension::Functions: return "functions";
+    case AnalysisBudgetDimension::Instructions: return "instructions";
+    case AnalysisBudgetDimension::Blocks: return "blocks";
+    case AnalysisBudgetDimension::Edges: return "edges";
+    case AnalysisBudgetDimension::Seeds: return "seeds";
+    case AnalysisBudgetDimension::BytesAnalyzed: return "bytes_analyzed";
+    case AnalysisBudgetDimension::BoundaryFinalizationPasses:
+        return "boundary_finalization_passes";
+    }
+    return "unknown";
+}
+
+std::string_view analysis_budget_provenance_kind_name(
+    AnalysisBudgetProvenanceKind kind) noexcept
+{
+    switch (kind)
+    {
+    case AnalysisBudgetProvenanceKind::LibraryDefault: return "library_default";
+    case AnalysisBudgetProvenanceKind::ExecutionToolProfile: return "execution_tool_profile";
+    case AnalysisBudgetProvenanceKind::ExplicitCliOverride: return "explicit_cli_override";
+    case AnalysisBudgetProvenanceKind::LocalConfigurationOverride:
+        return "local_configuration_override";
+    case AnalysisBudgetProvenanceKind::DerivedStructuralBound:
+        return "derived_structural_bound";
+    }
+    return "unknown";
+}
+
+AnalysisBudgets make_execution_closure_analysis_budgets()
+{
+    AnalysisBudgets budgets;
+    budgets.max_functions = 5'000U;
+    budgets.max_instructions = 200'000U;
+    budgets.max_blocks = 50'000U;
+    budgets.max_edges = 100'000U;
+    budgets.max_seeds = 10'000U;
+    budgets.max_bytes_analyzed = memory::GuestSize{16U} * 1024U * 1024U;
+    budgets.max_boundary_finalization_passes = 8U;
+    budgets.strategy = AnalysisStrategy::ExecutionClosure;
+    mark_analysis_budget_override(
+        budgets, AnalysisBudgetDimension::Functions,
+        AnalysisBudgetProvenanceKind::ExecutionToolProfile, "run_entry_execution_closure");
+    mark_analysis_budget_override(
+        budgets, AnalysisBudgetDimension::Instructions,
+        AnalysisBudgetProvenanceKind::ExecutionToolProfile, "run_entry_execution_closure");
+    mark_analysis_budget_override(
+        budgets, AnalysisBudgetDimension::Blocks,
+        AnalysisBudgetProvenanceKind::ExecutionToolProfile, "run_entry_execution_closure");
+    mark_analysis_budget_override(
+        budgets, AnalysisBudgetDimension::Edges,
+        AnalysisBudgetProvenanceKind::ExecutionToolProfile, "run_entry_execution_closure");
+    mark_analysis_budget_override(
+        budgets, AnalysisBudgetDimension::Seeds,
+        AnalysisBudgetProvenanceKind::ExecutionToolProfile, "run_entry_execution_closure");
+    mark_analysis_budget_override(
+        budgets, AnalysisBudgetDimension::BytesAnalyzed,
+        AnalysisBudgetProvenanceKind::ExecutionToolProfile, "run_entry_execution_closure");
+    mark_analysis_budget_override(
+        budgets, AnalysisBudgetDimension::BoundaryFinalizationPasses,
+        AnalysisBudgetProvenanceKind::ExecutionToolProfile, "run_entry_execution_closure");
+    return budgets;
+}
+
+void mark_analysis_budget_override(AnalysisBudgets& budgets,
+                                   AnalysisBudgetDimension dimension,
+                                   AnalysisBudgetProvenanceKind kind,
+                                   std::string detail)
+{
+    AnalysisBudgetProvenance* provenance = nullptr;
+    switch (dimension)
+    {
+    case AnalysisBudgetDimension::Functions: provenance = &budgets.provenance.max_functions; break;
+    case AnalysisBudgetDimension::Instructions:
+        provenance = &budgets.provenance.max_instructions;
+        break;
+    case AnalysisBudgetDimension::Blocks: provenance = &budgets.provenance.max_blocks; break;
+    case AnalysisBudgetDimension::Edges: provenance = &budgets.provenance.max_edges; break;
+    case AnalysisBudgetDimension::Seeds: provenance = &budgets.provenance.max_seeds; break;
+    case AnalysisBudgetDimension::BytesAnalyzed:
+        provenance = &budgets.provenance.max_bytes_analyzed;
+        break;
+    case AnalysisBudgetDimension::BoundaryFinalizationPasses:
+        provenance = &budgets.provenance.max_boundary_finalization_passes;
+        break;
+    case AnalysisBudgetDimension::None: break;
+    }
+    if (provenance != nullptr)
+    {
+        provenance->kind = kind;
+        provenance->detail = std::move(detail);
+    }
+}
+
+std::string render_analysis_accounting_json(const AnalysisAccounting& accounting)
+{
+    using json = nlohmann::json;
+    const auto address_json = [](memory::GuestAddress address) {
+        std::ostringstream output;
+        output << "0x" << std::hex << std::setw(16) << std::setfill('0') << address;
+        return output.str();
+    };
+    const auto provenance_json = [](const AnalysisBudgetProvenance& provenance) {
+        return json{{"kind", analysis_budget_provenance_kind_name(provenance.kind)},
+                    {"detail", provenance.detail}};
+    };
+    const auto budgets_json = [&]() {
+        return json{{"max_functions", accounting.budgets.max_functions},
+                    {"max_instructions", accounting.budgets.max_instructions},
+                    {"max_blocks", accounting.budgets.max_blocks},
+                    {"max_edges", accounting.budgets.max_edges},
+                    {"max_seeds", accounting.budgets.max_seeds},
+                    {"max_bytes_analyzed", accounting.budgets.max_bytes_analyzed},
+                    {"max_boundary_finalization_passes",
+                     accounting.budgets.max_boundary_finalization_passes}};
+    };
+    const auto provenance = json{
+        {"max_functions", provenance_json(accounting.budgets.provenance.max_functions)},
+        {"max_instructions", provenance_json(accounting.budgets.provenance.max_instructions)},
+        {"max_blocks", provenance_json(accounting.budgets.provenance.max_blocks)},
+        {"max_edges", provenance_json(accounting.budgets.provenance.max_edges)},
+        {"max_seeds", provenance_json(accounting.budgets.provenance.max_seeds)},
+        {"max_bytes_analyzed", provenance_json(accounting.budgets.provenance.max_bytes_analyzed)},
+        {"max_boundary_finalization_passes",
+         provenance_json(accounting.budgets.provenance.max_boundary_finalization_passes)}};
+
+    auto sources = accounting.seed_sources;
+    std::sort(sources.begin(), sources.end(), [](const auto& left, const auto& right) {
+        return static_cast<unsigned>(left.source) < static_cast<unsigned>(right.source);
+    });
+    json source_values = json::array();
+    for (const auto& source : sources)
+    {
+        source_values.push_back(json{{"source", function_discovery_source_name(source.source)},
+                                     {"observed", source.observed},
+                                     {"included", source.included},
+                                     {"excluded", source.excluded},
+                                     {"new_canonical_entries", source.new_canonical_entries},
+                                     {"coalesced", source.coalesced}});
+    }
+
+    json exhaustion = nullptr;
+    if (accounting.exhaustion)
+    {
+        const auto& value = accounting.exhaustion.value();
+        exhaustion = json{{"dimension", analysis_budget_dimension_name(value.dimension)},
+                          {"consumed", value.consumed},
+                          {"limit", value.limit},
+                          {"module", value.module},
+                          {"phase", value.phase},
+                          {"pending_work", value.pending_work},
+                          {"next_work", value.next_work
+                                           ? json(address_json(value.next_work.value()))
+                                           : json(nullptr)}};
+    }
+
+    return json{{"module", accounting.module},
+                {"strategy", analysis_strategy_name(accounting.strategy)},
+                {"effective_budgets", budgets_json()},
+                {"budget_provenance", provenance},
+                {"seeds", json{{"initial", accounting.initial_seed_count},
+                                {"normalized_unique", accounting.normalized_unique_seed_count},
+                                {"duplicate_coalesced", accounting.duplicate_coalesced_seed_count},
+                                {"excluded_candidate", accounting.excluded_candidate_seed_count},
+                                {"by_source", std::move(source_values)}}},
+                {"functions", json{{"discovered_canonical", accounting.discovered_canonical_functions},
+                                    {"candidate_entries", accounting.candidate_function_entries},
+                                    {"trusted_entries", accounting.trusted_function_entries},
+                                    {"cfg_analyzed", accounting.functions_cfg_analyzed},
+                                    {"with_cfg", accounting.canonical_functions_with_cfg},
+                                    {"failed", accounting.failed_functions}}},
+                {"discovery", json{{"direct_call_discoveries", accounting.direct_call_discoveries},
+                                    {"new_seeds_generated", accounting.new_seeds_generated}}},
+                {"consumption", json{{"blocks", accounting.blocks_consumed},
+                                      {"instructions", accounting.instructions_consumed},
+                                      {"edges", accounting.edges_consumed},
+                                      {"bytes_analyzed", accounting.bytes_analyzed}}},
+                {"boundary_finalization_passes", accounting.boundary_finalization_passes},
+                {"function_boundary_conflicts", accounting.function_boundary_conflicts},
+                {"work_remaining_at_exhaustion", accounting.work_remaining_at_exhaustion},
+                {"exhaustion", std::move(exhaustion)},
+                {"phases", json{{"initial_seeding", accounting.phases.initial_seeding},
+                                 {"cfg_discovery", accounting.phases.cfg_discovery},
+                                 {"direct_call_expansion", accounting.phases.direct_call_expansion},
+                                 {"ownership_normalization", accounting.phases.ownership_normalization},
+                                 {"conflict_processing", accounting.phases.conflict_processing},
+                                 {"boundary_finalization", accounting.phases.boundary_finalization},
+                                 {"immutable_map_reconstruction",
+                                  accounting.phases.immutable_map_reconstruction}}}}
+        .dump();
+}
 
 std::string_view module_base_provenance_name(ModuleBaseProvenance provenance) noexcept
 {
@@ -107,9 +314,40 @@ using GuestAddress = memory::GuestAddress;
     }
 }
 
-[[nodiscard]] Error budget_error(std::string message)
+[[nodiscard]] Error budget_failure(AnalysisAccounting& accounting,
+                                   AnalysisBudgetDimension dimension,
+                                   std::size_t consumed, std::size_t limit,
+                                   std::string phase, std::size_t pending_work,
+                                   std::optional<GuestAddress> next_work,
+                                   std::string message)
 {
-    return make_error(ErrorCode::AnalysisBudgetExceeded, std::move(message));
+    accounting.exhaustion = AnalysisBudgetExhaustion{dimension, consumed, limit,
+                                                     accounting.module, phase, pending_work,
+                                                     next_work};
+    accounting.work_remaining_at_exhaustion = pending_work;
+    Error error = make_error(ErrorCode::AnalysisBudgetExceeded, std::move(message));
+    error.budget_context = Error::BudgetContext{
+        "function_map_analysis", std::string(analysis_budget_dimension_name(dimension)), consumed,
+        limit, accounting.module, std::move(phase), pending_work,
+        next_work ? std::optional<std::uint64_t>(next_work.value()) : std::nullopt};
+    error.message += " (" + std::string(analysis_budget_dimension_name(dimension)) + " " +
+                     std::to_string(consumed) + "/" + std::to_string(limit) + ", module " +
+                     accounting.module + ")";
+    return error;
+}
+
+[[nodiscard]] std::optional<AnalysisBudgetDimension> cfg_budget_dimension(ErrorCode code) noexcept
+{
+    switch (code)
+    {
+    case ErrorCode::AnalysisInstructionLimitExceeded:
+        return AnalysisBudgetDimension::Instructions;
+    case ErrorCode::AnalysisBlockLimitExceeded:
+        return AnalysisBudgetDimension::Blocks;
+    case ErrorCode::AnalysisWorklistLimitExceeded:
+        return AnalysisBudgetDimension::Seeds;
+    default: return std::nullopt;
+    }
 }
 
 [[nodiscard]] bool checked_size_add(std::size_t left, std::size_t right,
@@ -118,6 +356,95 @@ using GuestAddress = memory::GuestAddress;
     if (right > std::numeric_limits<std::size_t>::max() - left) return false;
     result = left + right;
     return true;
+}
+
+[[nodiscard]] Result<AnalysisBudgets> derive_structural_budgets(
+    const ModuleAnalysisInput& input, const AnalysisBudgets& requested,
+    AnalysisAccounting& accounting)
+{
+    memory::GuestSize executable_bytes = 0U;
+    for (const auto& range : input.identity.executable_ranges)
+    {
+        if (range.size > std::numeric_limits<memory::GuestSize>::max() - executable_bytes)
+        {
+            return Result<AnalysisBudgets>::failure(make_error(
+                ErrorCode::AnalysisBudgetExceeded,
+                "executable range byte capacity overflows the guest size type"));
+        }
+        executable_bytes += range.size;
+    }
+    const auto instruction_capacity_guest = executable_bytes / 4U;
+    const auto instruction_capacity = instruction_capacity_guest >
+                                              static_cast<memory::GuestSize>(
+                                                  std::numeric_limits<std::size_t>::max())
+                                          ? std::numeric_limits<std::size_t>::max()
+                                          : static_cast<std::size_t>(instruction_capacity_guest);
+    if (instruction_capacity == 0U)
+    {
+        return Result<AnalysisBudgets>::failure(make_error(
+            ErrorCode::AnalysisBudgetExceeded,
+            "executable ranges contain no finite AArch64 instruction capacity"));
+    }
+
+    AnalysisBudgets effective = requested;
+    const auto clamp = [&](AnalysisBudgetDimension dimension, std::size_t& value,
+                           std::size_t ceiling, std::string detail) {
+        if (value > ceiling)
+        {
+            value = ceiling;
+            mark_analysis_budget_override(effective, dimension,
+                                          AnalysisBudgetProvenanceKind::DerivedStructuralBound,
+                                          std::move(detail));
+        }
+    };
+    clamp(AnalysisBudgetDimension::Functions, effective.max_functions, instruction_capacity,
+          "executable_instruction_capacity");
+    clamp(AnalysisBudgetDimension::Seeds, effective.max_seeds, instruction_capacity,
+          "executable_instruction_capacity");
+    const auto analysis_passes = effective.max_boundary_finalization_passes ==
+                                         std::numeric_limits<std::size_t>::max()
+                                     ? std::numeric_limits<std::size_t>::max()
+                                     : effective.max_boundary_finalization_passes + 1U;
+    const auto repeated_capacity = instruction_capacity >
+                                           std::numeric_limits<std::size_t>::max() /
+                                               analysis_passes
+                                       ? std::numeric_limits<std::size_t>::max()
+                                       : instruction_capacity * analysis_passes;
+    const auto edge_capacity = repeated_capacity > std::numeric_limits<std::size_t>::max() / 2U
+                                   ? std::numeric_limits<std::size_t>::max()
+                                   : repeated_capacity * 2U;
+    clamp(AnalysisBudgetDimension::Instructions, effective.max_instructions, repeated_capacity,
+          "executable_instruction_capacity_times_analysis_passes");
+    clamp(AnalysisBudgetDimension::Blocks, effective.max_blocks, repeated_capacity,
+          "executable_instruction_capacity_times_analysis_passes");
+    clamp(AnalysisBudgetDimension::Edges, effective.max_edges, edge_capacity,
+          "two_cfg_edges_per_instruction_capacity");
+    const auto repeated_bytes = executable_bytes >
+                                       std::numeric_limits<memory::GuestSize>::max() /
+                                           static_cast<memory::GuestSize>(analysis_passes)
+                                   ? std::numeric_limits<memory::GuestSize>::max()
+                                   : executable_bytes * static_cast<memory::GuestSize>(analysis_passes);
+    if (effective.max_bytes_analyzed > repeated_bytes)
+    {
+        effective.max_bytes_analyzed = repeated_bytes;
+        mark_analysis_budget_override(effective, AnalysisBudgetDimension::BytesAnalyzed,
+                                      AnalysisBudgetProvenanceKind::DerivedStructuralBound,
+                                      "executable_range_byte_capacity_times_analysis_passes");
+    }
+    accounting.budgets = effective;
+    accounting.strategy = effective.strategy;
+    return Result<AnalysisBudgets>::success(std::move(effective));
+}
+
+[[nodiscard]] AnalysisSeedSourceAccounting& seed_source_accounting(
+    std::vector<AnalysisSeedSourceAccounting>& sources, FunctionDiscoverySource source)
+{
+    const auto found = std::find_if(sources.begin(), sources.end(), [source](const auto& item) {
+        return item.source == source;
+    });
+    if (found != sources.end()) return *found;
+    sources.push_back(AnalysisSeedSourceAccounting{source});
+    return sources.back();
 }
 
 [[nodiscard]] Result<void> validate_input(const ModuleAnalysisInput& input,
@@ -247,7 +574,8 @@ using GuestAddress = memory::GuestAddress;
 [[nodiscard]] Result<void> add_seed(std::map<GuestAddress, FunctionRecord>& records,
                                     std::set<GuestAddress>& pending,
                                     const ModuleAnalysisInput& input, const FunctionSeed& seed,
-                                    const AnalysisBudgets& budgets, std::size_t& seed_count)
+                                    const AnalysisBudgets& budgets, std::size_t& seed_count,
+                                    AnalysisAccounting& accounting, std::string_view phase)
 {
     const auto valid = validate_seed(input, seed);
     if (!valid)
@@ -260,8 +588,12 @@ using GuestAddress = memory::GuestAddress;
     {
         if (records.size() >= budgets.max_functions)
         {
-            return Result<void>::failure(
-                budget_error("function discovery exceeded the function budget"));
+            return Result<void>::failure(budget_failure(
+                accounting, AnalysisBudgetDimension::Functions, records.size(),
+                budgets.max_functions, std::string(phase), pending.size(),
+                pending.empty() ? std::nullopt
+                                : std::optional<GuestAddress>(*pending.begin()),
+                "function discovery exceeded the function budget"));
         }
         FunctionRecord record;
         record.module = input.identity.module;
@@ -286,7 +618,12 @@ using GuestAddress = memory::GuestAddress;
     {
         if (seed_count >= budgets.max_seeds)
         {
-            return Result<void>::failure(budget_error("function discovery exceeded the seed budget"));
+            return Result<void>::failure(budget_failure(
+                accounting, AnalysisBudgetDimension::Seeds, seed_count, budgets.max_seeds,
+                std::string(phase), pending.size(),
+                pending.empty() ? std::nullopt
+                                : std::optional<GuestAddress>(*pending.begin()),
+                "function discovery exceeded the seed budget"));
         }
         ++seed_count;
     }
@@ -833,39 +1170,106 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
     const auto valid_input = validate_input(input, options);
     if (!valid_input)
     {
-        return Result<FinalizedFunctionMap>::failure(valid_input.error());
+            return Result<FinalizedFunctionMap>::failure(valid_input.error());
+    }
+
+    AnalysisAccounting accounting;
+    accounting.module = input.identity.module;
+    accounting.strategy = options.budgets.strategy;
+    accounting.initial_seed_count = input.seeds.size();
+    accounting.phases.initial_seeding = input.seeds.size();
+    const auto effective_budget_result = derive_structural_budgets(
+        input, options.budgets, accounting);
+    if (!effective_budget_result)
+    {
+        return Result<FinalizedFunctionMap>::failure(effective_budget_result.error());
+    }
+    const auto& budgets = effective_budget_result.value();
+    if (budgets.strategy == AnalysisStrategy::ExecutionClosure &&
+        options.execution_closure_roots.empty())
+    {
+        return Result<FinalizedFunctionMap>::failure(make_error(
+            ErrorCode::InvalidArgument,
+            "execution-closure analysis requires at least one explicit closure root"));
     }
 
     std::map<GuestAddress, FunctionRecord> records;
     std::set<GuestAddress> pending;
     std::set<GuestAddress> processed;
     std::set<GuestAddress> known_function_entries = options.cfg.known_function_entries;
+    if (budgets.strategy == AnalysisStrategy::ExecutionClosure)
+    {
+        for (auto entry = known_function_entries.begin(); entry != known_function_entries.end();)
+        {
+            if (!options.execution_closure_roots.contains(*entry))
+                entry = known_function_entries.erase(entry);
+            else
+                ++entry;
+        }
+    }
     std::size_t seed_count = 0U;
     for (const auto& seed : input.seeds)
     {
-        const auto added = add_seed(records, pending, input, seed, options.budgets, seed_count);
+        auto& source = seed_source_accounting(accounting.seed_sources, seed.source);
+        ++source.observed;
+        const auto valid_seed = validate_seed(input, seed);
+        if (!valid_seed)
+        {
+            return Result<FinalizedFunctionMap>::failure(valid_seed.error());
+        }
+        const auto canonical = seed.canonical_entry.value_or(seed.entry);
+        const bool include = budgets.strategy != AnalysisStrategy::ExecutionClosure ||
+                             options.execution_closure_roots.contains(seed.entry) ||
+                             options.execution_closure_roots.contains(canonical);
+        if (!include)
+        {
+            ++source.excluded;
+            ++accounting.excluded_candidate_seed_count;
+            continue;
+        }
+        ++source.included;
+        const bool was_new = records.find(canonical) == records.end();
+        const auto added = add_seed(records, pending, input, seed, budgets, seed_count,
+                                    accounting, "initial_seeding");
         if (!added)
         {
             return Result<FinalizedFunctionMap>::failure(added.error());
         }
+        if (was_new) ++source.new_canonical_entries;
+        else
+        {
+            ++source.coalesced;
+            ++accounting.duplicate_coalesced_seed_count;
+        }
         if (is_boundary_worthy_function_seed(seed))
         {
-            known_function_entries.insert(seed.canonical_entry.value_or(seed.entry));
-            known_function_entries.insert(seed.entry);
+            if (budgets.strategy != AnalysisStrategy::ExecutionClosure ||
+                options.execution_closure_roots.contains(seed.entry) ||
+                options.execution_closure_roots.contains(canonical))
+            {
+                known_function_entries.insert(canonical);
+                known_function_entries.insert(seed.entry);
+            }
         }
     }
+    accounting.normalized_unique_seed_count = records.size();
     if (records.empty())
     {
         return Result<FinalizedFunctionMap>::failure(
-            make_error(ErrorCode::InvalidArgument, "function discovery requires at least one seed"));
+            make_error(budgets.strategy == AnalysisStrategy::ExecutionClosure
+                           ? ErrorCode::AnalysisScopeViolation
+                           : ErrorCode::InvalidArgument,
+                       budgets.strategy == AnalysisStrategy::ExecutionClosure
+                           ? "execution-closure roots did not match any supplied function seed"
+                           : "function discovery requires at least one seed"));
     }
 
     AnalysisOptions cfg_options = options.cfg;
     cfg_options.max_instructions = std::min(cfg_options.max_instructions,
-                                            options.budgets.max_instructions);
-    cfg_options.max_basic_blocks = std::min(cfg_options.max_basic_blocks, options.budgets.max_blocks);
+                                            budgets.max_instructions);
+    cfg_options.max_basic_blocks = std::min(cfg_options.max_basic_blocks, budgets.max_blocks);
     cfg_options.max_pending_targets = std::min(cfg_options.max_pending_targets,
-                                               options.budgets.max_seeds);
+                                               budgets.max_seeds);
     if (!cfg_options.allowed_code_range && input.identity.executable_ranges.size() == 1U)
     {
         cfg_options.allowed_code_range = input.identity.executable_ranges.front();
@@ -876,14 +1280,18 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
     std::size_t analyzed_blocks = 0U;
     std::size_t analyzed_edges = 0U;
     memory::GuestSize analyzed_bytes = 0U;
-    const auto account_graph = [&](const ControlFlowGraph& graph) -> Result<void> {
+    const auto account_graph = [&](const ControlFlowGraph& graph, std::string_view phase,
+                                   std::size_t pending_work,
+                                   std::optional<GuestAddress> next_work) -> Result<void> {
         std::size_t next_instructions = 0U;
         std::size_t next_blocks = 0U;
         if (!checked_size_add(analyzed_instructions, graph.instruction_count, next_instructions) ||
             !checked_size_add(analyzed_blocks, graph.blocks.size(), next_blocks))
         {
-            return Result<void>::failure(
-                budget_error("function discovery host-size budget overflow"));
+            return Result<void>::failure(budget_failure(
+                accounting, AnalysisBudgetDimension::Instructions, analyzed_instructions,
+                budgets.max_instructions, std::string(phase), pending_work, next_work,
+                "function discovery host-size budget overflow"));
         }
 
         std::size_t graph_edges = graph.unresolved.size();
@@ -894,39 +1302,73 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
             if (!checked_size_add(block.successors.size(), block.calls.size(), block_edges) ||
                 !checked_size_add(graph_edges, block_edges, graph_edges))
             {
-                return Result<void>::failure(
-                    budget_error("function discovery edge budget overflow"));
+                return Result<void>::failure(budget_failure(
+                    accounting, AnalysisBudgetDimension::Edges, analyzed_edges, budgets.max_edges,
+                    std::string(phase), pending_work, next_work,
+                    "function discovery edge budget overflow"));
             }
         }
         std::size_t next_edges = 0U;
         if (!checked_size_add(analyzed_edges, graph_edges, next_edges))
         {
-            return Result<void>::failure(
-                budget_error("function discovery edge budget overflow"));
+            return Result<void>::failure(budget_failure(
+                accounting, AnalysisBudgetDimension::Edges, analyzed_edges, budgets.max_edges,
+                std::string(phase), pending_work, next_work,
+                "function discovery edge budget overflow"));
         }
         if (graph.instruction_count >
             static_cast<std::size_t>(std::numeric_limits<memory::GuestSize>::max() / 4U))
         {
-            return Result<void>::failure(
-                budget_error("function CFG byte count overflows the guest size type"));
+            return Result<void>::failure(budget_failure(
+                accounting, AnalysisBudgetDimension::BytesAnalyzed, analyzed_bytes,
+                budgets.max_bytes_analyzed, std::string(phase), pending_work, next_work,
+                "function CFG byte count overflows the guest size type"));
         }
         const auto graph_bytes = static_cast<memory::GuestSize>(graph.instruction_count) * 4U;
         if (analyzed_bytes > std::numeric_limits<memory::GuestSize>::max() - graph_bytes)
         {
-            return Result<void>::failure(budget_error("function discovery byte budget overflow"));
+            return Result<void>::failure(budget_failure(
+                accounting, AnalysisBudgetDimension::BytesAnalyzed, analyzed_bytes,
+                budgets.max_bytes_analyzed, std::string(phase), pending_work, next_work,
+                "function discovery byte budget overflow"));
         }
         const auto next_bytes = analyzed_bytes + graph_bytes;
-        if (next_instructions > options.budgets.max_instructions ||
-            next_blocks > options.budgets.max_blocks || next_edges > options.budgets.max_edges ||
-            next_bytes > options.budgets.max_bytes_analyzed)
+        if (next_instructions > budgets.max_instructions)
         {
-            return Result<void>::failure(
-                budget_error("function discovery exceeded a module analysis budget"));
+            return Result<void>::failure(budget_failure(
+                accounting, AnalysisBudgetDimension::Instructions, analyzed_instructions,
+                budgets.max_instructions, std::string(phase), pending_work, next_work,
+                "function discovery exceeded the instruction budget"));
+        }
+        if (next_blocks > budgets.max_blocks)
+        {
+            return Result<void>::failure(budget_failure(
+                accounting, AnalysisBudgetDimension::Blocks, analyzed_blocks, budgets.max_blocks,
+                std::string(phase), pending_work, next_work,
+                "function discovery exceeded the block budget"));
+        }
+        if (next_edges > budgets.max_edges)
+        {
+            return Result<void>::failure(budget_failure(
+                accounting, AnalysisBudgetDimension::Edges, analyzed_edges, budgets.max_edges,
+                std::string(phase), pending_work, next_work,
+                "function discovery exceeded the edge budget"));
+        }
+        if (next_bytes > budgets.max_bytes_analyzed)
+        {
+            return Result<void>::failure(budget_failure(
+                accounting, AnalysisBudgetDimension::BytesAnalyzed, analyzed_bytes,
+                budgets.max_bytes_analyzed, std::string(phase), pending_work, next_work,
+                "function discovery exceeded the byte budget"));
         }
         analyzed_instructions = next_instructions;
         analyzed_blocks = next_blocks;
         analyzed_edges = next_edges;
         analyzed_bytes = next_bytes;
+        accounting.instructions_consumed = analyzed_instructions;
+        accounting.blocks_consumed = analyzed_blocks;
+        accounting.edges_consumed = analyzed_edges;
+        accounting.bytes_analyzed = analyzed_bytes;
         return Result<void>::success();
     };
     while (!pending.empty())
@@ -947,6 +1389,29 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
         const auto graph = analyze_control_flow(*input.memory, entry, cfg_options);
         if (!graph)
         {
+            if (const auto dimension = cfg_budget_dimension(graph.error().code))
+            {
+                const auto consumed = [&]() {
+                    switch (dimension.value())
+                    {
+                    case AnalysisBudgetDimension::Instructions: return analyzed_instructions;
+                    case AnalysisBudgetDimension::Blocks: return analyzed_blocks;
+                    case AnalysisBudgetDimension::Seeds: return pending.size();
+                    default: return std::size_t{0U};
+                    }
+                }();
+                return Result<FinalizedFunctionMap>::failure(budget_failure(
+                    accounting, dimension.value(), consumed,
+                    dimension.value() == AnalysisBudgetDimension::Instructions
+                        ? budgets.max_instructions
+                        : dimension.value() == AnalysisBudgetDimension::Blocks
+                            ? budgets.max_blocks
+                            : budgets.max_seeds,
+                    "cfg_discovery", pending.size(), entry,
+                    "function CFG analysis exceeded its effective budget: " +
+                        graph.error().message));
+            }
+            ++accounting.failed_functions;
             record->second.translation_status = TranslationStatus::Failed;
             record->second.diagnostics.push_back(FunctionDiagnostic{
                 category_for(graph.error().code), graph.error().code, entry, std::nullopt,
@@ -959,16 +1424,22 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
         }
 
         const auto& graph_value = graph.value();
-        const auto accounted = account_graph(graph_value);
+        const auto accounted = account_graph(
+            graph_value, "cfg_discovery", pending.size(),
+            pending.empty() ? std::nullopt : std::optional<GuestAddress>(*pending.begin()));
         if (!accounted)
         {
             return Result<FinalizedFunctionMap>::failure(accounted.error());
         }
+        ++accounting.functions_cfg_analyzed;
+        ++accounting.phases.cfg_discovery;
 
         record->second.cfg = graph_value;
+        ++accounting.phases.ownership_normalization;
         const auto range = populate_ownership(record->second, input.identity.executable_ranges);
         if (!range)
         {
+            ++accounting.failed_functions;
             record->second.translation_status = TranslationStatus::Failed;
             record->second.diagnostics.push_back(FunctionDiagnostic{
                 category_for(range.error().code), range.error().code, entry, std::nullopt,
@@ -983,16 +1454,29 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
 
         for (const auto target : record->second.direct_calls)
         {
+            ++accounting.direct_call_discoveries;
+            ++accounting.phases.direct_call_expansion;
             if (contains_any(input.identity.executable_ranges, target, 4U))
             {
                 const FunctionSeed seed{target, FunctionDiscoverySource::DirectCall,
                                         FunctionConfidence::High, std::nullopt, std::nullopt,
                                         "validated direct BL target"};
-                const auto added = add_seed(records, pending, input, seed, options.budgets,
-                                            seed_count);
+                auto& source = seed_source_accounting(accounting.seed_sources, seed.source);
+                ++source.observed;
+                ++source.included;
+                const bool was_new = records.find(target) == records.end();
+                const auto added = add_seed(records, pending, input, seed, budgets, seed_count,
+                                            accounting, "direct_call_expansion");
                 if (!added)
                 {
                     return Result<FinalizedFunctionMap>::failure(added.error());
+                }
+                ++accounting.new_seeds_generated;
+                if (was_new) ++source.new_canonical_entries;
+                else
+                {
+                    ++source.coalesced;
+                    ++accounting.duplicate_coalesced_seed_count;
                 }
                 known_function_entries.insert(target);
                 cfg_options.known_function_entries = known_function_entries;
@@ -1004,8 +1488,10 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
     // direct BL evidence. Once that fixed point is known, re-analyze every
     // successful function with the complete strong-entry set so no stale CFG
     // can retain ownership across a later-discovered function boundary.
-    for (std::size_t pass = 0U; pass < options.budgets.max_boundary_finalization_passes; ++pass)
+    for (std::size_t pass = 0U; pass < budgets.max_boundary_finalization_passes; ++pass)
     {
+        ++accounting.boundary_finalization_passes;
+        ++accounting.phases.boundary_finalization;
         bool boundary_set_changed = false;
         cfg_options.known_function_entries = known_function_entries;
         for (auto& [entry, record] : records)
@@ -1017,6 +1503,29 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
             const auto graph = analyze_control_flow(*input.memory, entry, cfg_options);
             if (!graph)
             {
+                if (const auto dimension = cfg_budget_dimension(graph.error().code))
+                {
+                    const auto consumed = [&]() {
+                        switch (dimension.value())
+                        {
+                        case AnalysisBudgetDimension::Instructions: return analyzed_instructions;
+                        case AnalysisBudgetDimension::Blocks: return analyzed_blocks;
+                        case AnalysisBudgetDimension::Seeds: return pending.size();
+                        default: return std::size_t{0U};
+                        }
+                    }();
+                    return Result<FinalizedFunctionMap>::failure(budget_failure(
+                        accounting, dimension.value(), consumed,
+                        dimension.value() == AnalysisBudgetDimension::Instructions
+                            ? budgets.max_instructions
+                            : dimension.value() == AnalysisBudgetDimension::Blocks
+                                ? budgets.max_blocks
+                                : budgets.max_seeds,
+                        "boundary_finalization", pending.size(), entry,
+                        "boundary-aware CFG analysis exceeded its effective budget: " +
+                            graph.error().message));
+                }
+                ++accounting.failed_functions;
                 record.cfg.reset();
                 record.owned_code_ranges.clear();
                 record.range_begin = 0U;
@@ -1030,15 +1539,20 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
                     "boundary-aware finalization: " + graph.error().message});
                 continue;
             }
-            const auto accounted = account_graph(graph.value());
+            const auto accounted = account_graph(
+                graph.value(), "boundary_finalization", pending.size(),
+                pending.empty() ? std::nullopt : std::optional<GuestAddress>(*pending.begin()));
             if (!accounted)
             {
                 return Result<FinalizedFunctionMap>::failure(accounted.error());
             }
+            ++accounting.functions_cfg_analyzed;
             record.cfg = graph.value();
+            ++accounting.phases.ownership_normalization;
             const auto range = populate_ownership(record, input.identity.executable_ranges);
             if (!range)
             {
+                ++accounting.failed_functions;
                 record.translation_status = TranslationStatus::Failed;
                 record.diagnostics.push_back(FunctionDiagnostic{
                     category_for(range.error().code), range.error().code, entry, std::nullopt,
@@ -1048,6 +1562,8 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
             record.translation_status = TranslationStatus::Analyzed;
             for (const auto target : record.direct_calls)
             {
+                ++accounting.direct_call_discoveries;
+                ++accounting.phases.direct_call_expansion;
                 if (!contains_any(input.identity.executable_ranges, target, 4U))
                 {
                     continue;
@@ -1055,11 +1571,22 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
                 const FunctionSeed seed{target, FunctionDiscoverySource::DirectCall,
                                         FunctionConfidence::High, std::nullopt, std::nullopt,
                                         "validated direct BL target"};
-                const auto added = add_seed(records, pending, input, seed, options.budgets,
-                                            seed_count);
+                auto& source = seed_source_accounting(accounting.seed_sources, seed.source);
+                ++source.observed;
+                ++source.included;
+                const bool was_new = records.find(target) == records.end();
+                const auto added = add_seed(records, pending, input, seed, budgets, seed_count,
+                                            accounting, "boundary_finalization");
                 if (!added)
                 {
                     return Result<FinalizedFunctionMap>::failure(added.error());
+                }
+                ++accounting.new_seeds_generated;
+                if (was_new) ++source.new_canonical_entries;
+                else
+                {
+                    ++source.coalesced;
+                    ++accounting.duplicate_coalesced_seed_count;
                 }
                 if (known_function_entries.insert(target).second)
                 {
@@ -1072,9 +1599,14 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
         {
             break;
         }
-        if (pass + 1U == options.budgets.max_boundary_finalization_passes)
+        if (pass + 1U == budgets.max_boundary_finalization_passes)
         {
-            return Result<FinalizedFunctionMap>::failure(budget_error(
+            return Result<FinalizedFunctionMap>::failure(budget_failure(
+                accounting, AnalysisBudgetDimension::BoundaryFinalizationPasses,
+                pass + 1U, budgets.max_boundary_finalization_passes,
+                "boundary_finalization", pending.size(),
+                pending.empty() ? std::nullopt
+                                : std::optional<GuestAddress>(*pending.begin()),
                 "function boundary finalization did not reach a fixed point within its budget"));
         }
     }
@@ -1144,12 +1676,14 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
     // identity is independent of seed/discovery order.
     for (std::size_t left = 0U; left < result.functions_.size(); ++left)
     {
+        ++accounting.phases.conflict_processing;
         if (!result.functions_[left].cfg)
         {
             continue;
         }
         for (std::size_t right = left + 1U; right < result.functions_.size(); ++right)
         {
+            ++accounting.phases.conflict_processing;
             if (!result.functions_[right].cfg ||
                 !ranges_overlap(result.functions_[left], result.functions_[right]))
             {
@@ -1193,6 +1727,48 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
             second->translation_status = TranslationStatus::Conflict;
         }
     }
+    accounting.discovered_canonical_functions = result.functions_.size();
+    accounting.normalized_unique_seed_count = result.functions_.size();
+    std::set<std::pair<GuestAddress, FunctionDiscoverySource>> source_entries;
+    for (const auto& function : result.functions_)
+    {
+        for (const auto& evidence : function.evidence)
+        {
+            source_entries.emplace(function.canonical_entry, evidence.source);
+        }
+    }
+    std::size_t included_seed_count = 0U;
+    for (auto& source : accounting.seed_sources)
+    {
+        source.new_canonical_entries = static_cast<std::size_t>(std::count_if(
+            source_entries.begin(), source_entries.end(),
+            [&source](const auto& entry) { return entry.second == source.source; }));
+        source.coalesced = source.included >= source.new_canonical_entries
+                               ? source.included - source.new_canonical_entries
+                               : 0U;
+        included_seed_count += source.included;
+    }
+    accounting.duplicate_coalesced_seed_count =
+        included_seed_count >= accounting.normalized_unique_seed_count
+            ? included_seed_count - accounting.normalized_unique_seed_count
+            : 0U;
+    accounting.canonical_functions_with_cfg = static_cast<std::size_t>(std::count_if(
+        result.functions_.begin(), result.functions_.end(), [](const FunctionRecord& function) {
+            return function.cfg.has_value();
+        }));
+    accounting.candidate_function_entries = static_cast<std::size_t>(std::count_if(
+        result.functions_.begin(), result.functions_.end(), [](const FunctionRecord& function) {
+            return function.entry_trust_status == FunctionEntryTrustStatus::Candidate;
+        }));
+    accounting.trusted_function_entries = static_cast<std::size_t>(std::count_if(
+        result.functions_.begin(), result.functions_.end(), [](const FunctionRecord& function) {
+            return function.entry_trust_status == FunctionEntryTrustStatus::Trusted;
+        }));
+    accounting.function_boundary_conflicts = result.conflicts_.size();
+    accounting.phases.immutable_map_reconstruction = 1U;
+    std::sort(accounting.seed_sources.begin(), accounting.seed_sources.end(),
+              [](const auto& left, const auto& right) { return left.source < right.source; });
+    result.accounting_ = std::move(accounting);
     result.frozen_ = true;
     const auto valid = validate_finalized_function_map(result);
     if (!valid)

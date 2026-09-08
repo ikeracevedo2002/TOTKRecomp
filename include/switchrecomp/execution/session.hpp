@@ -282,9 +282,9 @@ struct SmulhFrontierEvidence
 
 struct ExecutionSessionResult
 {
-    // M23 adds typed outer indirect-refinement accounting and coalesced
-    // guest-side observation provenance to the deterministic report.
-    static constexpr std::uint32_t schema_version = 10U;
+    // M24 adds deterministic bounded-analysis accounting and budget
+    // provenance alongside M23's typed indirect-refinement evidence.
+    static constexpr std::uint32_t schema_version = 11U;
 
     analysis::ModuleIdentity identity;
     EntrySelection entry;
@@ -295,6 +295,7 @@ struct ExecutionSessionResult
     std::size_t conflicting_functions = 0U;
     std::size_t precise_conflicts = 0U;
     memory::GuestSize precise_owned_bytes = 0U;
+    std::vector<analysis::AnalysisAccounting> analysis;
     memory::GuestAddress stack_base = 0U;
     memory::GuestAddress stack_end = 0U;
     memory::GuestAddress initial_sp = 0U;

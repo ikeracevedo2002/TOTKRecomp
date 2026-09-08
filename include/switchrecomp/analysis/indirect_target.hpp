@@ -507,6 +507,10 @@ struct IndirectTargetAssessment
     std::optional<memory::GuestAddress> first_guest_pc;
     std::optional<std::uint32_t> first_guest_opcode;
     std::optional<memory::GuestAddress> next_guest_pc;
+    // Filled by the outer immutable refinement driver for a successful
+    // promotion.  Zero is the initial frozen process-map generation.
+    std::size_t map_generation_before = 0U;
+    std::size_t map_generation_after = 0U;
 };
 
 struct IndirectTargetDiscoveryOptions

@@ -844,6 +844,23 @@ the aggregate analysis budgets cover both phases. If finalization reveals a new
 strong direct-call entry, another bounded pass is allowed, and failure to reach
 stability is reported rather than converging without a limit.
 
+Execution tools may select the generic `execution_closure` strategy. This
+strategy retains process-wide symbol/provider indexing, but initially analyzes
+only the verified selected entry, trusted provider entries, and seeds explicitly
+required by the selected focus. Direct guest calls expand that set
+transitively; runtime indirect targets enter it only through the existing
+certification and immutable-map refinement path. Whole-module analysis remains
+available for translation and forensic use. Both strategies carry one effective
+finite budget record with library/tool/CLI/local/derived provenance, and the
+builder emits deterministic seed-source, phase, consumption, and exhaustion
+accounting. Structural ceilings derive from executable AArch64 instruction
+capacity and the finite boundary-finalization pass count; they bound work but
+do not turn the entire executable range into function work. Provider lookup is
+still process-wide and completeness-gated, so closure pruning cannot authorize
+an incomplete provider fallback. Rebuilding a closure after a promotion may
+add the target module, but every externally visible function map remains a new
+frozen immutable map.
+
 ### 12.2 Startup entry provenance
 
 The beginning of `main.text` is not a verified process entry merely because it

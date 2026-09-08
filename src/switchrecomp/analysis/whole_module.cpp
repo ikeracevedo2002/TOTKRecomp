@@ -366,7 +366,8 @@ using json = nlohmann::json;
                            {"functions", item.functions},
                            {"example_pcs", std::move(examples)}});
     }
-    return json{{"budgets", json{{"max_functions", coverage.budgets.max_functions},
+    return json{{"analysis", json::parse(render_analysis_accounting_json(coverage.analysis))},
+                {"budgets", json{{"max_functions", coverage.budgets.max_functions},
                                   {"max_instructions", coverage.budgets.max_instructions},
                                   {"max_blocks", coverage.budgets.max_blocks},
                                   {"max_edges", coverage.budgets.max_edges},
@@ -462,7 +463,8 @@ using json = nlohmann::json;
     result.applied_relocations = applied_relocations;
     result.unresolved_relocations = std::move(unresolved_relocations);
     result.functions.reserve(map.functions().size());
-    result.coverage.budgets = options.function_map.budgets;
+    result.coverage.analysis = map.accounting();
+    result.coverage.budgets = result.coverage.analysis.budgets;
     result.coverage.executable_bytes = 0U;
     for (const auto& range : map.identity().executable_ranges)
     {
