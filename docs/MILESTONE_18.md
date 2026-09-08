@@ -12,9 +12,10 @@ reach the real `UMULH` instruction.
 
 * branch: `milestone-18-indirect-target-discovery`
 * exact base SHA: `8ab6d1201be8eadcdd84352577780fbf5e763c23`
-* exact final head SHA (implementation before documentation handoff):
+* exact final implementation head SHA (before documentation handoff):
   `e162bfc`
 * evidence handoff head before PR metadata update: `3c7507e`
+* PR/CI handoff head: `a2a48d5`
 * PR: [#23](https://github.com/ikeracevedo2002/TOTKRecomp/pull/23)
 * commits: `5b9cd9e` (analysis/data model/refinement), `e162bfc`
   (execution integration and tests), `3c7507e` (evidence/documentation), plus
@@ -269,9 +270,11 @@ usernames, or proprietary bytes.
 * ASan/UBSan: `227/227` passed in `build-asan`
 * TSan: `227/227` passed in `build-tsan`
 * local compiler: AppleClang 17 via `/usr/bin/c++`; no local GCC claim
-* GCC CI: pending until the pushed branch workflow completes
-* LLVM 18 CI: pending until the pushed branch workflow completes
-* MSVC CI: pending until the pushed branch workflow completes
+* GCC CI: passed in run `34189380092`
+* LLVM 18 CI: passed in run `34189380092`
+* ASan/UBSan CI: passed in run `34189380092`
+* TSan CI: passed in run `34189380092`
+* MSVC CI: passed in run `34189380092`
 
 ## Dependencies
 
