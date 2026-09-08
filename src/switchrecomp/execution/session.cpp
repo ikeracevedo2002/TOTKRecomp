@@ -368,6 +368,21 @@ using json = nlohmann::json;
         analysis_error = json{{"code", error_code_name(validation.analysis_error->code)},
                               {"message", validation.analysis_error->message}};
     }
+    json observation_provenance = json::array();
+    for (const auto& item : observed.observation_provenance)
+    {
+        observation_provenance.push_back(json{
+            {"source_module", item.source_module},
+            {"source_function", hex_address(item.source_function)},
+            {"source_pc", hex_address(item.source_pc)},
+            {"control_flow", analysis::indirect_control_flow_kind_name(item.control_flow)},
+            {"target_register", item.target_register},
+            {"pointer_provenance",
+             analysis::indirect_target_pointer_provenance_name(item.pointer_provenance)},
+            {"guest_load_address", item.guest_load_address
+                                        ? json(hex_address(item.guest_load_address.value()))
+                                        : json(nullptr)}});
+    }
     return json{
         {"source_module", observed.source_module},
         {"source_function", hex_address(observed.source_function)},
@@ -384,6 +399,7 @@ using json = nlohmann::json;
                              ? json(hex_address(observed.guest_load_address.value()))
                              : json(nullptr)}}},
         {"observation_count", observed.observation_count},
+        {"observation_provenance", std::move(observation_provenance)},
         {"static_evidence", std::move(static_evidence)},
         {"observed_entry_evidence", [&]() {
              json items = json::array();
@@ -464,6 +480,60 @@ using json = nlohmann::json;
                                                    ? json(hex_address(*decision.canonical_entry))
                                                    : json(nullptr)},
                            {"reason", decision.reason}}}};
+}
+
+[[nodiscard]] json refinement_candidate_identity_json(
+    const std::optional<analysis::IndirectTargetCandidateIdentity>& identity)
+{
+    if (!identity) return nullptr;
+    return json{{"target_module", identity->target_module},
+                {"target", hex_address(identity->target)},
+                {"source_module", identity->source_module},
+                {"source_function", hex_address(identity->source_function)},
+                {"source_pc", hex_address(identity->source_pc)},
+                {"control_flow", analysis::indirect_control_flow_kind_name(identity->control_flow)},
+                {"target_register", identity->target_register},
+                {"pointer_provenance",
+                 analysis::indirect_target_pointer_provenance_name(identity->pointer_provenance)},
+                {"guest_load_address", identity->guest_load_address
+                                            ? json(hex_address(identity->guest_load_address.value()))
+                                            : json(nullptr)}};
+}
+
+[[nodiscard]] json indirect_target_refinement_json(
+    const analysis::IndirectTargetRefinementSummary& summary)
+{
+    const auto& budgets = summary.configured;
+    const auto& exhaustion = summary.exhaustion;
+    return json{
+        {"configured_limits",
+         json{{"max_rounds", budgets.max_rounds},
+              {"max_unique_candidates", budgets.max_unique_candidates},
+              {"max_candidate_assessments", budgets.max_candidate_assessments},
+              {"max_promotions", budgets.max_promotions},
+              {"max_map_rebuilds", budgets.max_map_rebuilds}}},
+        {"refinement_rounds", summary.refinement_rounds},
+        {"observations_received", summary.observations_received},
+        {"unique_observations", summary.unique_observations},
+        {"unique_candidates", summary.unique_candidates},
+        {"candidate_assessments", summary.candidate_assessments},
+        {"successful_promotions", summary.successful_promotions},
+        {"existing_trusted_hits", summary.existing_trusted_hits},
+        {"duplicate_coalesced_observations", summary.duplicate_coalesced_observations},
+        {"rejected_candidates", summary.rejected_candidates},
+        {"boundary_reconciliations", summary.boundary_reconciliations},
+        {"map_rebuilds", summary.map_rebuilds},
+        {"candidates_reconsidered_after_map_change",
+         summary.candidates_reconsidered_after_map_change},
+        {"exhausted_dimension",
+         analysis::indirect_target_refinement_budget_dimension_name(exhaustion.dimension)},
+        {"exhausted_consumed", exhaustion.consumed},
+        {"exhausted_limit", exhaustion.limit},
+        {"pending_candidate_count", summary.pending_candidate_count},
+        {"last_processed_candidate",
+         refinement_candidate_identity_json(summary.last_processed_candidate)},
+        {"next_pending_candidate",
+         refinement_candidate_identity_json(summary.next_pending_candidate)}};
 }
 
 [[nodiscard]] json cpu_json(const runtime::CpuState& cpu)
@@ -2908,6 +2978,8 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                          {"next_guest_pc", result.smulh_frontier.next_guest_pc
                                                                ? json(hex_address(result.smulh_frontier.next_guest_pc.value()))
                                                                : json(nullptr)}}},
+                                    {"indirect_target_refinement",
+                                     indirect_target_refinement_json(result.indirect_target_refinement)},
                                     {"indirect_target_discovery", std::move(indirect_target_discovery)},
                                     {"diagnostic", result.diagnostic}}},
                 {"budgets", json{{"max_ir_operations", result.options.budgets.max_ir_operations},

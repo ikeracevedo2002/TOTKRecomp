@@ -132,6 +132,11 @@ void help(std::ostream& output)
               "  --analysis-max-edges N         Analysis edge budget.\n"
               "  --analysis-max-seeds N         Analysis seed budget.\n"
               "  --analysis-max-bytes N         Analysis byte budget.\n"
+              "  --refinement-max-rounds N      Indirect refinement-round budget.\n"
+              "  --refinement-max-candidates N  Unique indirect-candidate budget.\n"
+              "  --refinement-max-assessments N Candidate-assessment budget.\n"
+              "  --refinement-max-promotions N  Successful-promotion budget.\n"
+              "  --refinement-max-rebuilds N    Immutable map-rebuild budget.\n"
               "  --max-ir-operations N          Global execution IR budget.\n"
               "  --max-function-transitions N   Global guest transition budget.\n"
               "  --max-call-depth N             Guest call-depth budget.\n"
@@ -195,6 +200,7 @@ int main(int argc, char** argv)
     analysis::PreparedModuleOptions load_options;
     execution::ExecutionSessionOptions execution_options;
     analysis::FunctionMapOptions function_options;
+    analysis::IndirectTargetRefinementBudgets refinement_budgets;
     function_options.budgets.max_functions = 5'000U;
     function_options.budgets.max_instructions = 200'000U;
     function_options.budgets.max_blocks = 50'000U;
@@ -335,6 +341,11 @@ int main(int argc, char** argv)
             parse_number("--analysis-max-edges", function_options.budgets.max_edges) ||
             parse_number("--analysis-max-seeds", function_options.budgets.max_seeds) ||
             parse_number("--analysis-max-bytes", function_options.budgets.max_bytes_analyzed) ||
+            parse_number("--refinement-max-rounds", refinement_budgets.max_rounds) ||
+            parse_number("--refinement-max-candidates", refinement_budgets.max_unique_candidates) ||
+            parse_number("--refinement-max-assessments", refinement_budgets.max_candidate_assessments) ||
+            parse_number("--refinement-max-promotions", refinement_budgets.max_promotions) ||
+            parse_number("--refinement-max-rebuilds", refinement_budgets.max_map_rebuilds) ||
             parse_number("--max-ir-operations", execution_options.budgets.max_ir_operations) ||
             parse_number("--max-function-transitions", execution_options.budgets.max_function_transitions) ||
             parse_number("--max-call-depth", execution_options.budgets.max_call_depth) ||
@@ -752,14 +763,25 @@ int main(int argc, char** argv)
         analysis::IndirectTargetDiscoveryOptions discovery_options;
         discovery_options.budgets = function_options.budgets;
         discovery_options.cfg = function_options.cfg;
-        constexpr std::size_t max_refinement_passes = 8U;
-        constexpr std::size_t max_new_indirect_candidates = 32U;
-        std::size_t refinement_passes = 0U;
-        std::size_t new_indirect_candidates = 0U;
+        analysis::IndirectTargetRefinementWorklist worklist(refinement_budgets);
         std::vector<analysis::IndirectTargetAssessment> promoted_targets;
         execution::ExecutionSessionResult final_result;
         for (;;)
         {
+            if (!worklist.begin_round())
+            {
+                final_result.indirect_target_refinement = worklist.summary();
+                final_result.stop_reason =
+                    execution::ExecutionStopReason::IndirectTargetRefinementBudgetExceeded;
+                const auto summary = worklist.summary();
+                final_result.diagnostic =
+                    "indirect target refinement " +
+                    std::string(analysis::indirect_target_refinement_budget_dimension_name(
+                        summary.exhaustion.dimension)) +
+                    " budget exhausted (" + std::to_string(summary.exhaustion.consumed) +
+                    "/" + std::to_string(summary.exhaustion.limit) + ")";
+                break;
+            }
             execution::ExecutionSession session(process.value().memory(), process_map,
                                                 process.value(), execution_options, summary,
                                                 &runtime_imports);
@@ -770,32 +792,18 @@ int main(int argc, char** argv)
                 return static_cast<int>(ExitCode::InfrastructureFailure);
             }
             auto run_result = std::move(run).value();
-            std::vector<analysis::ObservedIndirectTarget> candidates;
             if (run_result.stop_reason == execution::ExecutionStopReason::UnknownGuestFunction)
             {
                 for (const auto& assessment : run_result.indirect_target_discovery)
                 {
-                    if (assessment.decision.eligible_for_promotion &&
-                        assessment.decision.kind ==
-                            analysis::IndirectTargetDecisionKind::TrustedNewEntry)
-                    {
-                        candidates.push_back(assessment.observed);
-                    }
+                    (void)worklist.observe(assessment);
                 }
             }
-            analysis::sort_observed_indirect_targets(candidates);
-            const bool refinement_budget_exhausted =
-                !candidates.empty() &&
-                (new_indirect_candidates >= max_new_indirect_candidates ||
-                 refinement_passes >= max_refinement_passes);
             bool refined = false;
-            for (const auto& candidate : candidates)
+            for (const auto& candidate : worklist.pending_candidates())
             {
-                if (new_indirect_candidates >= max_new_indirect_candidates ||
-                    refinement_passes >= max_refinement_passes)
-                {
-                    break;
-                }
+                const auto identity = analysis::indirect_target_candidate_identity(candidate);
+                if (!worklist.begin_candidate_assessment(identity) || !worklist.can_promote()) break;
                 auto expansion = analysis::refine_process_function_map(
                     process_map, process.value(), candidate, discovery_options);
                 if (!expansion)
@@ -803,24 +811,32 @@ int main(int argc, char** argv)
                     print_error(expansion.error());
                     return static_cast<int>(ExitCode::InfrastructureFailure);
                 }
-                if (!expansion.value().assessment.decision.promoted) continue;
+                if (!expansion.value().assessment.decision.promoted)
+                {
+                    worklist.record_terminal_candidate(identity);
+                    continue;
+                }
                 process_map = std::move(expansion.value().map);
                 promoted_targets.push_back(std::move(expansion.value().assessment));
-                ++new_indirect_candidates;
-                ++refinement_passes;
+                worklist.record_promotion(identity);
                 refined = true;
                 break;
             }
             if (refined) continue;
 
-            if (refinement_budget_exhausted)
+            if (worklist.exhausted())
             {
                 run_result.stop_reason =
                     execution::ExecutionStopReason::IndirectTargetRefinementBudgetExceeded;
+                const auto refinement = worklist.summary();
                 run_result.diagnostic =
-                    "indirect target refinement pass or candidate limit exhausted";
+                    "indirect target refinement " +
+                    std::string(analysis::indirect_target_refinement_budget_dimension_name(
+                        refinement.exhaustion.dimension)) +
+                    " budget exhausted (" + std::to_string(refinement.exhaustion.consumed) +
+                    "/" + std::to_string(refinement.exhaustion.limit) + ")";
             }
-
+            run_result.indirect_target_refinement = worklist.summary();
             final_result = std::move(run_result);
             break;
         }

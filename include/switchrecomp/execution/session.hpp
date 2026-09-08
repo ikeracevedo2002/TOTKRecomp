@@ -282,9 +282,9 @@ struct SmulhFrontierEvidence
 
 struct ExecutionSessionResult
 {
-    // M22 adds typed boundary-reconciliation geometry and its independent
-    // report-time overlap check to the deterministic execution report.
-    static constexpr std::uint32_t schema_version = 9U;
+    // M23 adds typed outer indirect-refinement accounting and coalesced
+    // guest-side observation provenance to the deterministic report.
+    static constexpr std::uint32_t schema_version = 10U;
 
     analysis::ModuleIdentity identity;
     EntrySelection entry;
@@ -336,6 +336,7 @@ struct ExecutionSessionResult
     std::vector<ExecutedGuestInstruction> instruction_evidence;
     SmulhFrontierEvidence smulh_frontier;
     std::vector<analysis::IndirectTargetAssessment> indirect_target_discovery;
+    analysis::IndirectTargetRefinementSummary indirect_target_refinement;
     std::vector<ExecutionEvent> events;
     RuntimeExecutionSummary runtime;
 };

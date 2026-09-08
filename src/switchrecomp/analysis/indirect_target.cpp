@@ -72,6 +72,65 @@ using GuestAddress = memory::GuestAddress;
     return true;
 }
 
+[[nodiscard]] ObservedIndirectTarget::Provenance observation_provenance(
+    const ObservedIndirectTarget& observed)
+{
+    return ObservedIndirectTarget::Provenance{
+        observed.source_module,
+        observed.source_function,
+        observed.source_pc,
+        observed.control_flow,
+        observed.target_register,
+        observed.pointer_provenance,
+        observed.guest_load_address};
+}
+
+[[nodiscard]] std::string observation_identity_key(const ObservedIndirectTarget& observed)
+{
+    std::ostringstream output;
+    const auto append_string = [&](std::string_view value) {
+        output << value.size() << ':' << value;
+    };
+    append_string(observed.source_module);
+    output << observed.source_function << ':' << observed.source_pc << ':'
+           << static_cast<unsigned int>(observed.control_flow) << ':';
+    append_string(observed.target_register);
+    output << observed.target << ':';
+    append_string(observed.target_module);
+    output << static_cast<unsigned int>(observed.pointer_provenance) << ':';
+    if (observed.guest_load_address)
+        output << '1' << ':' << observed.guest_load_address.value();
+    else
+        output << '0' << ':';
+    return output.str();
+}
+
+[[nodiscard]] bool observed_order_less(const ObservedIndirectTarget& left,
+                                       const ObservedIndirectTarget& right) noexcept
+{
+    return std::tie(left.target_module, left.target, left.source_module, left.source_function,
+                    left.source_pc, left.control_flow, left.target_register,
+                    left.pointer_provenance, left.guest_load_address) <
+           std::tie(right.target_module, right.target, right.source_module,
+                    right.source_function, right.source_pc, right.control_flow,
+                    right.target_register, right.pointer_provenance,
+                    right.guest_load_address);
+}
+
+void add_observation_provenance(std::vector<ObservedIndirectTarget::Provenance>& history,
+                                const ObservedIndirectTarget::Provenance& item)
+{
+    if (std::find(history.begin(), history.end(), item) == history.end()) history.push_back(item);
+    std::sort(history.begin(), history.end(), [](const auto& left, const auto& right) {
+        return std::tie(left.source_module, left.source_function, left.source_pc,
+                        left.control_flow, left.target_register, left.pointer_provenance,
+                        left.guest_load_address) <
+               std::tie(right.source_module, right.source_function, right.source_pc,
+                        right.control_flow, right.target_register, right.pointer_provenance,
+                        right.guest_load_address);
+    });
+}
+
 void add_evidence(std::vector<IndirectTargetStaticEvidence>& evidence,
                   IndirectTargetStaticEvidence item)
 {
@@ -1715,6 +1774,279 @@ Result<ProcessFunctionMapRefinement> refine_process_function_map(
     result.assessment.decision.promoted = true;
     result.assessment.decision.reason = "new immutable process function record was built and validated";
     return Result<ProcessFunctionMapRefinement>::success(std::move(result));
+}
+
+IndirectTargetCandidateIdentity indirect_target_candidate_identity(
+    const ObservedIndirectTarget& observed)
+{
+    return IndirectTargetCandidateIdentity{observed.target_module,
+                                          observed.target,
+                                          observed.source_module,
+                                          observed.source_function,
+                                          observed.source_pc,
+                                          observed.control_flow,
+                                          observed.target_register,
+                                          observed.pointer_provenance,
+                                          observed.guest_load_address};
+}
+
+std::string_view indirect_target_refinement_budget_dimension_name(
+    IndirectTargetRefinementBudgetDimension dimension) noexcept
+{
+    switch (dimension)
+    {
+    case IndirectTargetRefinementBudgetDimension::None: return "none";
+    case IndirectTargetRefinementBudgetDimension::Rounds: return "rounds";
+    case IndirectTargetRefinementBudgetDimension::UniqueCandidates:
+        return "unique_candidates";
+    case IndirectTargetRefinementBudgetDimension::CandidateAssessments:
+        return "candidate_assessments";
+    case IndirectTargetRefinementBudgetDimension::Promotions: return "promotions";
+    case IndirectTargetRefinementBudgetDimension::MapRebuilds: return "map_rebuilds";
+    }
+    return "unknown";
+}
+
+IndirectTargetRefinementWorklist::IndirectTargetRefinementWorklist(
+    IndirectTargetRefinementBudgets budgets)
+    : budgets_(budgets)
+{
+    counters_.configured = budgets_;
+}
+
+IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::observe(
+    const IndirectTargetAssessment& assessment)
+{
+    IndirectTargetRefinementObservationResult result;
+    const auto& observed = assessment.observed;
+    counters_.observations_received += observed.observation_count;
+    if (assessment.validation.boundary_reconciliation.kind !=
+        FunctionBoundaryReconciliationKind::None)
+        ++counters_.boundary_reconciliations;
+
+    auto normalized = observed;
+    if (normalized.target_module.empty())
+        normalized.target_module = assessment.validation.target_module;
+    result.newly_unique_observation =
+        unique_observations_.emplace(observation_identity_key(normalized), true).second;
+    if (result.newly_unique_observation)
+        ++counters_.unique_observations;
+    else
+        ++counters_.duplicate_coalesced_observations;
+    const auto identity = indirect_target_candidate_identity(normalized);
+    const bool trusted_existing =
+        assessment.decision.kind == IndirectTargetDecisionKind::TrustedExistingEntry ||
+        assessment.decision.kind == IndirectTargetDecisionKind::AliasOfExistingEntry;
+    const bool candidate_observation = !trusted_existing;
+
+    if (!candidate_observation)
+    {
+        ++counters_.existing_trusted_hits;
+        return result;
+    }
+
+    const auto target_identity = std::make_pair(identity.target_module, identity.target);
+    const bool newly_unique_target =
+        unique_target_candidates_.find(target_identity) == unique_target_candidates_.end();
+    auto item = work_items_.find(identity);
+    if (item == work_items_.end())
+    {
+        if (newly_unique_target && counters_.unique_candidates >= budgets_.max_unique_candidates)
+        {
+            counters_.exhaustion = IndirectTargetRefinementExhaustion{
+                IndirectTargetRefinementBudgetDimension::UniqueCandidates,
+                counters_.unique_candidates, budgets_.max_unique_candidates};
+            overflow_pending_ = identity;
+            result.accepted = false;
+            return result;
+        }
+        if (newly_unique_target)
+        {
+            unique_target_candidates_.emplace(target_identity, true);
+            ++counters_.unique_candidates;
+            result.newly_unique_candidate = true;
+        }
+        WorkItem work;
+        work.observed = std::move(normalized);
+        work.observed.observation_count = observed.observation_count;
+        add_observation_provenance(work.observed.observation_provenance,
+                                   observation_provenance(observed));
+        work.pending = assessment.decision.eligible_for_promotion &&
+                       assessment.decision.kind == IndirectTargetDecisionKind::TrustedNewEntry;
+        work.processed = !work.pending;
+        work.processed_generation = map_generation_;
+        work_items_.emplace(identity, std::move(work));
+        if (!assessment.decision.eligible_for_promotion) ++counters_.rejected_candidates;
+        return result;
+    }
+
+    auto& work = item->second;
+    const auto prior_observation_count = work.observed.observation_count;
+    if (std::numeric_limits<std::size_t>::max() - prior_observation_count >=
+        observed.observation_count)
+        work.observed.observation_count += observed.observation_count;
+    else
+        work.observed.observation_count = std::numeric_limits<std::size_t>::max();
+    for (const auto& evidence : observed.static_evidence)
+        add_evidence(work.observed.static_evidence, evidence);
+    for (const auto& evidence : observed.entry_evidence)
+        add_entry_evidence(work.observed.entry_evidence, evidence);
+    add_observation_provenance(work.observed.observation_provenance,
+                               observation_provenance(observed));
+    for (const auto& provenance : observed.observation_provenance)
+        add_observation_provenance(work.observed.observation_provenance, provenance);
+    normalize_evidence(work.observed.static_evidence);
+    normalize_entry_evidence(work.observed.entry_evidence);
+    if (observed_order_less(observed, work.observed))
+    {
+        const auto count = work.observed.observation_count;
+        const auto static_evidence = work.observed.static_evidence;
+        const auto entry_evidence = work.observed.entry_evidence;
+        const auto history = work.observed.observation_provenance;
+        work.observed = std::move(normalized);
+        work.observed.observation_count = count;
+        work.observed.static_evidence = static_evidence;
+        work.observed.entry_evidence = entry_evidence;
+        work.observed.observation_provenance = history;
+    }
+
+    if (assessment.decision.kind == IndirectTargetDecisionKind::TrustedExistingEntry ||
+        assessment.decision.kind == IndirectTargetDecisionKind::AliasOfExistingEntry)
+    {
+        ++counters_.existing_trusted_hits;
+        work.pending = false;
+        work.processed = true;
+        work.processed_generation = map_generation_;
+        return result;
+    }
+    if (assessment.decision.eligible_for_promotion &&
+        assessment.decision.kind == IndirectTargetDecisionKind::TrustedNewEntry)
+    {
+        if (!work.pending && work.processed && work.processed_generation < map_generation_)
+        {
+            work.pending = true;
+            result.reconsidered_after_map_change = true;
+            ++counters_.candidates_reconsidered_after_map_change;
+        }
+        else if (!work.processed)
+        {
+            work.pending = true;
+        }
+    }
+    else
+    {
+        ++counters_.rejected_candidates;
+        work.pending = false;
+        work.processed = true;
+        work.processed_generation = map_generation_;
+    }
+    return result;
+}
+
+bool IndirectTargetRefinementWorklist::begin_round() noexcept
+{
+    if (counters_.exhaustion.dimension != IndirectTargetRefinementBudgetDimension::None)
+        return false;
+    if (counters_.refinement_rounds >= budgets_.max_rounds)
+    {
+        counters_.exhaustion = IndirectTargetRefinementExhaustion{
+            IndirectTargetRefinementBudgetDimension::Rounds,
+            counters_.refinement_rounds, budgets_.max_rounds};
+        return false;
+    }
+    ++counters_.refinement_rounds;
+    return true;
+}
+
+bool IndirectTargetRefinementWorklist::begin_candidate_assessment(
+    const IndirectTargetCandidateIdentity& candidate) noexcept
+{
+    if (counters_.exhaustion.dimension != IndirectTargetRefinementBudgetDimension::None)
+        return false;
+    if (counters_.candidate_assessments >= budgets_.max_candidate_assessments)
+    {
+        counters_.exhaustion = IndirectTargetRefinementExhaustion{
+            IndirectTargetRefinementBudgetDimension::CandidateAssessments,
+            counters_.candidate_assessments, budgets_.max_candidate_assessments};
+        return false;
+    }
+    ++counters_.candidate_assessments;
+    counters_.last_processed_candidate = candidate;
+    return true;
+}
+
+bool IndirectTargetRefinementWorklist::can_promote() noexcept
+{
+    if (counters_.exhaustion.dimension != IndirectTargetRefinementBudgetDimension::None)
+        return false;
+    if (counters_.successful_promotions >= budgets_.max_promotions)
+    {
+        counters_.exhaustion = IndirectTargetRefinementExhaustion{
+            IndirectTargetRefinementBudgetDimension::Promotions,
+            counters_.successful_promotions, budgets_.max_promotions};
+        return false;
+    }
+    if (counters_.map_rebuilds >= budgets_.max_map_rebuilds)
+    {
+        counters_.exhaustion = IndirectTargetRefinementExhaustion{
+            IndirectTargetRefinementBudgetDimension::MapRebuilds,
+            counters_.map_rebuilds, budgets_.max_map_rebuilds};
+        return false;
+    }
+    return true;
+}
+
+void IndirectTargetRefinementWorklist::record_terminal_candidate(
+    const IndirectTargetCandidateIdentity& candidate) noexcept
+{
+    const auto item = work_items_.find(candidate);
+    if (item == work_items_.end()) return;
+    item->second.pending = false;
+    item->second.processed = true;
+    item->second.processed_generation = map_generation_;
+}
+
+void IndirectTargetRefinementWorklist::record_promotion(
+    const IndirectTargetCandidateIdentity& candidate) noexcept
+{
+    if (!can_promote()) return;
+    ++counters_.successful_promotions;
+    ++counters_.map_rebuilds;
+    const auto item = work_items_.find(candidate);
+    if (item != work_items_.end())
+    {
+        item->second.pending = false;
+        item->second.processed = true;
+        item->second.processed_generation = map_generation_;
+    }
+    ++map_generation_;
+}
+
+std::vector<ObservedIndirectTarget> IndirectTargetRefinementWorklist::pending_candidates() const
+{
+    std::vector<ObservedIndirectTarget> result;
+    for (const auto& [unused, item] : work_items_)
+    {
+        (void)unused;
+        if (item.pending) result.push_back(item.observed);
+    }
+    std::sort(result.begin(), result.end(), observed_order_less);
+    return result;
+}
+
+IndirectTargetRefinementSummary IndirectTargetRefinementWorklist::summary() const
+{
+    auto result = counters_;
+    const auto pending = pending_candidates();
+    result.pending_candidate_count = pending.size() + (overflow_pending_ ? 1U : 0U);
+    if (!pending.empty()) result.next_pending_candidate = indirect_target_candidate_identity(pending.front());
+    else if (overflow_pending_) result.next_pending_candidate = overflow_pending_;
+    return result;
+}
+
+bool IndirectTargetRefinementWorklist::exhausted() const noexcept
+{
+    return counters_.exhaustion.dimension != IndirectTargetRefinementBudgetDimension::None;
 }
 
 void sort_observed_indirect_targets(std::vector<ObservedIndirectTarget>& targets)

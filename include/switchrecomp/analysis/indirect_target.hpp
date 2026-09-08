@@ -6,8 +6,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace switchrecomp::analysis
@@ -290,7 +294,163 @@ struct ObservedIndirectTarget
     std::vector<FunctionEntryEvidence> entry_evidence;
     std::size_t observation_count = 1U;
 
+    // The representative observation remains deterministic and is used for
+    // certification.  This history retains the guest-side provenance of
+    // coalesced observations without making host identity part of the model.
+    struct Provenance
+    {
+        std::string source_module;
+        memory::GuestAddress source_function = 0U;
+        memory::GuestAddress source_pc = 0U;
+        IndirectControlFlowKind control_flow = IndirectControlFlowKind::Branch;
+        std::string target_register;
+        IndirectTargetPointerProvenanceKind pointer_provenance =
+            IndirectTargetPointerProvenanceKind::Unknown;
+        std::optional<memory::GuestAddress> guest_load_address;
+
+        friend bool operator==(const Provenance&, const Provenance&) = default;
+    };
+    std::vector<Provenance> observation_provenance;
+
     friend bool operator==(const ObservedIndirectTarget&, const ObservedIndirectTarget&) = default;
+};
+
+struct IndirectTargetCandidateIdentity
+{
+    std::string target_module;
+    memory::GuestAddress target = 0U;
+    std::string source_module;
+    memory::GuestAddress source_function = 0U;
+    memory::GuestAddress source_pc = 0U;
+    IndirectControlFlowKind control_flow = IndirectControlFlowKind::Branch;
+    std::string target_register;
+    IndirectTargetPointerProvenanceKind pointer_provenance =
+        IndirectTargetPointerProvenanceKind::Unknown;
+    std::optional<memory::GuestAddress> guest_load_address;
+
+    friend bool operator==(const IndirectTargetCandidateIdentity&,
+                           const IndirectTargetCandidateIdentity&) = default;
+    friend bool operator<(const IndirectTargetCandidateIdentity& left,
+                          const IndirectTargetCandidateIdentity& right) noexcept
+    {
+        if (left.target_module != right.target_module)
+            return left.target_module < right.target_module;
+        if (left.target != right.target) return left.target < right.target;
+        return std::tie(left.source_module, left.source_function, left.source_pc,
+                        left.control_flow, left.target_register, left.pointer_provenance,
+                        left.guest_load_address) <
+               std::tie(right.source_module, right.source_function, right.source_pc,
+                        right.control_flow, right.target_register, right.pointer_provenance,
+                        right.guest_load_address);
+    }
+};
+
+[[nodiscard]] IndirectTargetCandidateIdentity indirect_target_candidate_identity(
+    const ObservedIndirectTarget& observed);
+
+enum class IndirectTargetRefinementBudgetDimension : std::uint8_t
+{
+    None,
+    Rounds,
+    UniqueCandidates,
+    CandidateAssessments,
+    Promotions,
+    MapRebuilds,
+};
+
+[[nodiscard]] std::string_view indirect_target_refinement_budget_dimension_name(
+    IndirectTargetRefinementBudgetDimension dimension) noexcept;
+
+struct IndirectTargetRefinementBudgets
+{
+    // These are outer discovery budgets.  CFG/function budgets remain owned
+    // by AnalysisBudgets and are enforced independently for every immutable
+    // map construction.
+    std::size_t max_rounds = 64U;
+    std::size_t max_unique_candidates = 256U;
+    std::size_t max_candidate_assessments = 512U;
+    std::size_t max_promotions = 128U;
+    std::size_t max_map_rebuilds = 128U;
+};
+
+struct IndirectTargetRefinementExhaustion
+{
+    IndirectTargetRefinementBudgetDimension dimension =
+        IndirectTargetRefinementBudgetDimension::None;
+    std::size_t consumed = 0U;
+    std::size_t limit = 0U;
+};
+
+struct IndirectTargetRefinementSummary
+{
+    IndirectTargetRefinementBudgets configured;
+    std::size_t refinement_rounds = 0U;
+    std::size_t observations_received = 0U;
+    std::size_t unique_observations = 0U;
+    std::size_t unique_candidates = 0U;
+    std::size_t candidate_assessments = 0U;
+    std::size_t successful_promotions = 0U;
+    std::size_t existing_trusted_hits = 0U;
+    std::size_t duplicate_coalesced_observations = 0U;
+    std::size_t rejected_candidates = 0U;
+    std::size_t boundary_reconciliations = 0U;
+    std::size_t map_rebuilds = 0U;
+    std::size_t candidates_reconsidered_after_map_change = 0U;
+    std::size_t pending_candidate_count = 0U;
+    std::optional<IndirectTargetCandidateIdentity> last_processed_candidate;
+    std::optional<IndirectTargetCandidateIdentity> next_pending_candidate;
+    IndirectTargetRefinementExhaustion exhaustion;
+};
+
+struct IndirectTargetRefinementObservationResult
+{
+    bool accepted = true;
+    bool newly_unique_observation = false;
+    bool newly_unique_candidate = false;
+    bool reconsidered_after_map_change = false;
+};
+
+struct IndirectTargetAssessment;
+
+// Deterministic, finite outer-discovery accounting.  The worklist stores one
+// logical work item per target/provenance identity, while the unique-candidate
+// quota is charged once per target module/address.  Every distinct guest-side
+// observation provenance remains in its representative observation.
+class IndirectTargetRefinementWorklist
+{
+  public:
+    explicit IndirectTargetRefinementWorklist(
+        IndirectTargetRefinementBudgets budgets = {});
+
+    [[nodiscard]] IndirectTargetRefinementObservationResult observe(
+        const IndirectTargetAssessment& assessment);
+    [[nodiscard]] bool begin_round() noexcept;
+    [[nodiscard]] bool begin_candidate_assessment(
+        const IndirectTargetCandidateIdentity& candidate) noexcept;
+    [[nodiscard]] bool can_promote() noexcept;
+    void record_terminal_candidate(const IndirectTargetCandidateIdentity& candidate) noexcept;
+    void record_promotion(const IndirectTargetCandidateIdentity& candidate) noexcept;
+
+    [[nodiscard]] std::vector<ObservedIndirectTarget> pending_candidates() const;
+    [[nodiscard]] IndirectTargetRefinementSummary summary() const;
+    [[nodiscard]] bool exhausted() const noexcept;
+
+  private:
+    struct WorkItem
+    {
+        ObservedIndirectTarget observed;
+        bool pending = false;
+        bool processed = false;
+        std::size_t processed_generation = 0U;
+    };
+
+    IndirectTargetRefinementBudgets budgets_;
+    IndirectTargetRefinementSummary counters_;
+    std::map<IndirectTargetCandidateIdentity, WorkItem> work_items_;
+    std::map<std::string, bool> unique_observations_;
+    std::map<std::pair<std::string, memory::GuestAddress>, bool> unique_target_candidates_;
+    std::size_t map_generation_ = 0U;
+    std::optional<IndirectTargetCandidateIdentity> overflow_pending_;
 };
 
 struct IndirectTargetValidation
