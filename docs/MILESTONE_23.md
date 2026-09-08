@@ -19,7 +19,8 @@ is claimed.
 | M22 branch | `milestone-22-indirect-boundary-reconciliation` |
 | M22 PR | #27, against `milestone-21-smulh-semantics` |
 | M23 branch | `milestone-23-indirect-refinement-scaling` |
-| M23 PR | To be opened against the finalized M22 branch |
+| M23 PR | [#28](https://github.com/ikeracevedo2002/TOTKRecomp/pull/28), stacked against M22 |
+| M23 implementation/evidence head before this documentation update | `6dce2e45f539d872967dd98a9c018e308d2eec3d` |
 | Compiler/configuration | AppleClang 17, C++20, Debug, Unix Makefiles |
 | Pre-edit expected baseline | `252/252` |
 | Pre-edit observed baseline | `252/252` |
@@ -175,9 +176,9 @@ reference only.
 | AppleClang standard | `260/260` local suite |
 | AppleClang ASan/UBSan | `260/260`, no findings |
 | AppleClang TSan | `260/260`, no race reports |
-| GCC exact M23 head | pending |
-| LLVM 18 exact M23 head | pending |
-| MSVC exact M23 head | pending |
+| GCC exact M23 head | pass in both exact-head workflows |
+| LLVM 18 exact M23 head | pass in both exact-head workflows |
+| MSVC exact M23 head | pass in both exact-head workflows |
 
 New dependency count: `0`. No proprietary executable, private report,
 configuration, key, or machine-specific path was committed. The pre-existing
