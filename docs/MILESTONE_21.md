@@ -14,8 +14,11 @@ head; no rebase or lineage change was performed.
 | M20 PR | #25, open against `milestone-19-move-wide-umulh-frontier` |
 | Final SHA | Reported in the completion handoff; a documenting commit cannot contain its own SHA |
 
-The pre-edit M20 suite was `241/241`, matching the observed M20 baseline.
-The M19 baseline was `233/233`. The final local suite is `245/245`.
+The historical M19 baseline was `233/233`, and the M20 observed baseline was
+also `233/233` before M20's eight focused tests. M20's final suite was
+`241/241`; rerunning that existing suite locally at the exact M21 starting
+head produced the observed pre-edit baseline `241/241`. The final local suite
+is `245/245`.
 
 ## SMULH implementation
 
