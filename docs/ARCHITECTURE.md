@@ -829,7 +829,14 @@ external `function_transfer` edge. It does not set the link register and is not
 represented as a call. A `B` to an ordinary local label and a self-branch remain
 internal control flow. Conditional branch fallthrough/taken behavior remains
 explicit and is not reclassified automatically. Register-indirect `BR` targets
-remain unresolved unless independent reviewed evidence resolves them.
+remain unresolved unless independent reviewed evidence resolves them. A runtime
+observation is retained as typed evidence, not as a function record. The
+analysis layer may perform a bounded immutable refinement when the target is
+mapped executable code with a unique module owner, a non-conflicting bounded
+CFG, and a configured evidence policy that permits promotion. The refinement
+returns a new frozen map; it never mutates a finalized map in place. Existing
+exact and secondary entries are reported as such, precise owned-range overlaps
+are rejected, and convex display envelopes are not treated as ownership.
 
 Function discovery first reaches a bounded direct-call fixed point. It then
 freezes the strong-entry set and performs bounded boundary-aware re-analysis;
@@ -2064,6 +2071,27 @@ real four-module M15 executable set remains an external local input; M16 does
 not invent bootstrap state or relabel the metadata-selected `main` `DT_INIT`
 candidate as a verified process entry. See [MILESTONE_16.md](MILESTONE_16.md)
 for the real-input availability and execution-frontier status.
+
+### Milestone 18 — Evidence-backed indirect guest target discovery
+
+**Implemented:** Execution sessions now retain source PC, control-flow kind,
+target register, guest-load provenance, target module, and observation count
+for runtime indirect targets. `analysis::assess_indirect_target` validates
+alignment, checked guest mapping and permissions, unique process ownership,
+precise function ownership, bounded CFG structure, overlap, static symbol and
+relocation evidence, and explicit resource limits. A separate immutable
+refinement operation rebuilds a new frozen `FinalizedFunctionMap` or
+`ProcessFunctionMap` and records `ObservedIndirectTarget` evidence only after
+validation. The execution-frontier driver retries deterministically with hard
+pass and candidate limits, while preserving BR, BLR, and RET semantics.
+
+The controlled M18 run promotes a real `sdk` target because it is independently
+identified by a defined dynamic `STT_FUNC` symbol and a `R_AARCH64_JUMP_SLOT`
+relocation-backed guest pointer slot, and its bounded CFG has no precise
+ownership conflict. The observation triggers refinement; the static ELF/NSO
+evidence is what raises confidence to confirmed. See
+[MILESTONE_18.md](MILESTONE_18.md) for the private-input evidence ledger and
+the exact next execution boundary.
 
 ### Future milestone — Filesystem and asset loading
 
