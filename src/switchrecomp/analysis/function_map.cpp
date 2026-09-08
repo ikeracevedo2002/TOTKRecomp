@@ -774,17 +774,19 @@ std::string_view failure_category_name(FailureCategory category) noexcept
     return "unknown";
 }
 
-const FunctionRecord* FinalizedFunctionMap::find(GuestAddress entry) const noexcept
+const FunctionRecord* FinalizedFunctionMap::find_canonical_entry(GuestAddress entry) const noexcept
 {
     const auto found = std::lower_bound(
         functions_.begin(), functions_.end(), entry,
         [](const FunctionRecord& function, GuestAddress value) {
             return function.canonical_entry < value;
         });
-    if (found != functions_.end() && found->canonical_entry == entry)
-    {
-        return &*found;
-    }
+    return found != functions_.end() && found->canonical_entry == entry ? &*found : nullptr;
+}
+
+const FunctionRecord* FinalizedFunctionMap::find_exact_entry(GuestAddress entry) const noexcept
+{
+    if (const auto* canonical = find_canonical_entry(entry)) return canonical;
     for (const auto& function : functions_)
     {
         if (std::binary_search(function.entries.begin(), function.entries.end(), entry))
@@ -795,7 +797,12 @@ const FunctionRecord* FinalizedFunctionMap::find(GuestAddress entry) const noexc
     return nullptr;
 }
 
-std::vector<const FunctionRecord*> FinalizedFunctionMap::find_owners(
+const FunctionRecord* FinalizedFunctionMap::find_callable_entry(GuestAddress entry) const noexcept
+{
+    return find_exact_entry(entry);
+}
+
+std::vector<const FunctionRecord*> FinalizedFunctionMap::find_precise_owners(
     GuestAddress address) const
 {
     std::vector<const FunctionRecord*> owners;
@@ -807,6 +814,17 @@ std::vector<const FunctionRecord*> FinalizedFunctionMap::find_owners(
         }
     }
     return owners;
+}
+
+const FunctionRecord* FinalizedFunctionMap::find(GuestAddress entry) const noexcept
+{
+    return find_callable_entry(entry);
+}
+
+std::vector<const FunctionRecord*> FinalizedFunctionMap::find_owners(
+    GuestAddress address) const
+{
+    return find_precise_owners(address);
 }
 
 Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput& input,

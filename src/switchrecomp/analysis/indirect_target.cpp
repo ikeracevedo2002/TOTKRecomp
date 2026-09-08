@@ -366,7 +366,7 @@ struct MapCandidate
     {
         for (const auto& map : process_function_map->maps())
         {
-            const auto exact = map.find(target);
+            const auto exact = map.find_exact_entry(target);
             const bool in_range = contains_any(map.identity().executable_ranges, target, 4U);
             if (exact != nullptr || in_range)
                 result.push_back(MapCandidate{&map, exact, in_range});
@@ -375,7 +375,7 @@ struct MapCandidate
     else if (function_map != nullptr)
     {
         result.push_back(MapCandidate{
-            function_map, function_map->find(target),
+            function_map, function_map->find_exact_entry(target),
             contains_any(function_map->identity().executable_ranges, target, 4U)});
     }
     return result;
@@ -384,7 +384,7 @@ struct MapCandidate
 [[nodiscard]] const FunctionRecord* find_precise_owner(const FinalizedFunctionMap& map,
                                                         GuestAddress target)
 {
-    const auto owners = map.find_owners(target);
+    const auto owners = map.find_precise_owners(target);
     return owners.empty() ? nullptr : owners.front();
 }
 
@@ -392,6 +392,188 @@ struct MapCandidate
                                             GuestAddress target) noexcept
 {
     return function.range_begin <= target && target < function.range_end;
+}
+
+[[nodiscard]] Result<std::vector<GuestAddressRange>> cfg_owned_ranges(
+    const ControlFlowGraph& cfg)
+{
+    std::vector<GuestAddress> instruction_addresses;
+    instruction_addresses.reserve(cfg.instruction_count);
+    for (const auto& [unused, block] : cfg.blocks)
+    {
+        (void)unused;
+        for (const auto& instruction : block.instructions)
+            instruction_addresses.push_back(instruction.address);
+    }
+    return normalize_code_ranges(instruction_addresses);
+}
+
+[[nodiscard]] bool ranges_are_subset(const std::vector<GuestAddressRange>& subset,
+                                     const std::vector<GuestAddressRange>& superset) noexcept
+{
+    for (const auto& range : subset)
+    {
+        if (!std::any_of(superset.begin(), superset.end(), [&range](const auto& enclosing) {
+                return contains(enclosing, range.base, range.size);
+            }))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] std::optional<GuestAddress> ordinary_branch_source(
+    const ControlFlowGraph& cfg, GuestAddress target)
+{
+    for (const auto& [unused, block] : cfg.blocks)
+    {
+        (void)unused;
+        for (const auto& edge : block.successors)
+        {
+            if (edge.kind == EdgeKind::Branch && edge.internal && edge.target == target)
+                return edge.source;
+        }
+    }
+    return std::nullopt;
+}
+
+void configure_cfg_options(AnalysisOptions& cfg,
+                           const IndirectTargetDiscoveryOptions& options,
+                           const FinalizedFunctionMap* target_map, GuestAddress target);
+
+struct AnalyzerOverClaimAttempt
+{
+    FunctionBoundaryReconciliation reconciliation;
+    ControlFlowGraph candidate_cfg;
+};
+
+[[nodiscard]] std::optional<AnalyzerOverClaimAttempt> reconcile_analyzer_overclaim(
+    const FunctionRecord& existing_function, const ControlFlowGraph& candidate_cfg,
+    const std::vector<GuestAddressRange>& candidate_ranges,
+    const memory::GuestMemory& memory, const FinalizedFunctionMap& analysis_map,
+    GuestAddress candidate_entry, const IndirectTargetDiscoveryOptions& options)
+{
+    if (!existing_function.cfg || existing_function.entry_trust_status ==
+                                      FunctionEntryTrustStatus::Conflict ||
+        existing_function.translation_status == TranslationStatus::Conflict)
+    {
+        return std::nullopt;
+    }
+
+    const auto overlap = intersect_owned_ranges(candidate_ranges,
+                                                existing_function.owned_code_ranges);
+    if (!overlap || overlap.value().empty()) return std::nullopt;
+
+    // A boundary proof must contain all three independent structural facts:
+    // the old function branches to the proposed helper, the candidate calls
+    // it directly, and the candidate also transfers to it as a tail. A raw
+    // observed target or relocation is intentionally not accepted here.
+    std::set<GuestAddress> boundary_entries;
+    std::optional<GuestAddress> existing_branch_source;
+    std::optional<GuestAddress> candidate_call_source;
+    std::optional<GuestAddress> candidate_branch_source;
+    for (const auto& call : candidate_cfg.calls)
+    {
+        if (call.kind != CallKind::Direct || !call.target ||
+            !contains_any(existing_function.owned_code_ranges, call.target.value(), 4U) ||
+            !contains_any(overlap.value(), call.target.value(), 4U))
+        {
+            continue;
+        }
+        const auto target = call.target.value();
+        const auto old_branch = ordinary_branch_source(existing_function.cfg.value(), target);
+        const auto new_branch = ordinary_branch_source(candidate_cfg, target);
+        if (!old_branch || !new_branch) continue;
+        boundary_entries.insert(target);
+        existing_branch_source = old_branch;
+        candidate_call_source = call.address;
+        candidate_branch_source = new_branch;
+    }
+    if (boundary_entries.size() != 1U) return std::nullopt;
+
+    AnalysisOptions boundary_options = options.cfg;
+    configure_cfg_options(boundary_options, options, &analysis_map, candidate_entry);
+    boundary_options.known_function_entries.insert(boundary_entries.begin(), boundary_entries.end());
+
+    const auto analyze = [&](GuestAddress entry)
+        -> std::optional<std::pair<ControlFlowGraph, std::vector<GuestAddressRange>>> {
+        const auto graph = analyze_control_flow(memory, entry, boundary_options);
+        if (!graph || graph.value().blocks.empty()) return std::nullopt;
+        const auto ranges = cfg_owned_ranges(graph.value());
+        if (!ranges || ranges.value().empty()) return std::nullopt;
+        return std::make_pair(graph.value(), ranges.value());
+    };
+
+    const auto existing_after = analyze(existing_function.canonical_entry);
+    const auto candidate_after = analyze(candidate_entry);
+    if (!existing_after || !candidate_after) return std::nullopt;
+
+    std::vector<std::pair<GuestAddress, std::vector<GuestAddressRange>>> boundary_after;
+    std::optional<ControlFlowGraph> boundary_cfg;
+    for (const auto entry : boundary_entries)
+    {
+        const auto analyzed = analyze(entry);
+        if (!analyzed || !analyzed->first.unresolved.empty()) return std::nullopt;
+        boundary_cfg = analyzed->first;
+        boundary_after.emplace_back(entry, analyzed->second);
+    }
+
+    std::vector<GuestAddressRange> boundary_ranges;
+    for (const auto& [unused, ranges] : boundary_after)
+    {
+        (void)unused;
+        const auto normalized = normalize_code_ranges(ranges);
+        if (!normalized) return std::nullopt;
+        boundary_ranges.insert(boundary_ranges.end(), normalized.value().begin(),
+                               normalized.value().end());
+    }
+    const auto normalized_boundary_ranges = normalize_code_ranges(boundary_ranges);
+    if (!normalized_boundary_ranges || normalized_boundary_ranges.value() != overlap.value())
+        return std::nullopt;
+    if (owned_ranges_overlap(existing_after->second, candidate_after->second) ||
+        contains_any(existing_after->second, *boundary_entries.begin(), 4U) ||
+        contains_any(candidate_after->second, *boundary_entries.begin(), 4U) ||
+        !ranges_are_subset(existing_after->second, existing_function.owned_code_ranges) ||
+        !ranges_are_subset(candidate_after->second, candidate_ranges))
+    {
+        return std::nullopt;
+    }
+
+    FunctionBoundaryReconciliation reconciliation;
+    reconciliation.kind = FunctionBoundaryReconciliationKind::AnalyzerOverClaim;
+    reconciliation.existing_canonical_entry = existing_function.canonical_entry;
+    reconciliation.existing_owned_code_ranges_before = existing_function.owned_code_ranges;
+    reconciliation.candidate_owned_code_ranges_before = candidate_ranges;
+    reconciliation.precise_overlap_ranges = overlap.value();
+    reconciliation.existing_owned_code_ranges_after = existing_after->second;
+    reconciliation.candidate_owned_code_ranges_after = candidate_after->second;
+    reconciliation.boundary_owned_code_ranges = normalized_boundary_ranges.value();
+    reconciliation.boundary_entries.assign(boundary_entries.begin(), boundary_entries.end());
+    reconciliation.existing_cfg_before = existing_function.cfg;
+    reconciliation.candidate_cfg_before = candidate_cfg;
+    reconciliation.boundary_cfg = boundary_cfg;
+    reconciliation.witnesses.push_back(FunctionBoundaryWitness{
+        FunctionBoundaryWitnessKind::BoundaryCFG, *boundary_entries.begin(),
+        *boundary_entries.begin()});
+    reconciliation.witnesses.push_back(FunctionBoundaryWitness{
+        FunctionBoundaryWitnessKind::ExistingUnconditionalBranch, existing_branch_source.value(),
+        *boundary_entries.begin()});
+    reconciliation.witnesses.push_back(FunctionBoundaryWitness{
+        FunctionBoundaryWitnessKind::CandidateDirectCall, candidate_call_source.value(),
+        *boundary_entries.begin()});
+    reconciliation.witnesses.push_back(FunctionBoundaryWitness{
+        FunctionBoundaryWitnessKind::CandidateUnconditionalBranch, candidate_branch_source.value(),
+        *boundary_entries.begin()});
+    std::sort(reconciliation.witnesses.begin(), reconciliation.witnesses.end(),
+              [](const auto& left, const auto& right) {
+                  return std::tie(left.kind, left.source, left.target) <
+                         std::tie(right.kind, right.source, right.target);
+              });
+    reconciliation.reason =
+        "precise overlap is exactly a separately discoverable direct-call/tail-transfer helper; "
+        "boundary-aware reanalysis removes it from both callers";
+    return AnalyzerOverClaimAttempt{std::move(reconciliation), candidate_after->first};
 }
 
 void add_record_evidence(const FunctionRecord* record,
@@ -516,6 +698,35 @@ void mark_refinement_failure(IndirectTargetAssessment& assessment, const Error& 
     assessment.certification.status = is_budget_error(error.code)
                                           ? FunctionCertificationStatus::BoundsExceeded
                                           : FunctionCertificationStatus::CFGIncomplete;
+}
+
+[[nodiscard]] bool boundary_refinement_matches(
+    const FinalizedFunctionMap& map, const FunctionBoundaryReconciliation& reconciliation,
+    GuestAddress candidate_entry) noexcept
+{
+    if (reconciliation.kind != FunctionBoundaryReconciliationKind::AnalyzerOverClaim)
+        return true;
+    if (!reconciliation.existing_canonical_entry) return false;
+    const auto* existing = map.find_canonical_entry(
+        reconciliation.existing_canonical_entry.value());
+    const auto* candidate = map.find_exact_entry(candidate_entry);
+    if (existing == nullptr || candidate == nullptr || candidate->canonical_entry != candidate_entry ||
+        candidate->owned_code_ranges != reconciliation.candidate_owned_code_ranges_after ||
+        existing->owned_code_ranges != reconciliation.existing_owned_code_ranges_after)
+    {
+        return false;
+    }
+    for (const auto boundary : reconciliation.boundary_entries)
+    {
+        const auto* canonical = map.find_canonical_entry(boundary);
+        const auto owners = map.find_precise_owners(boundary);
+        if (canonical == nullptr || owners.size() != 1U || owners.front() != canonical ||
+            canonical->owned_code_ranges != reconciliation.boundary_owned_code_ranges)
+        {
+            return false;
+        }
+    }
+    return !owned_ranges_overlap(existing->owned_code_ranges, candidate->owned_code_ranges);
 }
 
 [[nodiscard]] Result<IndirectTargetAssessment> complete_assessment(
@@ -669,6 +880,34 @@ std::string_view indirect_target_decision_name(IndirectTargetDecisionKind decisi
     case IndirectTargetDecisionKind::UnsupportedTarget: return "unsupported_target";
     }
     return "unsupported_target";
+}
+
+std::string_view function_boundary_reconciliation_kind_name(
+    FunctionBoundaryReconciliationKind kind) noexcept
+{
+    switch (kind)
+    {
+    case FunctionBoundaryReconciliationKind::None: return "none";
+    case FunctionBoundaryReconciliationKind::AnalyzerOverClaim: return "analyzer_over_claim";
+    case FunctionBoundaryReconciliationKind::IncompatiblePreciseOverlap:
+        return "incompatible_precise_overlap";
+    }
+    return "none";
+}
+
+std::string_view function_boundary_witness_kind_name(
+    FunctionBoundaryWitnessKind kind) noexcept
+{
+    switch (kind)
+    {
+    case FunctionBoundaryWitnessKind::ExistingUnconditionalBranch:
+        return "existing_unconditional_branch";
+    case FunctionBoundaryWitnessKind::CandidateDirectCall: return "candidate_direct_call";
+    case FunctionBoundaryWitnessKind::CandidateUnconditionalBranch:
+        return "candidate_unconditional_branch";
+    case FunctionBoundaryWitnessKind::BoundaryCFG: return "boundary_cfg";
+    }
+    return "boundary_cfg";
 }
 
 std::string_view function_entry_evidence_kind_name(FunctionEntryEvidenceKind kind) noexcept
@@ -1220,22 +1459,67 @@ Result<IndirectTargetAssessment> assess_indirect_target(
                                              std::nullopt, std::nullopt, std::nullopt,
                                              std::nullopt, {}, false, false,
                                              "bounded CFG decoded within configured limits"});
+    bool reconciled_boundary = false;
     if (analysis_map != nullptr)
     {
+        std::vector<const FunctionRecord*> overlapping_functions;
         for (const auto& function : analysis_map->functions())
         {
             if (!owned_ranges_overlap(validation.candidate_owned_code_ranges,
-                                      function.owned_code_ranges))
+                                       function.owned_code_ranges))
                 continue;
+            overlapping_functions.push_back(&function);
+        }
+        if (!overlapping_functions.empty())
+        {
+            const auto* function = overlapping_functions.front();
             const auto overlap = intersect_owned_ranges(validation.candidate_owned_code_ranges,
-                                                        function.owned_code_ranges);
+                                                        function->owned_code_ranges);
             if (overlap) validation.overlap_ranges = overlap.value();
-            validation.ownership = IndirectTargetOwnership::CandidateOverlap;
-            decision.kind = IndirectTargetDecisionKind::FunctionBoundaryConflict;
-            decision.confidence = FunctionConfidence::Conflict;
-            decision.reason = "candidate CFG overlaps precise ownership of existing function " +
-                              hex_address(function.canonical_entry);
-            return complete_assessment(std::move(assessment));
+            validation.boundary_reconciliation.kind =
+                FunctionBoundaryReconciliationKind::IncompatiblePreciseOverlap;
+            validation.boundary_reconciliation.existing_canonical_entry =
+                function->canonical_entry;
+            validation.boundary_reconciliation.existing_owned_code_ranges_before =
+                function->owned_code_ranges;
+            validation.boundary_reconciliation.candidate_owned_code_ranges_before =
+                validation.candidate_owned_code_ranges;
+            validation.boundary_reconciliation.precise_overlap_ranges = validation.overlap_ranges;
+            validation.boundary_reconciliation.existing_cfg_before = function->cfg;
+            validation.boundary_reconciliation.candidate_cfg_before = graph.value();
+
+            if (overlapping_functions.size() == 1U && overlap && !overlap.value().empty())
+            {
+                const auto reconciliation = reconcile_analyzer_overclaim(
+                    *function, graph.value(), validation.candidate_owned_code_ranges, memory,
+                    *analysis_map, observed.target, options);
+                if (reconciliation)
+                {
+                    validation.boundary_reconciliation = reconciliation->reconciliation;
+                    validation.cfg = reconciliation->candidate_cfg;
+                    validation.candidate_owned_code_ranges =
+                        validation.boundary_reconciliation.candidate_owned_code_ranges_after;
+                    validation.overlap_ranges.clear();
+                    validation.ownership = IndirectTargetOwnership::NewEntry;
+                    validation.direct_call_targets.clear();
+                    validation.unresolved_control_flow.clear();
+                    validation.edges = 0U;
+                    account_cfg(validation.cfg.value(), validation);
+                    reconciled_boundary = true;
+                }
+            }
+            if (!reconciled_boundary)
+            {
+                validation.ownership = IndirectTargetOwnership::CandidateOverlap;
+                validation.boundary_reconciliation.reason =
+                    "no complete direct-call/tail-transfer boundary proof reconciles the precise overlap";
+                decision.kind = IndirectTargetDecisionKind::FunctionBoundaryConflict;
+                decision.confidence = FunctionConfidence::Conflict;
+                decision.reason =
+                    "candidate CFG overlaps precise ownership of existing function " +
+                    hex_address(function->canonical_entry);
+                return complete_assessment(std::move(assessment));
+            }
         }
     }
 
@@ -1267,7 +1551,7 @@ Result<IndirectTargetAssessment> assess_indirect_target(
     }
     if (validation.ownership != IndirectTargetOwnership::ExistingDisplayEnvelopeOnly)
         validation.ownership = IndirectTargetOwnership::NewEntry;
-    validation.cfg_status = graph.value().unresolved.empty()
+    validation.cfg_status = validation.cfg && validation.cfg->unresolved.empty()
                                 ? IndirectTargetCFGStatus::Validated
                                 : IndirectTargetCFGStatus::ValidatedWithUnresolvedFlow;
     decision.kind = IndirectTargetDecisionKind::TrustedNewEntry;
@@ -1283,7 +1567,10 @@ Result<IndirectTargetAssessment> assess_indirect_target(
         }
     }
     decision.canonical_entry = observed.target;
-    decision.reason = validation.pointer_slot_relocation_found &&
+    decision.reason = reconciled_boundary
+                          ? "observed indirect target passed typed analyzer-overclaim reconciliation; "
+                            "the separately discovered direct-call helper is excluded from candidate ownership"
+                      : validation.pointer_slot_relocation_found &&
                               validation.pointer_slot_value_verified
                           ? (validation.pointer_target_declared_function
                                  ? "observed indirect call plus verified relocation-backed function target and bounded CFG"
@@ -1327,9 +1614,12 @@ Result<FunctionMapRefinement> refine_function_map(
         mark_refinement_failure(result.assessment, rebuilt.error());
         return Result<FunctionMapRefinement>::success(std::move(result));
     }
-    const auto* record = rebuilt.value().find(observed.target);
+    const auto* record = rebuilt.value().find_exact_entry(observed.target);
     if (record == nullptr || record->translation_status == TranslationStatus::Conflict ||
-        !record->cfg)
+        !record->cfg ||
+        !boundary_refinement_matches(
+            rebuilt.value(), result.assessment.validation.boundary_reconciliation,
+            observed.target))
     {
         mark_refinement_failure(
             result.assessment,
@@ -1405,8 +1695,13 @@ Result<ProcessFunctionMapRefinement> refine_process_function_map(
         return Result<ProcessFunctionMapRefinement>::success(std::move(result));
     }
     const auto* record = rebuilt.value().find(observed.target);
+    const auto* rebuilt_module = rebuilt.value().map_for(observed.target);
     if (record == nullptr || record->translation_status == TranslationStatus::Conflict ||
-        !record->cfg)
+        !record->cfg ||
+        rebuilt_module == nullptr ||
+        !boundary_refinement_matches(
+            *rebuilt_module, result.assessment.validation.boundary_reconciliation,
+            observed.target))
     {
         mark_refinement_failure(
             result.assessment,

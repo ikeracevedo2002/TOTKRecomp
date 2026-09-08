@@ -282,9 +282,9 @@ struct SmulhFrontierEvidence
 
 struct ExecutionSessionResult
 {
-    // M21 adds a typed signed multiply-high frontier record to the
-    // deterministic execution report.
-    static constexpr std::uint32_t schema_version = 8U;
+    // M22 adds typed boundary-reconciliation geometry and its independent
+    // report-time overlap check to the deterministic execution report.
+    static constexpr std::uint32_t schema_version = 9U;
 
     analysis::ModuleIdentity identity;
     EntrySelection entry;

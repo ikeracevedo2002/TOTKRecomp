@@ -80,6 +80,58 @@ enum class IndirectTargetDecisionKind : std::uint8_t
 [[nodiscard]] std::string_view indirect_target_decision_name(
     IndirectTargetDecisionKind decision) noexcept;
 
+// A precise overlap is not automatically shareable. This relationship records
+// the result of the boundary reconciliation proof that accompanies an
+// indirect-target assessment.
+enum class FunctionBoundaryReconciliationKind : std::uint8_t
+{
+    None,
+    AnalyzerOverClaim,
+    IncompatiblePreciseOverlap,
+};
+
+[[nodiscard]] std::string_view function_boundary_reconciliation_kind_name(
+    FunctionBoundaryReconciliationKind kind) noexcept;
+
+enum class FunctionBoundaryWitnessKind : std::uint8_t
+{
+    ExistingUnconditionalBranch,
+    CandidateDirectCall,
+    CandidateUnconditionalBranch,
+    BoundaryCFG,
+};
+
+[[nodiscard]] std::string_view function_boundary_witness_kind_name(
+    FunctionBoundaryWitnessKind kind) noexcept;
+
+struct FunctionBoundaryWitness
+{
+    FunctionBoundaryWitnessKind kind = FunctionBoundaryWitnessKind::BoundaryCFG;
+    memory::GuestAddress source = 0U;
+    memory::GuestAddress target = 0U;
+
+    friend bool operator==(const FunctionBoundaryWitness&, const FunctionBoundaryWitness&) =
+        default;
+};
+
+struct FunctionBoundaryReconciliation
+{
+    FunctionBoundaryReconciliationKind kind = FunctionBoundaryReconciliationKind::None;
+    std::optional<memory::GuestAddress> existing_canonical_entry;
+    std::vector<GuestAddressRange> existing_owned_code_ranges_before;
+    std::vector<GuestAddressRange> candidate_owned_code_ranges_before;
+    std::vector<GuestAddressRange> precise_overlap_ranges;
+    std::vector<GuestAddressRange> existing_owned_code_ranges_after;
+    std::vector<GuestAddressRange> candidate_owned_code_ranges_after;
+    std::vector<GuestAddressRange> boundary_owned_code_ranges;
+    std::vector<memory::GuestAddress> boundary_entries;
+    std::vector<FunctionBoundaryWitness> witnesses;
+    std::optional<ControlFlowGraph> existing_cfg_before;
+    std::optional<ControlFlowGraph> candidate_cfg_before;
+    std::optional<ControlFlowGraph> boundary_cfg;
+    std::string reason;
+};
+
 // Function-entry evidence is deliberately richer than the legacy discovery
 // source/confidence pair.  It records both the semantic kind of proof and the
 // exact guest-side object that supplied it; no host pointer is representable.
@@ -254,6 +306,7 @@ struct IndirectTargetValidation
     std::optional<memory::GuestAddress> existing_canonical_entry;
     std::vector<GuestAddressRange> candidate_owned_code_ranges;
     std::vector<GuestAddressRange> overlap_ranges;
+    FunctionBoundaryReconciliation boundary_reconciliation;
     std::optional<ControlFlowGraph> cfg;
     IndirectTargetCFGStatus cfg_status = IndirectTargetCFGStatus::NotAnalyzed;
     std::size_t blocks = 0U;

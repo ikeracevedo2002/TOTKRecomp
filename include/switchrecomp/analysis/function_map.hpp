@@ -281,6 +281,15 @@ class FinalizedFunctionMap
     {
         return conflicts_;
     }
+    // Exact callable-entry lookup includes explicitly accepted secondary
+    // entries, but never infers callability from an ownership range.
+    [[nodiscard]] const FunctionRecord* find_exact_entry(memory::GuestAddress entry) const noexcept;
+    [[nodiscard]] const FunctionRecord* find_canonical_entry(
+        memory::GuestAddress entry) const noexcept;
+    [[nodiscard]] const FunctionRecord* find_callable_entry(
+        memory::GuestAddress entry) const noexcept;
+    [[nodiscard]] std::vector<const FunctionRecord*> find_precise_owners(
+        memory::GuestAddress address) const;
     [[nodiscard]] const FunctionRecord* find(memory::GuestAddress entry) const noexcept;
     [[nodiscard]] std::vector<const FunctionRecord*> find_owners(
         memory::GuestAddress address) const;

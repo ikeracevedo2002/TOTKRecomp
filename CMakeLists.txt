@@ -450,6 +450,7 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/milestone19_move_wide_tests.cpp
         tests/milestone20_indirect_function_entry_tests.cpp
         tests/milestone21_smulh_tests.cpp
+        tests/milestone22_indirect_boundary_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE

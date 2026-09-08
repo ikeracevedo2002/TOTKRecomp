@@ -90,6 +90,165 @@ using json = nlohmann::json;
     return json{{"base", hex_address(range.base)}, {"size", range.size}};
 }
 
+[[nodiscard]] json ranges_json(const std::vector<analysis::GuestAddressRange>& ranges)
+{
+    json result = json::array();
+    for (const auto& range : ranges) result.push_back(range_json(range));
+    return result;
+}
+
+// This report-time calculation intentionally does not call the production
+// ownership helpers. It independently walks the finalized, normalized exact
+// instruction ranges so the recorded reconciliation cannot validate itself.
+[[nodiscard]] std::vector<analysis::GuestAddressRange> independent_range_intersection(
+    const std::vector<analysis::GuestAddressRange>& left,
+    const std::vector<analysis::GuestAddressRange>& right)
+{
+    std::vector<analysis::GuestAddressRange> result;
+    std::size_t left_index = 0U;
+    std::size_t right_index = 0U;
+    while (left_index < left.size() && right_index < right.size())
+    {
+        const auto& left_range = left[left_index];
+        const auto& right_range = right[right_index];
+        const auto left_end = checked_add_u64(left_range.base, left_range.size);
+        const auto right_end = checked_add_u64(right_range.base, right_range.size);
+        if (!left_end || !right_end) return {};
+        const auto begin = std::max(left_range.base, right_range.base);
+        const auto end = std::min(left_end.value(), right_end.value());
+        if (begin < end) result.push_back({begin, end - begin});
+        if (left_end.value() <= right_end.value())
+            ++left_index;
+        else
+            ++right_index;
+    }
+    return result;
+}
+
+[[nodiscard]] json cfg_json(const std::optional<analysis::ControlFlowGraph>& cfg)
+{
+    if (!cfg) return nullptr;
+    json blocks = json::array();
+    for (const auto& [unused, block] : cfg->blocks)
+    {
+        (void)unused;
+        json instructions = json::array();
+        for (const auto& instruction : block.instructions)
+        {
+            instructions.push_back(json{{"pc", hex_address(instruction.address)},
+                                        {"opcode", instruction.opcode},
+                                        {"id", aarch64::instruction_id_name(instruction.id)},
+                                        {"instruction", instruction.disassembly}});
+        }
+        json successors = json::array();
+        for (const auto& edge : block.successors)
+        {
+            successors.push_back(json{{"source", hex_address(edge.source)},
+                                      {"target", hex_address(edge.target)},
+                                      {"kind", analysis::edge_kind_name(edge.kind)},
+                                      {"internal", edge.internal}});
+        }
+        json calls = json::array();
+        for (const auto& call : block.calls)
+        {
+            calls.push_back(json{{"address", hex_address(call.address)},
+                                 {"kind", analysis::call_kind_name(call.kind)},
+                                 {"target", call.target ? json(hex_address(*call.target))
+                                                          : json(nullptr)},
+                                 {"register_target", call.register_target
+                                                          ? json(aarch64::register_name(
+                                                                *call.register_target))
+                                                          : json(nullptr)}});
+        }
+        std::optional<GuestAddress> end;
+        if (!block.instructions.empty())
+        {
+            const auto checked_end = checked_add_u64(block.instructions.back().address, 4U);
+            if (checked_end) end = checked_end.value();
+        }
+        blocks.push_back(json{{"start", hex_address(block.start)},
+                              {"end", end ? json(hex_address(end.value())) : json(nullptr)},
+                              {"instruction_count", block.instructions.size()},
+                              {"instructions", std::move(instructions)},
+                              {"successors", std::move(successors)},
+                              {"calls", std::move(calls)},
+                              {"termination", block.termination}});
+    }
+    json calls = json::array();
+    for (const auto& call : cfg->calls)
+    {
+        calls.push_back(json{{"address", hex_address(call.address)},
+                             {"kind", analysis::call_kind_name(call.kind)},
+                             {"target", call.target ? json(hex_address(*call.target))
+                                                      : json(nullptr)},
+                             {"register_target", call.register_target
+                                                      ? json(aarch64::register_name(
+                                                            *call.register_target))
+                                                      : json(nullptr)}});
+    }
+    json unresolved = json::array();
+    for (const auto& item : cfg->unresolved)
+    {
+        unresolved.push_back(json{{"pc", hex_address(item.address)},
+                                  {"kind", aarch64::control_flow_kind_name(item.kind)},
+                                  {"register_target", item.register_target
+                                                           ? json(aarch64::register_name(
+                                                                 *item.register_target))
+                                                           : json(nullptr)},
+                                  {"reason", item.reason}});
+    }
+    return json{{"entry", hex_address(cfg->entry)},
+                {"instruction_count", cfg->instruction_count},
+                {"block_count", cfg->blocks.size()},
+                {"blocks", std::move(blocks)},
+                {"calls", std::move(calls)},
+                {"unresolved_control_flow", std::move(unresolved)}};
+}
+
+[[nodiscard]] json boundary_reconciliation_json(
+    const analysis::FunctionBoundaryReconciliation& reconciliation)
+{
+    const auto independent = independent_range_intersection(
+        reconciliation.candidate_owned_code_ranges_before,
+        reconciliation.existing_owned_code_ranges_before);
+    json witnesses = json::array();
+    for (const auto& witness : reconciliation.witnesses)
+    {
+        witnesses.push_back(json{{"kind", analysis::function_boundary_witness_kind_name(
+                                              witness.kind)},
+                                 {"source", hex_address(witness.source)},
+                                 {"target", hex_address(witness.target)}});
+    }
+    json boundary_entries = json::array();
+    for (const auto entry : reconciliation.boundary_entries)
+        boundary_entries.push_back(hex_address(entry));
+    return json{{"kind", analysis::function_boundary_reconciliation_kind_name(
+                          reconciliation.kind)},
+                {"existing_canonical_entry", reconciliation.existing_canonical_entry
+                                                    ? json(hex_address(*reconciliation.existing_canonical_entry))
+                                                    : json(nullptr)},
+                {"existing_owned_code_ranges_before",
+                 ranges_json(reconciliation.existing_owned_code_ranges_before)},
+                {"candidate_owned_code_ranges_before",
+                 ranges_json(reconciliation.candidate_owned_code_ranges_before)},
+                {"precise_overlap_ranges", ranges_json(reconciliation.precise_overlap_ranges)},
+                {"existing_owned_code_ranges_after",
+                 ranges_json(reconciliation.existing_owned_code_ranges_after)},
+                {"candidate_owned_code_ranges_after",
+                 ranges_json(reconciliation.candidate_owned_code_ranges_after)},
+                {"boundary_owned_code_ranges", ranges_json(reconciliation.boundary_owned_code_ranges)},
+                {"boundary_entries", std::move(boundary_entries)},
+                {"witnesses", std::move(witnesses)},
+                {"existing_cfg_before", cfg_json(reconciliation.existing_cfg_before)},
+                {"candidate_cfg_before", cfg_json(reconciliation.candidate_cfg_before)},
+                {"boundary_cfg", cfg_json(reconciliation.boundary_cfg)},
+                {"independent_overlap_check",
+                 json{{"production_overlap_ranges", ranges_json(reconciliation.precise_overlap_ranges)},
+                      {"independently_computed_ranges", ranges_json(independent)},
+                      {"agree", independent == reconciliation.precise_overlap_ranges}}},
+                {"reason", reconciliation.reason}};
+}
+
 [[nodiscard]] json indirect_target_assessment_json(
     const analysis::IndirectTargetAssessment& assessment)
 {
@@ -156,12 +315,8 @@ using json = nlohmann::json;
             {"slot_value_verified", item.slot_value_verified},
             {"resolution_error", item.resolution_error ? json(*item.resolution_error) : json(nullptr)}});
     }
-    json candidate_ranges = json::array();
-    for (const auto& range : validation.candidate_owned_code_ranges)
-        candidate_ranges.push_back(range_json(range));
-    json overlap_ranges = json::array();
-    for (const auto& range : validation.overlap_ranges)
-        overlap_ranges.push_back(range_json(range));
+    json candidate_ranges = ranges_json(validation.candidate_owned_code_ranges);
+    json overlap_ranges = ranges_json(validation.overlap_ranges);
     json direct_calls = json::array();
     for (const auto target : validation.direct_call_targets)
         direct_calls.push_back(hex_address(target));
@@ -287,7 +442,9 @@ using json = nlohmann::json;
                                                                ? json(hex_address(*validation.existing_canonical_entry))
                                                                : json(nullptr)},
                             {"candidate_owned_code_ranges", std::move(candidate_ranges)},
-                            {"overlap_ranges", std::move(overlap_ranges)}}},
+                            {"overlap_ranges", std::move(overlap_ranges)},
+                            {"boundary_reconciliation",
+                             boundary_reconciliation_json(validation.boundary_reconciliation)}}},
         {"cfg_validation", json{{"status", analysis::indirect_target_cfg_status_name(
                                               validation.cfg_status)},
                                  {"blocks", validation.blocks},
@@ -297,6 +454,7 @@ using json = nlohmann::json;
                                  {"last_instruction", std::move(last_instruction)},
                                  {"direct_call_targets", std::move(direct_calls)},
                                  {"unresolved_indirect_flow", std::move(unresolved)},
+                                 {"blocks_detail", cfg_json(validation.cfg)},
                                  {"analysis_error", std::move(analysis_error)}}},
         {"decision", json{{"kind", analysis::indirect_target_decision_name(decision.kind)},
                            {"confidence", analysis::function_confidence_name(decision.confidence)},
