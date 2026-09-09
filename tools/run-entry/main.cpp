@@ -140,8 +140,17 @@ void help(std::ostream& output)
               "  --refinement-max-rounds N      Deprecated alias for stagnant-round budget.\n"
               "  --refinement-max-candidates N  Unique indirect-candidate budget.\n"
               "  --refinement-max-assessments N Candidate-assessment budget.\n"
-              "  --refinement-max-promotions N  Successful-promotion budget.\n"
-              "  --refinement-max-rebuilds N    Immutable map-rebuild budget.\n"
+              "  --refinement-max-promotions N  Deprecated legacy event guard.\n"
+              "  --refinement-max-rebuilds N    Deprecated legacy event guard.\n"
+              "  --refinement-max-analysis-functions N       Cumulative refinement CFG-function work.\n"
+              "  --refinement-max-reanalysis-functions N     Cumulative refinement reanalysis work.\n"
+              "  --refinement-max-analysis-instructions N    Cumulative refinement instruction work.\n"
+              "  --refinement-max-analysis-blocks N          Cumulative refinement block work.\n"
+              "  --refinement-max-analysis-edges N           Cumulative refinement edge work.\n"
+              "  --refinement-max-analysis-bytes N           Cumulative refinement byte work.\n"
+              "  --refinement-max-analysis-boundary-passes N Cumulative boundary-finalization work.\n"
+              "  --refinement-max-invalidated-records N      Cumulative invalidation work.\n"
+              "  --refinement-max-analysis-transactions N    Cumulative immutable transactions.\n"
               "  --max-ir-operations N          Global execution IR budget.\n"
               "  --max-function-transitions N   Global guest transition budget.\n"
               "  --max-call-depth N             Guest call-depth budget.\n"
@@ -203,6 +212,30 @@ void print_error(const Error& error)
     return std::nullopt;
 }
 
+[[nodiscard]] std::optional<analysis::IndirectTargetRefinementAnalysisDimension>
+refinement_analysis_dimension_for_option(std::string_view argument)
+{
+    if (argument == "--refinement-max-analysis-functions")
+        return analysis::IndirectTargetRefinementAnalysisDimension::FunctionsAnalyzed;
+    if (argument == "--refinement-max-reanalysis-functions")
+        return analysis::IndirectTargetRefinementAnalysisDimension::FunctionsReanalyzed;
+    if (argument == "--refinement-max-analysis-instructions")
+        return analysis::IndirectTargetRefinementAnalysisDimension::Instructions;
+    if (argument == "--refinement-max-analysis-blocks")
+        return analysis::IndirectTargetRefinementAnalysisDimension::Blocks;
+    if (argument == "--refinement-max-analysis-edges")
+        return analysis::IndirectTargetRefinementAnalysisDimension::Edges;
+    if (argument == "--refinement-max-analysis-bytes")
+        return analysis::IndirectTargetRefinementAnalysisDimension::BytesAnalyzed;
+    if (argument == "--refinement-max-analysis-boundary-passes")
+        return analysis::IndirectTargetRefinementAnalysisDimension::BoundaryFinalizationPasses;
+    if (argument == "--refinement-max-invalidated-records")
+        return analysis::IndirectTargetRefinementAnalysisDimension::InvalidatedRecords;
+    if (argument == "--refinement-max-analysis-transactions")
+        return analysis::IndirectTargetRefinementAnalysisDimension::Transactions;
+    return std::nullopt;
+}
+
 [[nodiscard]] std::optional<execution::EntrySelectionKind> entry_kind_for_name(
     std::string_view name)
 {
@@ -247,6 +280,8 @@ int main(int argc, char** argv)
     analysis::IndirectTargetRefinementBudgets refinement_budgets;
     function_options.budgets = analysis::make_execution_closure_analysis_budgets();
     std::set<analysis::AnalysisBudgetDimension> analysis_cli_overrides;
+    std::set<analysis::IndirectTargetRefinementAnalysisDimension>
+        refinement_analysis_cli_overrides;
     bool analysis_profile_cli_override = false;
 
     const auto apply_analysis_profile = [&](analysis::AnalysisBudgets profile,
@@ -420,6 +455,8 @@ int main(int argc, char** argv)
                 return true;
             }
             destination = static_cast<T>(parsed);
+            if (refinement_analysis_dimension_for_option(argument) && parsed == 0U)
+                invalid_number = true;
             return true;
         };
         if (parse_number("--analysis-max-functions", function_options.budgets.max_functions) ||
@@ -437,6 +474,24 @@ int main(int argc, char** argv)
             parse_number("--refinement-max-assessments", refinement_budgets.max_candidate_assessments) ||
             parse_number("--refinement-max-promotions", refinement_budgets.max_promotions) ||
             parse_number("--refinement-max-rebuilds", refinement_budgets.max_map_rebuilds) ||
+            parse_number("--refinement-max-analysis-functions",
+                         refinement_budgets.analysis.max_functions_analyzed) ||
+            parse_number("--refinement-max-reanalysis-functions",
+                         refinement_budgets.analysis.max_functions_reanalyzed) ||
+            parse_number("--refinement-max-analysis-instructions",
+                         refinement_budgets.analysis.max_instructions) ||
+            parse_number("--refinement-max-analysis-blocks",
+                         refinement_budgets.analysis.max_blocks) ||
+            parse_number("--refinement-max-analysis-edges",
+                         refinement_budgets.analysis.max_edges) ||
+            parse_number("--refinement-max-analysis-bytes",
+                         refinement_budgets.analysis.max_bytes_analyzed) ||
+            parse_number("--refinement-max-analysis-boundary-passes",
+                         refinement_budgets.analysis.max_boundary_finalization_passes) ||
+            parse_number("--refinement-max-invalidated-records",
+                         refinement_budgets.analysis.max_invalidated_records) ||
+            parse_number("--refinement-max-analysis-transactions",
+                         refinement_budgets.analysis.max_transactions) ||
             parse_number("--max-ir-operations", execution_options.budgets.max_ir_operations) ||
             parse_number("--max-function-transitions", execution_options.budgets.max_function_transitions) ||
             parse_number("--max-call-depth", execution_options.budgets.max_call_depth) ||
@@ -455,6 +510,50 @@ int main(int argc, char** argv)
                     function_options.budgets, dimension.value(),
                     analysis::AnalysisBudgetProvenanceKind::ExplicitCliOverride,
                     "run_entry_cli");
+            }
+            if (refinement_analysis_dimension_for_option(argument))
+            {
+                refinement_analysis_cli_overrides.insert(
+                    refinement_analysis_dimension_for_option(argument).value());
+                const auto provenance = analysis::AnalysisBudgetProvenance{
+                    analysis::AnalysisBudgetProvenanceKind::ExplicitCliOverride,
+                    "run_entry_cli"};
+                switch (refinement_analysis_dimension_for_option(argument).value())
+                {
+                case analysis::IndirectTargetRefinementAnalysisDimension::FunctionsAnalyzed:
+                    refinement_budgets.analysis.functions_analyzed_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::FunctionsReanalyzed:
+                    refinement_budgets.analysis.functions_reanalyzed_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::Instructions:
+                    refinement_budgets.analysis.instructions_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::Blocks:
+                    refinement_budgets.analysis.blocks_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::Edges:
+                    refinement_budgets.analysis.edges_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::BytesAnalyzed:
+                    refinement_budgets.analysis.bytes_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::BoundaryFinalizationPasses:
+                    refinement_budgets.analysis.boundary_finalization_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::InvalidatedRecords:
+                    refinement_budgets.analysis.invalidated_records_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::Transactions:
+                    refinement_budgets.analysis.transactions_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::None: break;
+                }
+            }
+            if (argument == "--refinement-max-promotions" ||
+                argument == "--refinement-max-rebuilds")
+            {
+                refinement_budgets.legacy_event_limits = true;
             }
             continue;
         }
@@ -585,6 +684,88 @@ int main(int argc, char** argv)
                               analysis::AnalysisBudgetDimension::BoundaryFinalizationPasses,
                               function_options.budgets.max_boundary_finalization_passes,
                               std::numeric_limits<std::size_t>::max());
+
+            if (root.contains("refinement_analysis") &&
+                !root.at("refinement_analysis").is_object())
+                throw std::runtime_error("refinement_analysis configuration must be an object");
+            const auto refinement_analysis_object =
+                root.contains("refinement_analysis")
+                    ? root.at("refinement_analysis")
+                    : nlohmann::json::object();
+            const auto refinement_budget_object =
+                refinement_analysis_object.contains("budgets")
+                    ? refinement_analysis_object.at("budgets")
+                    : refinement_analysis_object;
+            if (!refinement_budget_object.is_object())
+                throw std::runtime_error(
+                    "refinement_analysis budgets configuration must be an object");
+            const auto parse_local_refinement_budget =
+                [&](std::string_view key, auto& destination,
+                    analysis::AnalysisBudgetProvenance& provenance,
+                    std::uint64_t maximum,
+                    analysis::IndirectTargetRefinementAnalysisDimension dimension) {
+                    if (!refinement_budget_object.contains(key) ||
+                        refinement_analysis_cli_overrides.contains(dimension))
+                        return;
+                    const auto& value = refinement_budget_object.at(key);
+                    if (!value.is_number_unsigned())
+                        throw std::runtime_error(
+                            "refinement analysis budget must be an unsigned integer");
+                    const auto parsed = value.get<std::uint64_t>();
+                    if (parsed == 0U || parsed > maximum)
+                        throw std::runtime_error(
+                            "refinement analysis budget is zero or overflows its type");
+                    destination = static_cast<std::remove_reference_t<decltype(destination)>>(parsed);
+                    provenance = analysis::AnalysisBudgetProvenance{
+                        analysis::AnalysisBudgetProvenanceKind::LocalConfigurationOverride,
+                        "run_entry_local_config"};
+                };
+            parse_local_refinement_budget(
+                "max_functions_analyzed", refinement_budgets.analysis.max_functions_analyzed,
+                refinement_budgets.analysis.functions_analyzed_provenance,
+                std::numeric_limits<std::size_t>::max(),
+                analysis::IndirectTargetRefinementAnalysisDimension::FunctionsAnalyzed);
+            parse_local_refinement_budget(
+                "max_functions_reanalyzed", refinement_budgets.analysis.max_functions_reanalyzed,
+                refinement_budgets.analysis.functions_reanalyzed_provenance,
+                std::numeric_limits<std::size_t>::max(),
+                analysis::IndirectTargetRefinementAnalysisDimension::FunctionsReanalyzed);
+            parse_local_refinement_budget(
+                "max_instructions", refinement_budgets.analysis.max_instructions,
+                refinement_budgets.analysis.instructions_provenance,
+                std::numeric_limits<std::size_t>::max(),
+                analysis::IndirectTargetRefinementAnalysisDimension::Instructions);
+            parse_local_refinement_budget(
+                "max_blocks", refinement_budgets.analysis.max_blocks,
+                refinement_budgets.analysis.blocks_provenance,
+                std::numeric_limits<std::size_t>::max(),
+                analysis::IndirectTargetRefinementAnalysisDimension::Blocks);
+            parse_local_refinement_budget(
+                "max_edges", refinement_budgets.analysis.max_edges,
+                refinement_budgets.analysis.edges_provenance,
+                std::numeric_limits<std::size_t>::max(),
+                analysis::IndirectTargetRefinementAnalysisDimension::Edges);
+            parse_local_refinement_budget(
+                "max_bytes_analyzed", refinement_budgets.analysis.max_bytes_analyzed,
+                refinement_budgets.analysis.bytes_provenance,
+                std::numeric_limits<memory::GuestSize>::max(),
+                analysis::IndirectTargetRefinementAnalysisDimension::BytesAnalyzed);
+            parse_local_refinement_budget(
+                "max_boundary_finalization_passes",
+                refinement_budgets.analysis.max_boundary_finalization_passes,
+                refinement_budgets.analysis.boundary_finalization_provenance,
+                std::numeric_limits<std::size_t>::max(),
+                analysis::IndirectTargetRefinementAnalysisDimension::BoundaryFinalizationPasses);
+            parse_local_refinement_budget(
+                "max_invalidated_records", refinement_budgets.analysis.max_invalidated_records,
+                refinement_budgets.analysis.invalidated_records_provenance,
+                std::numeric_limits<std::size_t>::max(),
+                analysis::IndirectTargetRefinementAnalysisDimension::InvalidatedRecords);
+            parse_local_refinement_budget(
+                "max_transactions", refinement_budgets.analysis.max_transactions,
+                refinement_budgets.analysis.transactions_provenance,
+                std::numeric_limits<std::size_t>::max(),
+                analysis::IndirectTargetRefinementAnalysisDimension::Transactions);
             const auto module_set = root.contains("module_set") && root.at("module_set").is_object()
                                         ? root.at("module_set") : nlohmann::json::object();
             const bool directory_source =
@@ -1052,12 +1233,17 @@ int main(int argc, char** argv)
                     worklist.record_terminal_candidate(identity);
                     continue;
                 }
+                if (!worklist.can_commit_refinement(identity, expansion.value().analysis_work))
+                {
+                    break;
+                }
                 process_map = std::move(expansion.value().map);
                 expansion.value().assessment.map_generation_before = map_generation_before;
                 expansion.value().assessment.map_generation_after = map_generation_before + 1U;
                 promoted_targets.push_back(std::move(expansion.value().assessment));
                 worklist.record_promotion(identity, expansion.value().module_maps_rebuilt,
-                                           expansion.value().module_maps_reused);
+                                           expansion.value().module_maps_reused,
+                                           expansion.value().analysis_work);
                 refined = true;
                 break;
             }

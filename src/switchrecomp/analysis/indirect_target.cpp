@@ -705,6 +705,23 @@ void account_cfg(const ControlFlowGraph& cfg, IndirectTargetValidation& validati
     return result;
 }
 
+[[nodiscard]] IndirectTargetRefinementAnalysisWork analysis_work_from_accounting(
+    const AnalysisAccounting& accounting)
+{
+    return IndirectTargetRefinementAnalysisWork{
+        accounting.module,
+        accounting.functions_cfg_analyzed,
+        accounting.reanalyzed_functions,
+        accounting.reused_functions,
+        accounting.instructions_consumed,
+        accounting.blocks_consumed,
+        accounting.edges_consumed,
+        accounting.bytes_analyzed,
+        accounting.boundary_finalization_passes,
+        accounting.invalidated_records,
+        accounting.refinement_transactions};
+}
+
 [[nodiscard]] std::vector<FunctionSeed> seeds_from_finalized_map(
     const FinalizedFunctionMap& map)
 {
@@ -1668,6 +1685,10 @@ Result<FunctionMapRefinement> refine_function_map(
                                      hex_address(observed.source_pc)});
     auto rebuild_options = map_options(options);
     set_rebuild_roots(rebuild_options, seeds);
+    rebuild_options.reuse_map = &existing;
+    rebuild_options.newly_introduced_function_entries.insert(observed.target);
+    for (const auto target : result.assessment.validation.direct_call_targets)
+        rebuild_options.newly_introduced_function_entries.insert(target);
     const auto rebuilt = FunctionMapBuilder::build(
         ModuleAnalysisInput{input.identity, input.memory, std::move(seeds)}, rebuild_options);
     if (!rebuilt)
@@ -1689,6 +1710,7 @@ Result<FunctionMapRefinement> refine_function_map(
         return Result<FunctionMapRefinement>::success(std::move(result));
     }
     result.map = std::move(rebuilt).value();
+    result.analysis_work = analysis_work_from_accounting(result.map.accounting());
     result.assessment.decision.kind = IndirectTargetDecisionKind::TrustedNewEntry;
     result.assessment.decision.canonical_entry = record->canonical_entry;
     result.assessment.decision.promoted = true;
@@ -1749,6 +1771,10 @@ Result<ProcessFunctionMapRefinement> refine_process_function_map(
                 hex_address(observed.source_pc)});
         auto rebuild_options = map_options(options);
         set_rebuild_roots(rebuild_options, seeds);
+        rebuild_options.reuse_map = &existing_map;
+        rebuild_options.newly_introduced_function_entries.insert(observed.target);
+        for (const auto target : result.assessment.validation.direct_call_targets)
+            rebuild_options.newly_introduced_function_entries.insert(target);
         const auto rebuilt = FunctionMapBuilder::build(
             ModuleAnalysisInput{module->identity, &process_image.memory(), std::move(seeds)},
             rebuild_options);
@@ -1778,6 +1804,9 @@ Result<ProcessFunctionMapRefinement> refine_process_function_map(
                 hex_address(observed.source_pc)}};
         auto rebuild_options = map_options(options);
         set_rebuild_roots(rebuild_options, seeds);
+        rebuild_options.newly_introduced_function_entries.insert(observed.target);
+        for (const auto target : result.assessment.validation.direct_call_targets)
+            rebuild_options.newly_introduced_function_entries.insert(target);
         const auto rebuilt = FunctionMapBuilder::build(
             ModuleAnalysisInput{target_module->identity, &process_image.memory(), std::move(seeds)},
             rebuild_options);
@@ -1811,6 +1840,8 @@ Result<ProcessFunctionMapRefinement> refine_process_function_map(
         return Result<ProcessFunctionMapRefinement>::success(std::move(result));
     }
     result.map = std::move(rebuilt).value();
+    if (const auto* rebuilt_module = result.map.map_for(observed.target))
+        result.analysis_work = analysis_work_from_accounting(rebuilt_module->accounting());
     result.assessment.decision.kind = IndirectTargetDecisionKind::TrustedNewEntry;
     result.assessment.decision.canonical_entry = record->canonical_entry;
     result.assessment.decision.promoted = true;
@@ -1846,6 +1877,47 @@ std::string_view indirect_target_refinement_budget_dimension_name(
         return "candidate_assessments";
     case IndirectTargetRefinementBudgetDimension::Promotions: return "promotions";
     case IndirectTargetRefinementBudgetDimension::MapRebuilds: return "map_rebuilds";
+    case IndirectTargetRefinementBudgetDimension::RefinementAnalysisFunctions:
+        return "refinement_analysis_functions";
+    case IndirectTargetRefinementBudgetDimension::RefinementAnalysisReanalyzedFunctions:
+        return "refinement_analysis_reanalyzed_functions";
+    case IndirectTargetRefinementBudgetDimension::RefinementAnalysisInstructions:
+        return "refinement_analysis_instructions";
+    case IndirectTargetRefinementBudgetDimension::RefinementAnalysisBlocks:
+        return "refinement_analysis_blocks";
+    case IndirectTargetRefinementBudgetDimension::RefinementAnalysisEdges:
+        return "refinement_analysis_edges";
+    case IndirectTargetRefinementBudgetDimension::RefinementAnalysisBytes:
+        return "refinement_analysis_bytes";
+    case IndirectTargetRefinementBudgetDimension::RefinementAnalysisBoundaryFinalizationPasses:
+        return "refinement_analysis_boundary_finalization_passes";
+    case IndirectTargetRefinementBudgetDimension::RefinementAnalysisInvalidatedRecords:
+        return "refinement_analysis_invalidated_records";
+    case IndirectTargetRefinementBudgetDimension::RefinementAnalysisTransactions:
+        return "refinement_analysis_transactions";
+    }
+    return "unknown";
+}
+
+std::string_view indirect_target_refinement_analysis_dimension_name(
+    IndirectTargetRefinementAnalysisDimension dimension) noexcept
+{
+    switch (dimension)
+    {
+    case IndirectTargetRefinementAnalysisDimension::None: return "none";
+    case IndirectTargetRefinementAnalysisDimension::FunctionsAnalyzed:
+        return "functions_analyzed";
+    case IndirectTargetRefinementAnalysisDimension::FunctionsReanalyzed:
+        return "functions_reanalyzed";
+    case IndirectTargetRefinementAnalysisDimension::Instructions: return "instructions";
+    case IndirectTargetRefinementAnalysisDimension::Blocks: return "blocks";
+    case IndirectTargetRefinementAnalysisDimension::Edges: return "edges";
+    case IndirectTargetRefinementAnalysisDimension::BytesAnalyzed: return "bytes_analyzed";
+    case IndirectTargetRefinementAnalysisDimension::BoundaryFinalizationPasses:
+        return "boundary_finalization_passes";
+    case IndirectTargetRefinementAnalysisDimension::InvalidatedRecords:
+        return "invalidated_records";
+    case IndirectTargetRefinementAnalysisDimension::Transactions: return "transactions";
     }
     return "unknown";
 }
@@ -1855,6 +1927,7 @@ IndirectTargetRefinementWorklist::IndirectTargetRefinementWorklist(
     : budgets_(budgets)
 {
     counters_.configured = budgets_;
+    counters_.analysis.configured = budgets_.analysis;
 }
 
 IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::observe(
@@ -1898,7 +1971,8 @@ IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::obse
         {
             counters_.exhaustion = IndirectTargetRefinementExhaustion{
                 IndirectTargetRefinementBudgetDimension::UniqueCandidates,
-                counters_.unique_candidates, budgets_.max_unique_candidates};
+                counters_.unique_candidates, budgets_.max_unique_candidates, {}, 0U,
+                std::nullopt};
             overflow_pending_ = identity;
             result.accepted = false;
             return result;
@@ -2031,7 +2105,7 @@ void IndirectTargetRefinementWorklist::end_round() noexcept
         {
             counters_.exhaustion = IndirectTargetRefinementExhaustion{
                 IndirectTargetRefinementBudgetDimension::StagnantRounds,
-                counters_.stagnant_rounds, budgets_.max_stagnant_rounds};
+                counters_.stagnant_rounds, budgets_.max_stagnant_rounds, {}, 0U, std::nullopt};
         }
     }
     round_active_ = false;
@@ -2047,7 +2121,8 @@ bool IndirectTargetRefinementWorklist::begin_candidate_assessment(
     {
         counters_.exhaustion = IndirectTargetRefinementExhaustion{
             IndirectTargetRefinementBudgetDimension::CandidateAssessments,
-            counters_.candidate_assessments, budgets_.max_candidate_assessments};
+            counters_.candidate_assessments, budgets_.max_candidate_assessments, {}, 0U,
+            std::nullopt};
         return false;
     }
     ++counters_.candidate_assessments;
@@ -2059,20 +2134,78 @@ bool IndirectTargetRefinementWorklist::can_promote() noexcept
 {
     if (counters_.exhaustion.dimension != IndirectTargetRefinementBudgetDimension::None)
         return false;
-    if (counters_.successful_promotions >= budgets_.max_promotions)
+    const bool legacy_limits_enabled = budgets_.legacy_event_limits ||
+                                       budgets_.max_promotions != 128U ||
+                                       budgets_.max_map_rebuilds != 128U;
+    if (legacy_limits_enabled && counters_.successful_promotions >= budgets_.max_promotions)
     {
         counters_.exhaustion = IndirectTargetRefinementExhaustion{
             IndirectTargetRefinementBudgetDimension::Promotions,
-            counters_.successful_promotions, budgets_.max_promotions};
+            counters_.successful_promotions, budgets_.max_promotions, {}, 0U, std::nullopt};
         return false;
     }
-    if (counters_.map_rebuilds >= budgets_.max_map_rebuilds)
+    if (legacy_limits_enabled && counters_.map_rebuilds >= budgets_.max_map_rebuilds)
     {
         counters_.exhaustion = IndirectTargetRefinementExhaustion{
             IndirectTargetRefinementBudgetDimension::MapRebuilds,
-            counters_.map_rebuilds, budgets_.max_map_rebuilds};
+            counters_.map_rebuilds, budgets_.max_map_rebuilds, {}, 0U, std::nullopt};
         return false;
     }
+    return true;
+}
+
+bool IndirectTargetRefinementWorklist::can_commit_refinement(
+    const IndirectTargetCandidateIdentity& candidate,
+    const IndirectTargetRefinementAnalysisWork& work) noexcept
+{
+    if (counters_.exhaustion.dimension != IndirectTargetRefinementBudgetDimension::None)
+        return false;
+    if (!can_promote()) return false;
+
+    const auto exceeds = [](auto consumed, auto delta, auto limit) {
+        return delta > limit || consumed > limit - delta;
+    };
+    const auto fail = [&](IndirectTargetRefinementBudgetDimension dimension, std::size_t consumed,
+                          std::size_t limit) {
+        counters_.exhaustion = IndirectTargetRefinementExhaustion{
+            dimension, consumed, limit, work.module, counters_.map_rebuilds, candidate};
+        return false;
+    };
+    const auto& configured = budgets_.analysis;
+    const auto& consumed = counters_.analysis;
+    if (exceeds(consumed.functions_analyzed, work.functions_analyzed,
+                configured.max_functions_analyzed))
+        return fail(IndirectTargetRefinementBudgetDimension::RefinementAnalysisFunctions,
+                    consumed.functions_analyzed, configured.max_functions_analyzed);
+    if (exceeds(consumed.functions_reanalyzed, work.functions_reanalyzed,
+                configured.max_functions_reanalyzed))
+        return fail(IndirectTargetRefinementBudgetDimension::RefinementAnalysisReanalyzedFunctions,
+                    consumed.functions_reanalyzed, configured.max_functions_reanalyzed);
+    if (exceeds(consumed.instructions, work.instructions, configured.max_instructions))
+        return fail(IndirectTargetRefinementBudgetDimension::RefinementAnalysisInstructions,
+                    consumed.instructions, configured.max_instructions);
+    if (exceeds(consumed.blocks, work.blocks, configured.max_blocks))
+        return fail(IndirectTargetRefinementBudgetDimension::RefinementAnalysisBlocks,
+                    consumed.blocks, configured.max_blocks);
+    if (exceeds(consumed.edges, work.edges, configured.max_edges))
+        return fail(IndirectTargetRefinementBudgetDimension::RefinementAnalysisEdges,
+                    consumed.edges, configured.max_edges);
+    if (exceeds(consumed.bytes_analyzed, work.bytes_analyzed, configured.max_bytes_analyzed))
+        return fail(IndirectTargetRefinementBudgetDimension::RefinementAnalysisBytes,
+                    static_cast<std::size_t>(consumed.bytes_analyzed),
+                    static_cast<std::size_t>(configured.max_bytes_analyzed));
+    if (exceeds(consumed.boundary_finalization_passes, work.boundary_finalization_passes,
+                configured.max_boundary_finalization_passes))
+        return fail(IndirectTargetRefinementBudgetDimension::RefinementAnalysisBoundaryFinalizationPasses,
+                    consumed.boundary_finalization_passes,
+                    configured.max_boundary_finalization_passes);
+    if (exceeds(consumed.invalidated_records, work.invalidated_records,
+                configured.max_invalidated_records))
+        return fail(IndirectTargetRefinementBudgetDimension::RefinementAnalysisInvalidatedRecords,
+                    consumed.invalidated_records, configured.max_invalidated_records);
+    if (exceeds(consumed.transactions, work.transactions, configured.max_transactions))
+        return fail(IndirectTargetRefinementBudgetDimension::RefinementAnalysisTransactions,
+                    consumed.transactions, configured.max_transactions);
     return true;
 }
 
@@ -2094,13 +2227,25 @@ void IndirectTargetRefinementWorklist::record_terminal_candidate(
 
 void IndirectTargetRefinementWorklist::record_promotion(
     const IndirectTargetCandidateIdentity& candidate, std::size_t module_maps_rebuilt,
-    std::size_t module_maps_reused) noexcept
+    std::size_t module_maps_reused,
+    const IndirectTargetRefinementAnalysisWork& work) noexcept
 {
     if (!can_promote()) return;
+    if (!can_commit_refinement(candidate, work)) return;
     ++counters_.successful_promotions;
     ++counters_.map_rebuilds;
     counters_.module_maps_rebuilt += module_maps_rebuilt;
     counters_.module_maps_reused += module_maps_reused;
+    counters_.analysis.functions_analyzed += work.functions_analyzed;
+    counters_.analysis.functions_reanalyzed += work.functions_reanalyzed;
+    counters_.analysis.functions_reused += work.functions_reused;
+    counters_.analysis.instructions += work.instructions;
+    counters_.analysis.blocks += work.blocks;
+    counters_.analysis.edges += work.edges;
+    counters_.analysis.bytes_analyzed += work.bytes_analyzed;
+    counters_.analysis.boundary_finalization_passes += work.boundary_finalization_passes;
+    counters_.analysis.invalidated_records += work.invalidated_records;
+    counters_.analysis.transactions += work.transactions;
     const auto item = work_items_.find(candidate);
     if (item != work_items_.end())
     {

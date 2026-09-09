@@ -272,6 +272,11 @@ using json = nlohmann::json;
     {
         owned_ranges.push_back(range_json(range));
     }
+    json boundary_dependencies = json::array();
+    for (const auto entry : function.boundary_dependencies)
+    {
+        boundary_dependencies.push_back(hex_address(entry));
+    }
     const auto ownership_bytes = precise_owned_byte_count(function.owned_code_ranges);
     json function_transfers = json::array();
     json blocks = json::array();
@@ -325,6 +330,7 @@ using json = nlohmann::json;
                {"envelope", json{{"begin", hex_address(function.range_begin)},
                                    {"end", hex_address(function.range_end)}}},
                {"owned_ranges", std::move(owned_ranges)},
+               {"boundary_dependencies", std::move(boundary_dependencies)},
                {"ownership_bytes", ownership_bytes ? ownership_bytes.value() : 0U},
                {"source", function_discovery_source_name(function.primary_source)},
                {"confidence", function_confidence_name(function.confidence)},

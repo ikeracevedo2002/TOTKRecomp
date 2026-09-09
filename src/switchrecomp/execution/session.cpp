@@ -102,6 +102,10 @@ using json = nlohmann::json;
                 {"candidate_function_entries", 0U},
                 {"trusted_function_entries", 0U},
                 {"cfg_analyzed", 0U},
+                {"newly_analyzed_functions", 0U},
+                {"reanalyzed_functions", 0U},
+                {"reused_functions", 0U},
+                {"invalidated_records", 0U},
                 {"functions_with_cfg", 0U},
                 {"direct_call_discoveries", 0U},
                 {"new_seeds_generated", 0U},
@@ -110,6 +114,7 @@ using json = nlohmann::json;
                 {"edges", 0U},
                 {"bytes_analyzed", 0U},
                 {"boundary_finalization_passes", 0U},
+                {"refinement_transactions", 0U},
                 {"failed_functions", 0U},
                 {"function_boundary_conflicts", 0U},
                 {"work_remaining_at_exhaustion", 0U}};
@@ -134,6 +139,10 @@ using json = nlohmann::json;
         add_total("candidate_function_entries", item.candidate_function_entries);
         add_total("trusted_function_entries", item.trusted_function_entries);
         add_total("cfg_analyzed", item.functions_cfg_analyzed);
+        add_total("newly_analyzed_functions", item.newly_analyzed_functions);
+        add_total("reanalyzed_functions", item.reanalyzed_functions);
+        add_total("reused_functions", item.reused_functions);
+        add_total("invalidated_records", item.invalidated_records);
         add_total("functions_with_cfg", item.canonical_functions_with_cfg);
         add_total("direct_call_discoveries", item.direct_call_discoveries);
         add_total("new_seeds_generated", item.new_seeds_generated);
@@ -142,6 +151,7 @@ using json = nlohmann::json;
         add_total("edges", item.edges_consumed);
         add_total("bytes_analyzed", item.bytes_analyzed);
         add_total("boundary_finalization_passes", item.boundary_finalization_passes);
+        add_total("refinement_transactions", item.refinement_transactions);
         add_total("failed_functions", item.failed_functions);
         add_total("function_boundary_conflicts", item.function_boundary_conflicts);
         add_total("work_remaining_at_exhaustion", item.work_remaining_at_exhaustion);
@@ -569,13 +579,53 @@ using json = nlohmann::json;
 {
     const auto& budgets = summary.configured;
     const auto& exhaustion = summary.exhaustion;
+    const auto provenance_json = [](const analysis::AnalysisBudgetProvenance& provenance) {
+        return json{{"kind", analysis::analysis_budget_provenance_kind_name(provenance.kind)},
+                    {"detail", provenance.detail}};
+    };
+    const auto& analysis_budgets = budgets.analysis;
+    const auto& analysis = summary.analysis;
     return json{
         {"configured_limits",
          json{{"max_stagnant_rounds", budgets.max_stagnant_rounds},
               {"max_unique_candidates", budgets.max_unique_candidates},
               {"max_candidate_assessments", budgets.max_candidate_assessments},
               {"max_promotions", budgets.max_promotions},
-              {"max_map_rebuilds", budgets.max_map_rebuilds}}},
+              {"max_map_rebuilds", budgets.max_map_rebuilds},
+              {"legacy_event_limits", budgets.legacy_event_limits}}},
+        {"aggregate_analysis_limits",
+         json{{"max_functions_analyzed", analysis_budgets.max_functions_analyzed},
+              {"max_functions_reanalyzed", analysis_budgets.max_functions_reanalyzed},
+              {"max_instructions", analysis_budgets.max_instructions},
+              {"max_blocks", analysis_budgets.max_blocks},
+              {"max_edges", analysis_budgets.max_edges},
+              {"max_bytes_analyzed", analysis_budgets.max_bytes_analyzed},
+              {"max_boundary_finalization_passes",
+               analysis_budgets.max_boundary_finalization_passes},
+              {"max_invalidated_records", analysis_budgets.max_invalidated_records},
+              {"max_transactions", analysis_budgets.max_transactions}}},
+        {"aggregate_analysis_provenance",
+         json{{"functions_analyzed", provenance_json(analysis_budgets.functions_analyzed_provenance)},
+              {"functions_reanalyzed", provenance_json(analysis_budgets.functions_reanalyzed_provenance)},
+              {"instructions", provenance_json(analysis_budgets.instructions_provenance)},
+              {"blocks", provenance_json(analysis_budgets.blocks_provenance)},
+              {"edges", provenance_json(analysis_budgets.edges_provenance)},
+              {"bytes_analyzed", provenance_json(analysis_budgets.bytes_provenance)},
+              {"boundary_finalization_passes",
+               provenance_json(analysis_budgets.boundary_finalization_provenance)},
+              {"invalidated_records", provenance_json(analysis_budgets.invalidated_records_provenance)},
+              {"transactions", provenance_json(analysis_budgets.transactions_provenance)}}},
+        {"aggregate_analysis_consumption",
+         json{{"functions_analyzed", analysis.functions_analyzed},
+              {"functions_reanalyzed", analysis.functions_reanalyzed},
+              {"functions_reused", analysis.functions_reused},
+              {"instructions", analysis.instructions},
+              {"blocks", analysis.blocks},
+              {"edges", analysis.edges},
+              {"bytes_analyzed", analysis.bytes_analyzed},
+              {"boundary_finalization_passes", analysis.boundary_finalization_passes},
+              {"invalidated_records", analysis.invalidated_records},
+              {"transactions", analysis.transactions}}},
         {"total_execution_attempts", summary.total_execution_attempts},
         {"productive_rounds", summary.productive_rounds},
         {"stagnant_rounds", summary.stagnant_rounds},
@@ -598,6 +648,9 @@ using json = nlohmann::json;
          analysis::indirect_target_refinement_budget_dimension_name(exhaustion.dimension)},
         {"exhausted_consumed", exhaustion.consumed},
         {"exhausted_limit", exhaustion.limit},
+        {"exhausted_module", exhaustion.module},
+        {"exhausted_generation", exhaustion.generation},
+        {"exhausted_next_work", refinement_candidate_identity_json(exhaustion.next_work)},
         {"pending_candidate_count", summary.pending_candidate_count},
         {"last_processed_candidate",
          refinement_candidate_identity_json(summary.last_processed_candidate)},

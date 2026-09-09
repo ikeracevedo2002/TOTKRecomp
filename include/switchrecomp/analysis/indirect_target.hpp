@@ -348,6 +348,87 @@ struct IndirectTargetCandidateIdentity
 [[nodiscard]] IndirectTargetCandidateIdentity indirect_target_candidate_identity(
     const ObservedIndirectTarget& observed);
 
+enum class IndirectTargetRefinementAnalysisDimension : std::uint8_t
+{
+    None,
+    FunctionsAnalyzed,
+    FunctionsReanalyzed,
+    Instructions,
+    Blocks,
+    Edges,
+    BytesAnalyzed,
+    BoundaryFinalizationPasses,
+    InvalidatedRecords,
+    Transactions,
+};
+
+[[nodiscard]] std::string_view indirect_target_refinement_analysis_dimension_name(
+    IndirectTargetRefinementAnalysisDimension dimension) noexcept;
+
+struct IndirectTargetRefinementAnalysisBudgets
+{
+    // Cumulative immutable-generation work limits. These are not successful
+    // promotion or map-event quotas.
+    std::size_t max_functions_analyzed = 200'000U;
+    std::size_t max_functions_reanalyzed = 100'000U;
+    std::size_t max_instructions = 8'000'000U;
+    std::size_t max_blocks = 2'000'000U;
+    std::size_t max_edges = 4'000'000U;
+    memory::GuestSize max_bytes_analyzed = memory::GuestSize{256U} * 1024U * 1024U;
+    std::size_t max_boundary_finalization_passes = 2'048U;
+    std::size_t max_invalidated_records = 100'000U;
+    std::size_t max_transactions = 512U;
+
+    AnalysisBudgetProvenance functions_analyzed_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+    AnalysisBudgetProvenance functions_reanalyzed_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+    AnalysisBudgetProvenance instructions_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+    AnalysisBudgetProvenance blocks_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+    AnalysisBudgetProvenance edges_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+    AnalysisBudgetProvenance bytes_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+    AnalysisBudgetProvenance boundary_finalization_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+    AnalysisBudgetProvenance invalidated_records_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+    AnalysisBudgetProvenance transactions_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+};
+
+struct IndirectTargetRefinementAnalysisWork
+{
+    std::string module;
+    std::size_t functions_analyzed = 0U;
+    std::size_t functions_reanalyzed = 0U;
+    std::size_t functions_reused = 0U;
+    std::size_t instructions = 0U;
+    std::size_t blocks = 0U;
+    std::size_t edges = 0U;
+    memory::GuestSize bytes_analyzed = 0U;
+    std::size_t boundary_finalization_passes = 0U;
+    std::size_t invalidated_records = 0U;
+    std::size_t transactions = 0U;
+};
+
+struct IndirectTargetRefinementAnalysisSummary
+{
+    IndirectTargetRefinementAnalysisBudgets configured;
+    std::size_t functions_analyzed = 0U;
+    std::size_t functions_reanalyzed = 0U;
+    std::size_t functions_reused = 0U;
+    std::size_t instructions = 0U;
+    std::size_t blocks = 0U;
+    std::size_t edges = 0U;
+    memory::GuestSize bytes_analyzed = 0U;
+    std::size_t boundary_finalization_passes = 0U;
+    std::size_t invalidated_records = 0U;
+    std::size_t transactions = 0U;
+};
+
 enum class IndirectTargetRefinementBudgetDimension : std::uint8_t
 {
     None,
@@ -356,6 +437,15 @@ enum class IndirectTargetRefinementBudgetDimension : std::uint8_t
     CandidateAssessments,
     Promotions,
     MapRebuilds,
+    RefinementAnalysisFunctions,
+    RefinementAnalysisReanalyzedFunctions,
+    RefinementAnalysisInstructions,
+    RefinementAnalysisBlocks,
+    RefinementAnalysisEdges,
+    RefinementAnalysisBytes,
+    RefinementAnalysisBoundaryFinalizationPasses,
+    RefinementAnalysisInvalidatedRecords,
+    RefinementAnalysisTransactions,
 };
 
 [[nodiscard]] std::string_view indirect_target_refinement_budget_dimension_name(
@@ -372,8 +462,12 @@ struct IndirectTargetRefinementBudgets
     std::size_t max_stagnant_rounds = 64U;
     std::size_t max_unique_candidates = 256U;
     std::size_t max_candidate_assessments = 512U;
+    // Retained only for explicit pre-M27 compatibility. Ordinary defaults do
+    // not charge valid monotonic work to these successful-event counts.
     std::size_t max_promotions = 128U;
     std::size_t max_map_rebuilds = 128U;
+    bool legacy_event_limits = false;
+    IndirectTargetRefinementAnalysisBudgets analysis;
 };
 
 struct IndirectTargetRefinementExhaustion
@@ -382,6 +476,9 @@ struct IndirectTargetRefinementExhaustion
         IndirectTargetRefinementBudgetDimension::None;
     std::size_t consumed = 0U;
     std::size_t limit = 0U;
+    std::string module;
+    std::size_t generation = 0U;
+    std::optional<IndirectTargetCandidateIdentity> next_work;
 };
 
 struct IndirectTargetRefinementSummary
@@ -405,6 +502,7 @@ struct IndirectTargetRefinementSummary
     std::size_t module_maps_reused = 0U;
     std::size_t candidates_reconsidered_after_map_change = 0U;
     std::size_t pending_candidate_count = 0U;
+    IndirectTargetRefinementAnalysisSummary analysis;
     std::optional<IndirectTargetCandidateIdentity> last_processed_candidate;
     std::optional<IndirectTargetCandidateIdentity> next_pending_candidate;
     IndirectTargetRefinementExhaustion exhaustion;
@@ -437,10 +535,14 @@ class IndirectTargetRefinementWorklist
     [[nodiscard]] bool begin_candidate_assessment(
         const IndirectTargetCandidateIdentity& candidate) noexcept;
     [[nodiscard]] bool can_promote() noexcept;
+    [[nodiscard]] bool can_commit_refinement(
+        const IndirectTargetCandidateIdentity& candidate,
+        const IndirectTargetRefinementAnalysisWork& work) noexcept;
     void record_terminal_candidate(const IndirectTargetCandidateIdentity& candidate) noexcept;
     void record_promotion(const IndirectTargetCandidateIdentity& candidate,
                           std::size_t module_maps_rebuilt = 0U,
-                          std::size_t module_maps_reused = 0U) noexcept;
+                          std::size_t module_maps_reused = 0U,
+                          const IndirectTargetRefinementAnalysisWork& work = {}) noexcept;
 
     [[nodiscard]] std::vector<ObservedIndirectTarget> pending_candidates() const;
     [[nodiscard]] IndirectTargetRefinementSummary summary() const;
@@ -538,6 +640,7 @@ struct FunctionMapRefinement
 {
     FinalizedFunctionMap map;
     IndirectTargetAssessment assessment;
+    IndirectTargetRefinementAnalysisWork analysis_work;
 };
 
 struct ProcessFunctionMapRefinement
@@ -546,6 +649,7 @@ struct ProcessFunctionMapRefinement
     IndirectTargetAssessment assessment;
     std::size_t module_maps_rebuilt = 0U;
     std::size_t module_maps_reused = 0U;
+    IndirectTargetRefinementAnalysisWork analysis_work;
 };
 
 [[nodiscard]] Result<IndirectTargetAssessment> assess_indirect_target(
