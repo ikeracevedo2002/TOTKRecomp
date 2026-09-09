@@ -322,8 +322,10 @@ The final standard suite passed `296/296` tests. The focused M28 run passed
 passed `296/296`, and the repository's GCC-configured local build passed
 `296/296` (the host's `/usr/bin/g++` resolves to Apple Clang 17). LLVM 18
 and Windows/MSVC were not locally available on this macOS host, so those CI
-targets were not claimed as local passes. No sanitizer configuration was
-weakened and no new dependency was added.
+targets were not claimed as local passes. The final GitHub Actions matrix
+then passed Linux/GCC, Linux/GCC/LLVM 18, Linux/GCC/ASan+UBSan,
+Linux/GCC/TSan, and Windows/MSVC. No sanitizer configuration was weakened
+and no new dependency was added.
 
 The private executable set, local configuration, generated reports, private
 addresses, and machine paths remain ignored workspace evidence. No NSO,
