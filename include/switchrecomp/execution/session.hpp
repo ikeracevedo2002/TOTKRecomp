@@ -141,9 +141,8 @@ struct ExecutionEvent
 
 struct ExecutionBudgets
 {
-    // Absent in the ordinary profile: execution is bounded by the finite
-    // guest-block/function/refinement resources below. A present value is an
-    // exact global compatibility guard, not a slice quantum.
+    // Finite bound on successful non-call function-transfer entries. Normal
+    // BL/BLR calls are bounded by max_call_depth and max_guest_blocks.
     std::optional<std::size_t> max_ir_operations;
     IrOperationLimitProvenance ir_operation_limit_provenance =
         IrOperationLimitProvenance::OrdinaryDefault;
@@ -200,6 +199,133 @@ struct CallStackFrame
     memory::GuestAddress call_site_pc = 0U;
     memory::GuestAddress expected_return_pc = 0U;
     std::size_t call_depth = 0U;
+};
+
+// These categories describe guest control-flow contracts, not host
+// interpreter scheduling activity. The resource itself charges only the
+// non-call transfer category; all categories remain visible in the bounded
+// execution history.
+enum class FunctionTransitionCategory : std::uint8_t
+{
+    InitialEntry,
+    DirectCall,
+    IndirectCall,
+    FunctionTransfer,
+    FunctionResume,
+    Other,
+};
+
+[[nodiscard]] const char* function_transition_category_name(
+    FunctionTransitionCategory category) noexcept;
+
+enum class FunctionTransitionLinkRegisterAction : std::uint8_t
+{
+    NotApplicable,
+    InitializedSyntheticReturn,
+    WrittenArchitecturalReturnPc,
+    Preserved,
+};
+
+[[nodiscard]] const char* function_transition_link_register_action_name(
+    FunctionTransitionLinkRegisterAction action) noexcept;
+
+enum class FunctionTransitionTargetOwnership : std::uint8_t
+{
+    NotOwned,
+    ExactCandidateFunctionEntry,
+    ExactTrustedFunctionEntry,
+    Conflict,
+};
+
+[[nodiscard]] const char* function_transition_target_ownership_name(
+    FunctionTransitionTargetOwnership ownership) noexcept;
+
+struct FunctionTransitionEvidence
+{
+    std::size_t sequence = 0U;
+    // Sequence within the finite non-call-transfer resource. Zero denotes an
+    // uncharged call/entry; a terminal attempt carries the next sequence.
+    std::size_t resource_sequence = 0U;
+    FunctionTransitionCategory category = FunctionTransitionCategory::Other;
+    std::string source_module;
+    std::optional<memory::GuestAddress> source_function;
+    std::optional<memory::GuestAddress> source_canonical_function;
+    std::optional<memory::GuestAddress> source_guest_pc;
+    std::optional<std::uint32_t> source_opcode;
+    std::string source_instruction_id;
+    std::string source_instruction;
+    std::string target_module;
+    memory::GuestAddress target_function = 0U;
+    std::optional<memory::GuestAddress> target_canonical_function;
+    std::string target_register;
+    std::string target_provenance;
+    std::size_t call_depth_before = 0U;
+    std::size_t call_depth_after = 0U;
+    runtime::ExecutionBoundaryKind boundary = runtime::ExecutionBoundaryKind::None;
+    FunctionTransitionLinkRegisterAction link_register_action =
+        FunctionTransitionLinkRegisterAction::NotApplicable;
+    bool resource_charged = false;
+    std::optional<memory::GuestAddress> expected_return_pc;
+    bool call_frame_pushed = false;
+    FunctionTransitionTargetOwnership target_ownership =
+        FunctionTransitionTargetOwnership::NotOwned;
+    bool source_pc_owned_by_source_function = false;
+    bool canonical_boundary_valid = false;
+    bool target_equals_current_function = false;
+    bool target_previously_entered = false;
+    std::size_t previous_target_count = 0U;
+    bool source_target_edge_previously_seen = false;
+    std::size_t previous_source_target_edge_count = 0U;
+    std::size_t guest_instruction_count = 0U;
+    std::size_t guest_block_count = 0U;
+    std::size_t ir_operation_count = 0U;
+};
+
+struct FunctionTransitionModuleCount
+{
+    std::string source_module;
+    std::string target_module;
+    std::size_t count = 0U;
+};
+
+struct FunctionTransitionDepthCount
+{
+    std::size_t call_depth = 0U;
+    std::size_t count = 0U;
+};
+
+struct FunctionTransitionAccounting
+{
+    // v2 charges only successful non-call function transfers. Normal call and
+    // return activity remains bounded by the independent call-depth and
+    // guest-block resources. The history is independently bounded by the
+    // guest-block execution bound because it also retains uncharged entries.
+    std::string model = "non_call_function_transfer_v2";
+    std::size_t configured_limit = 0U;
+    std::size_t total_charged = 0U;
+    std::size_t total_function_entries = 0U;
+    std::size_t history_limit = 0U;
+    bool history_truncated = false;
+    std::size_t initial_entries = 0U;
+    std::size_t direct_call_entries = 0U;
+    std::size_t indirect_call_entries = 0U;
+    std::size_t function_transfer_entries = 0U;
+    std::size_t function_resume_entries = 0U;
+    std::size_t other_entries = 0U;
+    std::size_t unique_function_targets = 0U;
+    std::size_t unique_source_target_edges = 0U;
+    std::size_t unique_call_sites = 0U;
+    std::size_t repeated_target_count = 0U;
+    std::size_t repeated_edge_count = 0U;
+    std::size_t maximum_target_repetition = 0U;
+    std::size_t maximum_edge_repetition = 0U;
+    std::size_t maximum_consecutive_target_repetition = 0U;
+    std::size_t maximum_consecutive_edge_repetition = 0U;
+    std::size_t same_function_transitions = 0U;
+    std::vector<FunctionTransitionModuleCount> module_matrix;
+    std::vector<FunctionTransitionDepthCount> depth_counts;
+    std::optional<FunctionTransitionEvidence> terminal_attempt;
+    std::vector<FunctionTransitionEvidence> history;
 };
 
 struct RuntimeAbiArgumentObservation
@@ -302,7 +428,7 @@ struct ExecutionSessionResult
 {
     // M26 separates productive refinement progress from independently
     // bounded no-progress retries while retaining deterministic evidence.
-    static constexpr std::uint32_t schema_version = 16U;
+    static constexpr std::uint32_t schema_version = 17U;
 
     analysis::ModuleIdentity identity;
     EntrySelection entry;
@@ -357,6 +483,7 @@ struct ExecutionSessionResult
     std::size_t instructions_after_smulh = 0U;
     std::size_t maximum_call_depth = 0U;
     std::vector<CallStackFrame> call_stack;
+    FunctionTransitionAccounting transition_accounting;
     std::vector<memory::GuestAddress> observation_targets;
     std::vector<memory::GuestAddress> instruction_observation_targets;
     std::vector<ExecutedGuestInstruction> executed_guest_instructions;
@@ -411,12 +538,40 @@ class ExecutionSession
         interpreter::InterpreterFrame interpreter;
     };
 
+    struct TransitionRequest
+    {
+        FunctionTransitionCategory category = FunctionTransitionCategory::Other;
+        bool has_source = false;
+        memory::GuestAddress source_function = 0U;
+        bool has_source_pc = false;
+        memory::GuestAddress source_guest_pc = 0U;
+        std::string target_register;
+        std::string target_provenance;
+        memory::GuestAddress target_function = 0U;
+        std::size_t call_depth_before = 0U;
+        std::size_t call_depth_after = 0U;
+        runtime::ExecutionBoundaryKind boundary = runtime::ExecutionBoundaryKind::None;
+        FunctionTransitionLinkRegisterAction link_register_action =
+            FunctionTransitionLinkRegisterAction::NotApplicable;
+        std::optional<memory::GuestAddress> expected_return_pc;
+        bool call_frame_pushed = false;
+    };
+
     [[nodiscard]] Result<void> map_stack(ExecutionSessionResult& result);
     [[nodiscard]] Result<void> release_stack() noexcept;
     [[nodiscard]] Result<const ir::Function*> lift_for_execution(
         memory::GuestAddress entry, ExecutionSessionResult& result);
-    [[nodiscard]] Result<void> enter_function(memory::GuestAddress entry,
-                                              ExecutionSessionResult& result);
+    [[nodiscard]] Result<void> enter_function(
+        memory::GuestAddress entry, ExecutionSessionResult& result,
+        const TransitionRequest& request);
+    [[nodiscard]] FunctionTransitionEvidence make_transition_evidence(
+        const TransitionRequest& request, memory::GuestAddress target,
+        const ExecutionSessionResult& result) const;
+    void append_transition(const TransitionRequest& request, memory::GuestAddress target,
+                           ExecutionSessionResult& result);
+    void record_terminal_transition_attempt(const TransitionRequest& request,
+                                            memory::GuestAddress target,
+                                            ExecutionSessionResult& result) const;
     [[nodiscard]] Result<void> dispatch_call(const runtime::ExecutionResult& boundary,
                                              ExecutionSessionResult& result);
     [[nodiscard]] Result<void> dispatch_transfer(const runtime::ExecutionResult& boundary,

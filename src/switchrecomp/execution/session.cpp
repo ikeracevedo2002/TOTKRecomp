@@ -67,6 +67,124 @@ using json = nlohmann::json;
     return output.str();
 }
 
+[[nodiscard]] json optional_address_json(
+    const std::optional<memory::GuestAddress>& address)
+{
+    return address ? json(hex_address(address.value())) : json(nullptr);
+}
+
+[[nodiscard]] json transition_evidence_json(const FunctionTransitionEvidence& evidence,
+                                             bool consumed)
+{
+    return json{{"sequence", evidence.sequence},
+                {"resource_sequence", evidence.resource_sequence},
+                {"charged", consumed},
+                {"resource_charged", evidence.resource_charged},
+                {"category", function_transition_category_name(evidence.category)},
+                {"source_module", evidence.source_module},
+                {"source_function", optional_address_json(evidence.source_function)},
+                {"source_canonical_function", optional_address_json(evidence.source_canonical_function)},
+                {"source_guest_pc", optional_address_json(evidence.source_guest_pc)},
+                {"source_opcode", evidence.source_opcode ? json(evidence.source_opcode.value())
+                                                          : json(nullptr)},
+                {"source_instruction_id", evidence.source_instruction_id},
+                {"source_instruction", evidence.source_instruction},
+                {"target_module", evidence.target_module},
+                {"target_function", hex_address(evidence.target_function)},
+                {"target_canonical_function", optional_address_json(evidence.target_canonical_function)},
+                {"target_register", evidence.target_register},
+                {"target_provenance", evidence.target_provenance},
+                {"call_depth_before", evidence.call_depth_before},
+                {"call_depth_after", evidence.call_depth_after},
+                {"boundary", runtime::execution_boundary_kind_name(evidence.boundary)},
+                {"link_register_action",
+                 function_transition_link_register_action_name(evidence.link_register_action)},
+                {"expected_return_pc", optional_address_json(evidence.expected_return_pc)},
+                {"call_frame_pushed", evidence.call_frame_pushed},
+                {"target_ownership",
+                 function_transition_target_ownership_name(evidence.target_ownership)},
+                {"source_pc_owned_by_source_function",
+                 evidence.source_pc_owned_by_source_function},
+                {"canonical_boundary_valid", evidence.canonical_boundary_valid},
+                {"target_equals_current_function", evidence.target_equals_current_function},
+                {"target_previously_entered", evidence.target_previously_entered},
+                {"previous_target_count", evidence.previous_target_count},
+                {"source_target_edge_previously_seen", evidence.source_target_edge_previously_seen},
+                {"previous_source_target_edge_count", evidence.previous_source_target_edge_count},
+                {"guest_progress", json{{"guest_instructions", evidence.guest_instruction_count},
+                                         {"guest_blocks", evidence.guest_block_count},
+                                         {"ir_operations", evidence.ir_operation_count}}}};
+}
+
+[[nodiscard]] json transition_accounting_json(const FunctionTransitionAccounting& accounting)
+{
+    json history = json::array();
+    for (const auto& evidence : accounting.history)
+        history.push_back(transition_evidence_json(evidence, evidence.resource_charged));
+    json terminal_history = json::array();
+    const auto terminal_begin = accounting.history.size() > 64U
+                                    ? accounting.history.size() - 64U
+                                    : 0U;
+    for (std::size_t index = terminal_begin; index < accounting.history.size(); ++index)
+        terminal_history.push_back(transition_evidence_json(
+            accounting.history[index], accounting.history[index].resource_charged));
+    json modules = json::array();
+    for (const auto& item : accounting.module_matrix)
+    {
+        modules.push_back(json{{"source_module", item.source_module},
+                               {"target_module", item.target_module}, {"count", item.count}});
+    }
+    json depths = json::array();
+    for (const auto& item : accounting.depth_counts)
+    {
+        depths.push_back(json{{"call_depth", item.call_depth}, {"count", item.count}});
+    }
+    const auto category_sum = accounting.initial_entries + accounting.direct_call_entries +
+                              accounting.indirect_call_entries +
+                              accounting.function_transfer_entries +
+                              accounting.function_resume_entries + accounting.other_entries;
+    return json{{"model", accounting.model},
+                {"resource_definition",
+                 "one unit per successful non-call function transfer; calls are bounded by "
+                 "call depth and guest blocks"},
+                {"configured_limit", accounting.configured_limit},
+                {"total_charged", accounting.total_charged},
+                {"total_function_entries", accounting.total_function_entries},
+                {"entry_category_sum", category_sum},
+                {"history_limit", accounting.history_limit},
+                {"history_truncated", accounting.history_truncated},
+                {"charged_category_sum", accounting.function_transfer_entries},
+                {"reconciles", category_sum == accounting.total_function_entries &&
+                                    accounting.total_charged ==
+                                        accounting.function_transfer_entries},
+                {"counts", json{{"initial_entries", accounting.initial_entries},
+                                 {"direct_call_entries", accounting.direct_call_entries},
+                                 {"indirect_call_entries", accounting.indirect_call_entries},
+                                 {"function_transfer_entries", accounting.function_transfer_entries},
+                                 {"function_resume_entries", accounting.function_resume_entries},
+                                 {"other_entries", accounting.other_entries}}},
+                {"unique_function_targets", accounting.unique_function_targets},
+                {"unique_source_target_edges", accounting.unique_source_target_edges},
+                {"unique_call_sites", accounting.unique_call_sites},
+                {"repeated_target_count", accounting.repeated_target_count},
+                {"repeated_edge_count", accounting.repeated_edge_count},
+                {"maximum_target_repetition", accounting.maximum_target_repetition},
+                {"maximum_edge_repetition", accounting.maximum_edge_repetition},
+                {"maximum_consecutive_target_repetition",
+                 accounting.maximum_consecutive_target_repetition},
+                {"maximum_consecutive_edge_repetition",
+                 accounting.maximum_consecutive_edge_repetition},
+                {"same_function_transitions", accounting.same_function_transitions},
+                {"module_matrix", std::move(modules)},
+                {"transition_count_by_call_depth", std::move(depths)},
+                {"terminal_attempt", accounting.terminal_attempt
+                                         ? transition_evidence_json(
+                                               accounting.terminal_attempt.value(), false)
+                                         : json(nullptr)},
+                {"terminal_history", std::move(terminal_history)},
+                {"history", std::move(history)}};
+}
+
 [[nodiscard]] std::string architectural_register_name(const aarch64::Register& reg)
 {
     auto architectural = reg;
@@ -1256,6 +1374,50 @@ const char* execution_stop_reason_name(ExecutionStopReason reason) noexcept
     return "unknown";
 }
 
+const char* function_transition_category_name(FunctionTransitionCategory category) noexcept
+{
+    switch (category)
+    {
+    case FunctionTransitionCategory::InitialEntry: return "initial_entry";
+    case FunctionTransitionCategory::DirectCall: return "direct_call";
+    case FunctionTransitionCategory::IndirectCall: return "indirect_call";
+    case FunctionTransitionCategory::FunctionTransfer: return "function_transfer";
+    case FunctionTransitionCategory::FunctionResume: return "function_resume";
+    case FunctionTransitionCategory::Other: return "other";
+    }
+    return "unknown";
+}
+
+const char* function_transition_link_register_action_name(
+    FunctionTransitionLinkRegisterAction action) noexcept
+{
+    switch (action)
+    {
+    case FunctionTransitionLinkRegisterAction::NotApplicable: return "not_applicable";
+    case FunctionTransitionLinkRegisterAction::InitializedSyntheticReturn:
+        return "initialized_synthetic_return";
+    case FunctionTransitionLinkRegisterAction::WrittenArchitecturalReturnPc:
+        return "written_architectural_return_pc";
+    case FunctionTransitionLinkRegisterAction::Preserved: return "preserved";
+    }
+    return "unknown";
+}
+
+const char* function_transition_target_ownership_name(
+    FunctionTransitionTargetOwnership ownership) noexcept
+{
+    switch (ownership)
+    {
+    case FunctionTransitionTargetOwnership::NotOwned: return "not_owned";
+    case FunctionTransitionTargetOwnership::ExactCandidateFunctionEntry:
+        return "exact_candidate_function_entry";
+    case FunctionTransitionTargetOwnership::ExactTrustedFunctionEntry:
+        return "exact_trusted_function_entry";
+    case FunctionTransitionTargetOwnership::Conflict: return "conflict";
+    }
+    return "unknown";
+}
+
 const char* execution_eligibility_name(ExecutionEligibility eligibility) noexcept
 {
     switch (eligibility)
@@ -1837,14 +1999,246 @@ Result<const ir::Function*> ExecutionSession::lift_for_execution(
     return Result<const ir::Function*>::success(&inserted.first->second.function.value());
 }
 
-Result<void> ExecutionSession::enter_function(GuestAddress entry,
-                                               ExecutionSessionResult& result)
+FunctionTransitionEvidence ExecutionSession::make_transition_evidence(
+    const TransitionRequest& request, GuestAddress target,
+    const ExecutionSessionResult& result) const
 {
-    if (result.executed_functions.size() >= options_.budgets.max_function_transitions)
+    FunctionTransitionEvidence evidence;
+    evidence.sequence = result.transition_accounting.total_function_entries + 1U;
+    evidence.category = request.category;
+    evidence.resource_charged = request.category == FunctionTransitionCategory::FunctionTransfer;
+    if (evidence.resource_charged)
     {
-        return stop(result, ExecutionStopReason::FunctionTransitionLimitExceeded,
-                    "function transition limit exhausted");
+        evidence.resource_sequence = result.transition_accounting.total_charged + 1U;
     }
+    evidence.target_module = module_name_for(target);
+    evidence.target_function = target;
+    evidence.call_depth_before = request.call_depth_before;
+    evidence.call_depth_after = request.call_depth_after;
+    evidence.boundary = request.boundary;
+    evidence.link_register_action = request.link_register_action;
+    evidence.expected_return_pc = request.expected_return_pc;
+    evidence.call_frame_pushed = request.call_frame_pushed;
+    evidence.target_register = request.target_register;
+    evidence.target_provenance = request.target_provenance;
+    evidence.guest_instruction_count = result.guest_instruction_count;
+    evidence.guest_block_count = result.guest_blocks;
+    evidence.ir_operation_count = result.ir_operations;
+
+    if (request.has_source)
+    {
+        evidence.source_function = request.source_function;
+        evidence.source_module = module_name_for(request.source_function);
+        evidence.target_equals_current_function = request.source_function == target;
+        if (const auto* source_record = function_record(request.source_function))
+        {
+            evidence.source_canonical_function = source_record->canonical_entry;
+            if (request.has_source_pc)
+            {
+                evidence.source_pc_owned_by_source_function =
+                    analysis::function_owns_address(*source_record, request.source_guest_pc);
+            }
+        }
+    }
+    if (request.has_source_pc)
+    {
+        evidence.source_guest_pc = request.source_guest_pc;
+        if (memory_ != nullptr)
+        {
+            const auto decoder = aarch64::AArch64Decoder::create();
+            if (decoder)
+            {
+                const auto instruction = aarch64::fetch_and_decode(
+                    *memory_, *decoder.value(), request.source_guest_pc);
+                if (instruction)
+                {
+                    evidence.source_opcode = instruction.value().opcode;
+                    evidence.source_instruction_id =
+                        aarch64::instruction_id_name(instruction.value().id);
+                    evidence.source_instruction = instruction.value().disassembly;
+                }
+            }
+        }
+    }
+
+    const auto* target_record = function_record(target);
+    if (target_record == nullptr)
+    {
+        evidence.target_ownership = FunctionTransitionTargetOwnership::NotOwned;
+    }
+    else if (target_record->translation_status == analysis::TranslationStatus::Conflict ||
+             target_record->entry_trust_status == analysis::FunctionEntryTrustStatus::Conflict)
+    {
+        evidence.target_ownership = FunctionTransitionTargetOwnership::Conflict;
+    }
+    else if (target_record->entry_trust_status == analysis::FunctionEntryTrustStatus::Trusted)
+    {
+        evidence.target_ownership = FunctionTransitionTargetOwnership::ExactTrustedFunctionEntry;
+    }
+    else
+    {
+        evidence.target_ownership = FunctionTransitionTargetOwnership::ExactCandidateFunctionEntry;
+    }
+    if (target_record != nullptr) evidence.target_canonical_function = target_record->canonical_entry;
+
+    const auto& history = result.transition_accounting.history;
+    evidence.previous_target_count = static_cast<std::size_t>(std::count_if(
+        history.begin(), history.end(), [target](const auto& prior) {
+            return prior.target_function == target;
+        }));
+    evidence.target_previously_entered = evidence.previous_target_count != 0U;
+    if (request.has_source)
+    {
+        evidence.previous_source_target_edge_count = static_cast<std::size_t>(std::count_if(
+            history.begin(), history.end(), [&](const auto& prior) {
+                return prior.source_function &&
+                       prior.source_function.value() == request.source_function &&
+                       prior.target_function == target;
+            }));
+        evidence.source_target_edge_previously_seen =
+            evidence.previous_source_target_edge_count != 0U;
+    }
+
+    if (!request.has_source)
+    {
+        evidence.canonical_boundary_valid = true;
+    }
+    else if (const auto* source_record = function_record(request.source_function);
+             source_record != nullptr && target_record != nullptr)
+    {
+        evidence.canonical_boundary_valid = request.category ==
+                                                FunctionTransitionCategory::FunctionTransfer
+                                            ? source_record->canonical_entry !=
+                                                  target_record->canonical_entry &&
+                                                  evidence.source_pc_owned_by_source_function
+                                            : evidence.source_pc_owned_by_source_function;
+    }
+    return evidence;
+}
+
+void ExecutionSession::append_transition(const TransitionRequest& request, GuestAddress target,
+                                          ExecutionSessionResult& result)
+{
+    auto evidence = make_transition_evidence(request, target, result);
+    auto& accounting = result.transition_accounting;
+    ++accounting.total_function_entries;
+    if (evidence.resource_charged) ++accounting.total_charged;
+    switch (request.category)
+    {
+    case FunctionTransitionCategory::InitialEntry: ++accounting.initial_entries; break;
+    case FunctionTransitionCategory::DirectCall: ++accounting.direct_call_entries; break;
+    case FunctionTransitionCategory::IndirectCall: ++accounting.indirect_call_entries; break;
+    case FunctionTransitionCategory::FunctionTransfer: ++accounting.function_transfer_entries; break;
+    case FunctionTransitionCategory::FunctionResume: ++accounting.function_resume_entries; break;
+    case FunctionTransitionCategory::Other: ++accounting.other_entries; break;
+    }
+
+    // The forensic history includes uncharged calls as well as charged
+    // transfers. Its explicit bound is derived from max_guest_blocks, so it
+    // cannot become a second unbounded execution resource.
+    if (accounting.history.size() >= accounting.history_limit)
+    {
+        accounting.history_truncated = true;
+    }
+    else
+    {
+        if (!evidence.target_previously_entered) ++accounting.unique_function_targets;
+        else ++accounting.repeated_target_count;
+        accounting.maximum_target_repetition = std::max(
+            accounting.maximum_target_repetition, evidence.previous_target_count + 1U);
+        if (evidence.source_function)
+        {
+            if (!evidence.source_target_edge_previously_seen) ++accounting.unique_source_target_edges;
+            else ++accounting.repeated_edge_count;
+            accounting.maximum_edge_repetition = std::max(
+                accounting.maximum_edge_repetition,
+                evidence.previous_source_target_edge_count + 1U);
+            if (evidence.source_guest_pc)
+            {
+                const auto prior_call_site = std::find_if(
+                    accounting.history.begin(), accounting.history.end(), [&](const auto& prior) {
+                        return prior.source_guest_pc &&
+                               prior.source_guest_pc.value() == evidence.source_guest_pc.value();
+                    });
+                if (prior_call_site == accounting.history.end()) ++accounting.unique_call_sites;
+            }
+            if (evidence.target_equals_current_function) ++accounting.same_function_transitions;
+        }
+
+        std::size_t consecutive_targets = 1U;
+        std::size_t consecutive_edges = 1U;
+        for (auto prior = accounting.history.rbegin(); prior != accounting.history.rend(); ++prior)
+        {
+            if (prior->target_function != target) break;
+            ++consecutive_targets;
+            if (!evidence.source_function || !prior->source_function ||
+                prior->source_function.value() != evidence.source_function.value())
+                break;
+            ++consecutive_edges;
+        }
+        accounting.maximum_consecutive_target_repetition = std::max(
+            accounting.maximum_consecutive_target_repetition, consecutive_targets);
+        if (evidence.source_function)
+        {
+            accounting.maximum_consecutive_edge_repetition = std::max(
+                accounting.maximum_consecutive_edge_repetition, consecutive_edges);
+        }
+
+        if (evidence.source_function)
+        {
+            const auto module_position = std::lower_bound(
+                accounting.module_matrix.begin(), accounting.module_matrix.end(), evidence,
+                [](const auto& item, const auto& value) {
+                    if (item.source_module != value.source_module)
+                        return item.source_module < value.source_module;
+                    return item.target_module < value.target_module;
+                });
+            if (module_position == accounting.module_matrix.end() ||
+                module_position->source_module != evidence.source_module ||
+                module_position->target_module != evidence.target_module)
+            {
+                accounting.module_matrix.insert(
+                    module_position,
+                    FunctionTransitionModuleCount{evidence.source_module, evidence.target_module, 1U});
+            }
+            else
+            {
+                ++module_position->count;
+            }
+        }
+        const auto depth_position = std::lower_bound(
+            accounting.depth_counts.begin(), accounting.depth_counts.end(),
+            evidence.call_depth_after, [](const auto& item, const auto depth) {
+                return item.call_depth < depth;
+            });
+        if (depth_position == accounting.depth_counts.end() ||
+            depth_position->call_depth != evidence.call_depth_after)
+        {
+            accounting.depth_counts.insert(
+                depth_position, FunctionTransitionDepthCount{evidence.call_depth_after, 1U});
+        }
+        else
+        {
+            ++depth_position->count;
+        }
+
+        accounting.history.push_back(std::move(evidence));
+    }
+    result.executed_functions.push_back(target);
+    result.executed_function_modules.push_back(module_name_for(target));
+}
+
+void ExecutionSession::record_terminal_transition_attempt(
+    const TransitionRequest& request, GuestAddress target, ExecutionSessionResult& result) const
+{
+    result.transition_accounting.terminal_attempt =
+        make_transition_evidence(request, target, result);
+}
+
+Result<void> ExecutionSession::enter_function(GuestAddress entry,
+                                               ExecutionSessionResult& result,
+                                               const TransitionRequest& request)
+{
     const auto eligible = lift_for_execution(entry, result);
     if (!eligible)
     {
@@ -1852,8 +2246,7 @@ Result<void> ExecutionSession::enter_function(GuestAddress entry,
     }
     current_.function_entry = entry;
     current_.interpreter = interpreter::InterpreterFrame{};
-    result.executed_functions.push_back(entry);
-    result.executed_function_modules.push_back(module_name_for(entry));
+    append_transition(request, entry, result);
     result.maximum_call_depth = std::max(result.maximum_call_depth, current_.call_depth);
     ExecutionEvent event{0U, ExecutionEventKind::FunctionEnter, entry, entry, 0U, false,
                          current_.call_depth, runtime::ExecutionBoundaryKind::None,
@@ -2073,6 +2466,24 @@ Result<void> ExecutionSession::dispatch_call(const runtime::ExecutionResult& bou
     {
         return Result<void>::success();
     }
+    TransitionRequest request;
+    request.category = boundary.boundary.kind == runtime::ExecutionBoundaryKind::IndirectCall
+                           ? FunctionTransitionCategory::IndirectCall
+                           : FunctionTransitionCategory::DirectCall;
+    request.has_source = true;
+    request.source_function = current_.function_entry;
+    request.has_source_pc = true;
+    request.source_guest_pc = boundary.boundary.source_guest_pc;
+    request.target_function = boundary.boundary.target_guest_address;
+    request.call_depth_before = current_.call_depth;
+    request.call_depth_after = current_.call_depth + 1U;
+    request.boundary = boundary.boundary.kind;
+    request.target_register = boundary.boundary.target_register;
+    request.target_provenance = boundary.boundary.target_provenance;
+    request.link_register_action =
+        FunctionTransitionLinkRegisterAction::WrittenArchitecturalReturnPc;
+    request.expected_return_pc = boundary.boundary.continuation_guest_pc;
+    request.call_frame_pushed = true;
     current_.interpreter.resume_at(boundary.boundary.continuation_block);
     suspended_frames_.push_back(std::move(current_));
     current_ = SessionFrame{};
@@ -2080,7 +2491,7 @@ Result<void> ExecutionSession::dispatch_call(const runtime::ExecutionResult& bou
     current_.expected_return_pc = boundary.boundary.continuation_guest_pc;
     current_.call_depth = suspended_frames_.size();
     current_.function_entry = boundary.boundary.target_guest_address;
-    return enter_function(current_.function_entry, result);
+    return enter_function(current_.function_entry, result, request);
 }
 
 Result<void> ExecutionSession::dispatch_transfer(const runtime::ExecutionResult& boundary,
@@ -2097,8 +2508,24 @@ Result<void> ExecutionSession::dispatch_transfer(const runtime::ExecutionResult&
     {
         return Result<void>::success();
     }
-    if (result.executed_functions.size() >= options_.budgets.max_function_transitions)
+    TransitionRequest request;
+    request.category = FunctionTransitionCategory::FunctionTransfer;
+    request.has_source = true;
+    request.source_function = current_.function_entry;
+    request.has_source_pc = true;
+    request.source_guest_pc = boundary.boundary.source_guest_pc;
+    request.target_function = boundary.boundary.target_guest_address;
+    request.call_depth_before = current_.call_depth;
+    request.call_depth_after = current_.call_depth;
+    request.boundary = boundary.boundary.kind;
+    request.target_register = boundary.boundary.target_register;
+    request.target_provenance = boundary.boundary.target_provenance;
+    request.link_register_action = FunctionTransitionLinkRegisterAction::Preserved;
+    request.expected_return_pc = current_.expected_return_pc;
+    if (result.transition_accounting.total_charged >=
+        options_.budgets.max_function_transitions)
     {
+        record_terminal_transition_attempt(request, boundary.boundary.target_guest_address, result);
         return stop(result, ExecutionStopReason::FunctionTransitionLimitExceeded,
                     "function transition limit exhausted", boundary.boundary.target_guest_address,
                     &boundary);
@@ -2106,8 +2533,7 @@ Result<void> ExecutionSession::dispatch_transfer(const runtime::ExecutionResult&
     current_.function_entry = boundary.boundary.target_guest_address;
     current_.interpreter = interpreter::InterpreterFrame{};
     ++result.function_transfers;
-    result.executed_functions.push_back(current_.function_entry);
-    result.executed_function_modules.push_back(module_name_for(current_.function_entry));
+    append_transition(request, current_.function_entry, result);
     result.maximum_call_depth = std::max(result.maximum_call_depth, current_.call_depth);
     ExecutionEvent event{0U, ExecutionEventKind::FunctionEnter, current_.function_entry,
                          current_.function_entry, 0U, false, current_.call_depth,
@@ -2415,6 +2841,12 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     result.identity = function_map_->identity();
     result.entry = entry;
     result.options = options_;
+    result.transition_accounting.configured_limit =
+        options_.budgets.max_function_transitions;
+    result.transition_accounting.history_limit =
+        options_.budgets.max_guest_blocks == std::numeric_limits<std::size_t>::max()
+            ? options_.budgets.max_guest_blocks
+            : options_.budgets.max_guest_blocks + 1U;
     result.relocations = load_summary_;
     result.guest_memory = memory_->accounting();
     if (process_image_ != nullptr)
@@ -2557,7 +2989,13 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     runtime_.cpu = &cpu_;
     current_.function_entry = entry.address;
     current_.expected_return_pc = result.synthetic_lr_sentinel;
-    const auto entered = enter_function(entry.address, result);
+    TransitionRequest initial_request;
+    initial_request.category = FunctionTransitionCategory::InitialEntry;
+    initial_request.target_function = entry.address;
+    initial_request.call_depth_after = current_.call_depth;
+    initial_request.link_register_action =
+        FunctionTransitionLinkRegisterAction::InitializedSyntheticReturn;
+    const auto entered = enter_function(entry.address, result, initial_request);
     if (!entered)
     {
         running_ = false;
@@ -3259,6 +3697,8 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                      result.instructions_after_former_blocker},
                                     {"instructions_after_smulh", result.instructions_after_smulh},
                                     {"maximum_call_depth", result.maximum_call_depth},
+                                    {"transition_accounting",
+                                     transition_accounting_json(result.transition_accounting)},
                                     {"provider_guest_code_entered", result.provider_guest_code_entered},
                                     {"runtime_fallbacks_invoked", result.runtime.imports_handled},
                                     {"observation_targets", std::move(observation_targets)},
