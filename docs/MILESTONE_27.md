@@ -2,8 +2,7 @@
 
 ## Status
 
-Complete locally; final status is contingent on the required remote Linux,
-LLVM 18, and Windows CI jobs recorded below. M27 addresses the M26 productive
+Complete. M27 addresses the M26 productive
 promotion/map-rebuild ceiling architecturally. It does not force a guest PC,
 seed a private address, weaken certification, or enlarge the ordinary event
 limits.
@@ -13,8 +12,10 @@ limits.
 - Exact M26 base: `f6c9b4bd07df90878a138d38cdf8204440052235`
 - Expected parent branch: `milestone-26-progress-aware-indirect-refinement`
 - M27 branch: `milestone-27-aggregate-refinement-resource`
-- Final head and commits: recorded in the handoff after the final commits
-- PR: stacked against `milestone-26-progress-aware-indirect-refinement`, not `main`
+- Implementation commit: `fd48ab0` (`Implement aggregate refinement analysis resources`)
+- Documentation commit before CI-result update: `2e1116c` (`Document Milestone 27 refinement resources`)
+- Final documentation-result commit: branch tip recorded in the handoff
+- PR: [#32](https://github.com/ikeracevedo2002/TOTKRecomp/pull/32), stacked against `milestone-26-progress-aware-indirect-refinement`, not `main`
 
 The branch was created directly from the exact M26 HEAD. No rebase onto
 `main` or unrelated merge was used.
@@ -232,9 +233,12 @@ The two ordinary private reports were byte-identical:
 - focused M27 suite: 812 assertions in 5 cases;
 - ASan/UBSan: 287/287;
 - TSan: 287/287;
-- Linux/GCC CI: recorded after push;
-- LLVM 18 CI: recorded after push;
-- Windows/MSVC CI: recorded after push.
+- Linux/GCC CI: passed, job `102482032793`;
+- LLVM 18 CI: passed, job `102482032216`;
+- ASan/UBSan CI: passed, job `102482032566`;
+- TSan CI: passed, job `102482032746`;
+- Windows/MSVC CI: passed, job `102482032592`;
+- combined workflow: passed, run `34356387182`.
 
 No sanitizer suppression was added. The local host does not provide a genuine
 GCC, LLVM 18 package, or MSVC toolchain; remote workflow results are therefore
