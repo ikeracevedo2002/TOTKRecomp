@@ -92,12 +92,17 @@ other proprietary content.
 
 ## Indirect-refinement budgets
 
-The ordinary refinement profile uses finite candidate, assessment, stagnation,
-and aggregate-analysis budgets. The M27 aggregate dimensions are configured by
+The ordinary refinement profile uses a finite structural candidate universe,
+finite assessment/stagnation budgets, and aggregate-analysis budgets. The
+candidate universe is derived from checked aligned executable instruction
+slots in the loaded process image and is represented sparsely; it is not an
+eager address table. The M27 aggregate dimensions are configured by
 the `--refinement-max-analysis-*` options shown by `run-entry --help`:
 functions analyzed, functions reanalyzed, instructions, blocks, edges, bytes,
 boundary-finalization passes, invalidated records, and immutable transactions.
-Zero, overflowed, or otherwise unrepresentable values are rejected.
+Zero, overflowed, or otherwise unrepresentable values are rejected. The
+legacy `--refinement-max-candidates` option remains an explicit compatibility
+ceiling; it is not used by ordinary defaults.
 
 The older `--refinement-max-promotions` and
 `--refinement-max-rebuilds` options are retained as explicit deprecated legacy
@@ -125,5 +130,6 @@ paths or target data in the repository:
 ```
 
 Each configured value is finite and is reported with its provenance. Generated
-execution reports use schema 13 for the aggregate limits, consumption,
-typed-exhaustion context, and immutable-generation accounting.
+execution reports use schema 14 for the structural candidate bound,
+legacy-limit distinction, sparse-record accounting, aggregate limits,
+consumption, typed-exhaustion context, and immutable-generation accounting.
