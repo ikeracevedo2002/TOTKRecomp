@@ -136,7 +136,8 @@ void help(std::ostream& output)
               "  --analysis-max-bytes N         Analysis byte budget.\n"
               "  --analysis-max-boundary-passes N Boundary-finalization budget.\n"
               "  --analysis-profile NAME        whole_module or execution_closure.\n"
-              "  --refinement-max-rounds N      Indirect refinement-round budget.\n"
+              "  --refinement-max-stagnant-rounds N No-progress refinement retry budget.\n"
+              "  --refinement-max-rounds N      Deprecated alias for stagnant-round budget.\n"
               "  --refinement-max-candidates N  Unique indirect-candidate budget.\n"
               "  --refinement-max-assessments N Candidate-assessment budget.\n"
               "  --refinement-max-promotions N  Successful-promotion budget.\n"
@@ -429,7 +430,9 @@ int main(int argc, char** argv)
             parse_number("--analysis-max-bytes", function_options.budgets.max_bytes_analyzed) ||
             parse_number("--analysis-max-boundary-passes",
                          function_options.budgets.max_boundary_finalization_passes) ||
-            parse_number("--refinement-max-rounds", refinement_budgets.max_rounds) ||
+            parse_number("--refinement-max-stagnant-rounds",
+                         refinement_budgets.max_stagnant_rounds) ||
+            parse_number("--refinement-max-rounds", refinement_budgets.max_stagnant_rounds) ||
             parse_number("--refinement-max-candidates", refinement_budgets.max_unique_candidates) ||
             parse_number("--refinement-max-assessments", refinement_budgets.max_candidate_assessments) ||
             parse_number("--refinement-max-promotions", refinement_budgets.max_promotions) ||
@@ -1053,10 +1056,12 @@ int main(int argc, char** argv)
                 expansion.value().assessment.map_generation_before = map_generation_before;
                 expansion.value().assessment.map_generation_after = map_generation_before + 1U;
                 promoted_targets.push_back(std::move(expansion.value().assessment));
-                worklist.record_promotion(identity);
+                worklist.record_promotion(identity, expansion.value().module_maps_rebuilt,
+                                           expansion.value().module_maps_reused);
                 refined = true;
                 break;
             }
+            worklist.end_round();
             if (refined)
             {
                 last_run_result = std::move(run_result);

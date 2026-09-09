@@ -351,7 +351,7 @@ struct IndirectTargetCandidateIdentity
 enum class IndirectTargetRefinementBudgetDimension : std::uint8_t
 {
     None,
-    Rounds,
+    StagnantRounds,
     UniqueCandidates,
     CandidateAssessments,
     Promotions,
@@ -366,7 +366,10 @@ struct IndirectTargetRefinementBudgets
     // These are outer discovery budgets.  CFG/function budgets remain owned
     // by AnalysisBudgets and are enforced independently for every immutable
     // map construction.
-    std::size_t max_rounds = 64U;
+    // Productive execution attempts are bounded by the dimensions below.
+    // This budget applies only to consecutive attempts which make no
+    // monotonic worklist transition.
+    std::size_t max_stagnant_rounds = 64U;
     std::size_t max_unique_candidates = 256U;
     std::size_t max_candidate_assessments = 512U;
     std::size_t max_promotions = 128U;
@@ -384,17 +387,22 @@ struct IndirectTargetRefinementExhaustion
 struct IndirectTargetRefinementSummary
 {
     IndirectTargetRefinementBudgets configured;
-    std::size_t refinement_rounds = 0U;
+    std::size_t total_execution_attempts = 0U;
+    std::size_t productive_rounds = 0U;
+    std::size_t stagnant_rounds = 0U;
     std::size_t observations_received = 0U;
     std::size_t unique_observations = 0U;
     std::size_t unique_candidates = 0U;
     std::size_t candidate_assessments = 0U;
+    std::size_t terminal_resolutions = 0U;
     std::size_t successful_promotions = 0U;
     std::size_t existing_trusted_hits = 0U;
     std::size_t duplicate_coalesced_observations = 0U;
     std::size_t rejected_candidates = 0U;
     std::size_t boundary_reconciliations = 0U;
     std::size_t map_rebuilds = 0U;
+    std::size_t module_maps_rebuilt = 0U;
+    std::size_t module_maps_reused = 0U;
     std::size_t candidates_reconsidered_after_map_change = 0U;
     std::size_t pending_candidate_count = 0U;
     std::optional<IndirectTargetCandidateIdentity> last_processed_candidate;
@@ -425,11 +433,14 @@ class IndirectTargetRefinementWorklist
     [[nodiscard]] IndirectTargetRefinementObservationResult observe(
         const IndirectTargetAssessment& assessment);
     [[nodiscard]] bool begin_round() noexcept;
+    void end_round() noexcept;
     [[nodiscard]] bool begin_candidate_assessment(
         const IndirectTargetCandidateIdentity& candidate) noexcept;
     [[nodiscard]] bool can_promote() noexcept;
     void record_terminal_candidate(const IndirectTargetCandidateIdentity& candidate) noexcept;
-    void record_promotion(const IndirectTargetCandidateIdentity& candidate) noexcept;
+    void record_promotion(const IndirectTargetCandidateIdentity& candidate,
+                          std::size_t module_maps_rebuilt = 0U,
+                          std::size_t module_maps_reused = 0U) noexcept;
 
     [[nodiscard]] std::vector<ObservedIndirectTarget> pending_candidates() const;
     [[nodiscard]] IndirectTargetRefinementSummary summary() const;
@@ -451,6 +462,8 @@ class IndirectTargetRefinementWorklist
     std::map<std::pair<std::string, memory::GuestAddress>, bool> unique_target_candidates_;
     std::size_t map_generation_ = 0U;
     std::optional<IndirectTargetCandidateIdentity> overflow_pending_;
+    bool round_active_ = false;
+    bool round_productive_ = false;
 };
 
 struct IndirectTargetValidation
@@ -531,6 +544,8 @@ struct ProcessFunctionMapRefinement
 {
     ProcessFunctionMap map;
     IndirectTargetAssessment assessment;
+    std::size_t module_maps_rebuilt = 0U;
+    std::size_t module_maps_reused = 0U;
 };
 
 [[nodiscard]] Result<IndirectTargetAssessment> assess_indirect_target(

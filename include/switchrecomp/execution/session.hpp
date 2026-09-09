@@ -283,9 +283,9 @@ struct SmulhFrontierEvidence
 
 struct ExecutionSessionResult
 {
-    // M24 adds deterministic bounded-analysis accounting and budget
-    // provenance alongside M23's typed indirect-refinement evidence.
-    static constexpr std::uint32_t schema_version = 11U;
+    // M26 separates productive refinement progress from independently
+    // bounded no-progress retries while retaining deterministic evidence.
+    static constexpr std::uint32_t schema_version = 12U;
 
     analysis::ModuleIdentity identity;
     EntrySelection entry;

@@ -218,77 +218,67 @@ void normalize_rejections(std::vector<FunctionEntryEvidenceRejection>& rejection
 
 void collect_process_static_evidence(const ObservedIndirectTarget& observed,
                                      const ProcessImage* process_image,
+                                     bool include_target_static_evidence,
                                      std::vector<IndirectTargetStaticEvidence>& evidence,
                                      std::vector<FunctionEntryEvidence>& entry_evidence,
                                      std::vector<FunctionEntryEvidenceRejection>& rejections,
                                      IndirectTargetValidation& validation)
 {
     if (process_image == nullptr) return;
-    for (const auto& module : process_image->modules())
+    if (include_target_static_evidence)
     {
-        if (module.symbols)
+        for (const auto& reference : process_image->function_target_references(observed.target))
         {
-            for (const auto& symbol : module.symbols->symbols)
+            const auto* module = process_image->module(reference.module);
+            if (module == nullptr || !module->symbols) continue;
+            const auto* symbol = module->symbols->at(reference.symbol_index);
+            if (symbol == nullptr) continue;
+            if (!reference.relocation_index)
             {
-                if (!symbol.is_defined() || symbol.type != format::SymbolType::Function)
-                    continue;
-                const auto address = symbol_address(symbol, module.identity.guest_base);
-                if (!address || address.value() != observed.target) continue;
                 add_evidence(evidence, IndirectTargetStaticEvidence{
                                               FunctionDiscoverySource::DynamicSymbol,
                                               FunctionConfidence::Confirmed,
                                               "defined dynamic function symbol " +
-                                                  std::to_string(symbol.index) +
-                                                  (symbol.name.empty() ? std::string{}
-                                                                       : ":" + symbol.name),
+                                                  std::to_string(symbol->index) +
+                                                  (symbol->name.empty() ? std::string{}
+                                                                        : ":" + symbol->name),
                                               FunctionEntryEvidenceKind::DynamicSymbolFunction,
                                               FunctionEntryEvidenceStrength::Exact});
                 add_entry_evidence(entry_evidence, FunctionEntryEvidence{
                                                                FunctionEntryEvidenceKind::DynamicSymbolFunction,
                                                                FunctionEntryEvidenceStrength::Exact,
-                                                               module.identity.module, std::nullopt,
-                                                               module.identity.module, observed.target,
+                                                               module->identity.module, std::nullopt,
+                                                               module->identity.module, observed.target,
                                                                std::nullopt, std::nullopt, std::nullopt,
-                                                               symbol.index, symbol.name, true, false,
+                                                               symbol->index, symbol->name, true, false,
                                                                "defined dynamic function symbol"});
+                continue;
             }
 
-            for (const auto& relocation : module.relocations)
-            {
-                if (!is_supported_relocation_type(relocation.type)) continue;
-                const auto* symbol = module.symbols->at(relocation.symbol_index);
-                if (symbol == nullptr || !symbol->is_defined() ||
-                    symbol->type != format::SymbolType::Function)
-                    continue;
-                const auto address = symbol_address(*symbol, module.identity.guest_base);
-                if (!address) continue;
-                const auto resolved = checked_add_signed_u64(address.value(), relocation.addend);
-                if (!resolved || resolved.value() != observed.target) continue;
-                add_evidence(evidence, IndirectTargetStaticEvidence{
-                                              FunctionDiscoverySource::RelocationReference,
-                                              FunctionConfidence::High,
-                                              "relocation-backed function pointer at " +
-                                                  hex_address(relocation.target_address) +
-                                                  ", type=" +
-                                                  std::string(format::aarch64_relocation_type_name(
-                                                      relocation.type)) +
-                                                  ", symbol=" +
-                                                  std::to_string(symbol->index) +
-                                                  (symbol->name.empty() ? std::string{}
-                                                                        : ":" + symbol->name),
-                                              FunctionEntryEvidenceKind::RelocationFunctionTarget,
-                                              FunctionEntryEvidenceStrength::Exact});
-                add_entry_evidence(entry_evidence, FunctionEntryEvidence{
-                                                               FunctionEntryEvidenceKind::RelocationFunctionTarget,
-                                                               FunctionEntryEvidenceStrength::Exact,
-                                                               module.identity.module,
-                                                               relocation.target_address,
-                                                               observed.target_module, observed.target,
-                                                               std::nullopt, relocation.type,
-                                                               relocation.source, symbol->index,
-                                                               symbol->name, true, false,
-                                                               "relocation resolves to a declared function symbol"});
-            }
+            if (reference.relocation_index.value() >= module->relocations.size()) continue;
+            const auto& relocation = module->relocations[reference.relocation_index.value()];
+            add_evidence(evidence, IndirectTargetStaticEvidence{
+                                          FunctionDiscoverySource::RelocationReference,
+                                          FunctionConfidence::High,
+                                          "relocation-backed function pointer at " +
+                                              hex_address(relocation.target_address) + ", type=" +
+                                              std::string(format::aarch64_relocation_type_name(
+                                                  relocation.type)) +
+                                              ", symbol=" + std::to_string(symbol->index) +
+                                              (symbol->name.empty() ? std::string{}
+                                                                    : ":" + symbol->name),
+                                          FunctionEntryEvidenceKind::RelocationFunctionTarget,
+                                          FunctionEntryEvidenceStrength::Exact});
+            add_entry_evidence(entry_evidence, FunctionEntryEvidence{
+                                                           FunctionEntryEvidenceKind::RelocationFunctionTarget,
+                                                           FunctionEntryEvidenceStrength::Exact,
+                                                           module->identity.module,
+                                                           relocation.target_address,
+                                                           observed.target_module, observed.target,
+                                                           std::nullopt, relocation.type,
+                                                           relocation.source, symbol->index,
+                                                           symbol->name, true, false,
+                                                           "relocation resolves to a declared function symbol"});
         }
     }
 
@@ -1050,127 +1040,124 @@ inspect_relocation_function_pointer_provenance(const ProcessImage& process_image
                                                GuestAddress expected_target)
 {
     std::vector<RelocationFunctionPointerProvenance> result;
-    for (const auto& module : process_image.modules())
+    for (const auto& reference : process_image.relocation_references(source_slot))
     {
-        for (std::size_t index = 0U; index < module.relocations.size(); ++index)
+        const auto* module = process_image.module(reference.module);
+        if (module == nullptr || reference.relocation_index >= module->relocations.size()) continue;
+        const auto index = reference.relocation_index;
+        const auto& relocation = module->relocations[index];
+
+        RelocationFunctionPointerProvenance item;
+        item.source_module = module->identity.module;
+        item.source_slot = source_slot;
+        item.relocation_index = index;
+        item.relocation = relocation;
+        item.symbol_index = relocation.symbol_index;
+
+        if (!is_supported_relocation_type(relocation.type))
         {
-            const auto& relocation = module.relocations[index];
-            if (relocation.target_address != source_slot) continue;
+            item.resolution_error = "relocation type is not supported by the guest loader";
+            result.push_back(std::move(item));
+            continue;
+        }
 
-            RelocationFunctionPointerProvenance item;
-            item.source_module = module.identity.module;
-            item.source_slot = source_slot;
-            item.relocation_index = index;
-            item.relocation = relocation;
-            item.symbol_index = relocation.symbol_index;
-
-            if (!is_supported_relocation_type(relocation.type))
+        std::optional<std::uint64_t> resolved;
+        if (relocation.type == format::AArch64RelocationType::Relative)
+        {
+            const auto value = checked_add_signed_u64(module->identity.guest_base,
+                                                      relocation.addend);
+            if (value) resolved = value.value();
+            else item.resolution_error = value.error().message;
+        }
+        else if (module->symbols)
+        {
+            const auto* symbol = module->symbols->at(relocation.symbol_index);
+            if (symbol == nullptr)
             {
-                item.resolution_error = "relocation type is not supported by the guest loader";
-                result.push_back(std::move(item));
-                continue;
-            }
-
-            std::optional<std::uint64_t> resolved;
-            if (relocation.type == format::AArch64RelocationType::Relative)
-            {
-                const auto value = checked_add_signed_u64(module.identity.guest_base,
-                                                          relocation.addend);
-                if (value) resolved = value.value();
-                else item.resolution_error = value.error().message;
-            }
-            else if (module.symbols)
-            {
-                const auto* symbol = module.symbols->at(relocation.symbol_index);
-                if (symbol == nullptr)
-                {
-                    item.resolution_error = "relocation symbol index is not present";
-                }
-                else
-                {
-                    item.symbol_name = symbol->name;
-                    item.target_declared_function = symbol->type == format::SymbolType::Function;
-                    if (symbol->is_defined())
-                    {
-                        const auto address = symbol_address(*symbol, module.identity.guest_base);
-                        if (!address)
-                            item.resolution_error = "relocation symbol address overflows";
-                        else
-                        {
-                            const auto value = checked_add_signed_u64(address.value(), relocation.addend);
-                            if (value) resolved = value.value();
-                            else item.resolution_error = value.error().message;
-                        }
-                    }
-                    else
-                    {
-                        const auto binding = std::find_if(
-                            process_image.bindings().begin(), process_image.bindings().end(),
-                            [&](const auto& candidate) {
-                                return candidate.consumer_module == module.identity.module &&
-                                       candidate.relocation_index == index;
-                            });
-                        if (binding != process_image.bindings().end())
-                        {
-                            item.symbol_name = binding->symbol;
-                            item.target_declared_function =
-                                binding->provider.selected_candidate &&
-                                binding->provider.candidates[binding->provider.selected_candidate.value()]
-                                        .type == format::SymbolType::Function;
-                            if (binding->resolved_value)
-                                resolved = binding->resolved_value.value();
-                            else
-                                item.resolution_error = "unresolved imported relocation";
-                        }
-                        else
-                        {
-                            item.resolution_error = "relocation has no process binding";
-                        }
-                    }
-                }
+                item.resolution_error = "relocation symbol index is not present";
             }
             else
             {
-                item.resolution_error = "relocation has no dynamic symbol table";
-            }
-
-            if (resolved)
-            {
-                item.resolved_target = resolved.value();
-                if (const auto* target_module = process_image.module_for_address(resolved.value(), 4U))
-                    item.target_module = target_module->identity.module;
-
-                const auto width = loader::relocation_width(relocation.type);
-                std::array<std::byte, sizeof(std::uint64_t)> bytes{};
-                const auto read = process_image.memory().read(
-                    source_slot, std::span<std::byte>(bytes.data(), width));
-                if (read)
+                item.symbol_name = symbol->name;
+                item.target_declared_function = symbol->type == format::SymbolType::Function;
+                if (symbol->is_defined())
                 {
-                    std::uint64_t observed_value = 0U;
-                    for (std::size_t byte = 0U; byte < width; ++byte)
+                    const auto address = symbol_address(*symbol, module->identity.guest_base);
+                    if (!address)
+                        item.resolution_error = "relocation symbol address overflows";
+                    else
                     {
-                        observed_value |= static_cast<std::uint64_t>(
-                                              std::to_integer<unsigned int>(bytes[byte]))
-                                          << (byte * 8U);
+                        const auto value = checked_add_signed_u64(address.value(), relocation.addend);
+                        if (value) resolved = value.value();
+                        else item.resolution_error = value.error().message;
                     }
-                    const auto expected_value = width == 4U ? (resolved.value() & 0xffffffffULL)
-                                                            : resolved.value();
-                    item.slot_value_verified = observed_value == expected_value;
-                    if (!item.slot_value_verified)
-                        item.resolution_error = "relocation slot value does not match its resolved value";
                 }
                 else
                 {
-                    item.resolution_error = "relocation slot could not be read back";
+                    const auto binding = std::find_if(
+                        process_image.bindings().begin(), process_image.bindings().end(),
+                        [&](const auto& candidate) {
+                            return candidate.consumer_module == module->identity.module &&
+                                   candidate.relocation_index == index;
+                        });
+                    if (binding != process_image.bindings().end())
+                    {
+                        item.symbol_name = binding->symbol;
+                        item.target_declared_function =
+                            binding->provider.selected_candidate &&
+                            binding->provider.candidates[binding->provider.selected_candidate.value()]
+                                    .type == format::SymbolType::Function;
+                        if (binding->resolved_value)
+                            resolved = binding->resolved_value.value();
+                        else
+                            item.resolution_error = "unresolved imported relocation";
+                    }
+                    else
+                        item.resolution_error = "relocation has no process binding";
                 }
             }
-            if (!item.resolved_target || item.resolved_target.value() != expected_target)
-            {
-                if (!item.resolution_error)
-                    item.resolution_error = "relocation resolved target differs from observed target";
-            }
-            result.push_back(std::move(item));
         }
+        else
+        {
+            item.resolution_error = "relocation has no dynamic symbol table";
+        }
+
+        if (resolved)
+        {
+            item.resolved_target = resolved.value();
+            if (const auto* target_module = process_image.module_for_address(resolved.value(), 4U))
+                item.target_module = target_module->identity.module;
+
+            const auto width = loader::relocation_width(relocation.type);
+            std::array<std::byte, sizeof(std::uint64_t)> bytes{};
+            const auto read = process_image.memory().read(
+                source_slot, std::span<std::byte>(bytes.data(), width));
+            if (read)
+            {
+                std::uint64_t observed_value = 0U;
+                for (std::size_t byte = 0U; byte < width; ++byte)
+                {
+                    observed_value |= static_cast<std::uint64_t>(
+                                          std::to_integer<unsigned int>(bytes[byte]))
+                                      << (byte * 8U);
+                }
+                const auto expected_value = width == 4U ? (resolved.value() & 0xffffffffULL)
+                                                        : resolved.value();
+                item.slot_value_verified = observed_value == expected_value;
+                if (!item.slot_value_verified)
+                    item.resolution_error = "relocation slot value does not match its resolved value";
+            }
+            else
+            {
+                item.resolution_error = "relocation slot could not be read back";
+            }
+        }
+        if (!item.resolved_target || item.resolved_target.value() != expected_target)
+        {
+            if (!item.resolution_error)
+                item.resolution_error = "relocation resolved target differs from observed target";
+        }
+        result.push_back(std::move(item));
     }
     std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) {
         return std::tie(left.source_module, left.source_slot, left.relocation_index,
@@ -1321,11 +1308,15 @@ Result<IndirectTargetAssessment> assess_indirect_target(
         return complete_assessment(std::move(assessment));
     }
 
-    collect_process_static_evidence(observed, process_image, assessment.static_evidence,
+    const auto exact_count = static_cast<std::size_t>(std::count_if(
+        maps.begin(), maps.end(), [](const auto& item) { return item.exact != nullptr; }));
+    collect_process_static_evidence(observed, process_image, exact_count == 0U,
+                                    assessment.static_evidence,
                                     assessment.entry_evidence, assessment.rejected_evidence,
                                     validation);
-    collect_direct_call_evidence(observed, function_map, process_function_map,
-                                 assessment.static_evidence);
+    if (exact_count == 0U)
+        collect_direct_call_evidence(observed, function_map, process_function_map,
+                                     assessment.static_evidence);
     for (const auto& item : assessment.static_evidence)
     {
         if (item.source == FunctionDiscoverySource::ObservedIndirectTarget)
@@ -1361,8 +1352,6 @@ Result<IndirectTargetAssessment> assess_indirect_target(
                                                   false, item.detail});
     }
     normalize_entry_evidence(assessment.entry_evidence);
-    const auto exact_count = static_cast<std::size_t>(std::count_if(
-        maps.begin(), maps.end(), [](const auto& item) { return item.exact != nullptr; }));
     if (exact_count > 1U)
     {
         decision.kind = IndirectTargetDecisionKind::CrossModuleAmbiguity;
@@ -1730,7 +1719,7 @@ Result<ProcessFunctionMapRefinement> refine_process_function_map(
     }
 
     std::vector<FinalizedFunctionMap> maps;
-    maps.reserve(process_image.modules().size());
+    maps.reserve(std::max(existing.maps().size(), process_image.modules().size()));
     bool target_module_rebuilt = false;
     for (const auto& existing_map : existing.maps())
     {
@@ -1742,16 +1731,22 @@ Result<ProcessFunctionMapRefinement> refine_process_function_map(
                 "existing process map has no corresponding process-image module"));
             return Result<ProcessFunctionMapRefinement>::success(std::move(result));
         }
-        auto seeds = seeds_from_finalized_map(existing_map);
-        if (existing_map.identity().module == result.assessment.validation.target_module)
+        if (existing_map.identity().module != result.assessment.validation.target_module)
         {
-            target_module_rebuilt = true;
-            seeds.push_back(FunctionSeed{
-                observed.target, FunctionDiscoverySource::ObservedIndirectTarget,
-                result.assessment.decision.confidence, std::nullopt, std::nullopt,
-                "immutable process refinement from runtime indirect target at " +
-                    hex_address(observed.source_pc)});
+            // Finalized maps are frozen values. Reusing this value preserves
+            // the previous module generation exactly while avoiding another
+            // CFG/function reconstruction for a logically unchanged module.
+            maps.push_back(existing_map);
+            ++result.module_maps_reused;
+            continue;
         }
+        target_module_rebuilt = true;
+        auto seeds = seeds_from_finalized_map(existing_map);
+        seeds.push_back(FunctionSeed{
+            observed.target, FunctionDiscoverySource::ObservedIndirectTarget,
+            result.assessment.decision.confidence, std::nullopt, std::nullopt,
+            "immutable process refinement from runtime indirect target at " +
+                hex_address(observed.source_pc)});
         auto rebuild_options = map_options(options);
         set_rebuild_roots(rebuild_options, seeds);
         const auto rebuilt = FunctionMapBuilder::build(
@@ -1763,6 +1758,7 @@ Result<ProcessFunctionMapRefinement> refine_process_function_map(
             return Result<ProcessFunctionMapRefinement>::success(std::move(result));
         }
         maps.push_back(std::move(rebuilt).value());
+        ++result.module_maps_rebuilt;
     }
     if (!target_module_rebuilt)
     {
@@ -1791,6 +1787,7 @@ Result<ProcessFunctionMapRefinement> refine_process_function_map(
             return Result<ProcessFunctionMapRefinement>::success(std::move(result));
         }
         maps.push_back(std::move(rebuilt).value());
+        ++result.module_maps_rebuilt;
     }
     const auto rebuilt = ProcessFunctionMap::build(std::move(maps));
     if (!rebuilt)
@@ -1841,7 +1838,8 @@ std::string_view indirect_target_refinement_budget_dimension_name(
     switch (dimension)
     {
     case IndirectTargetRefinementBudgetDimension::None: return "none";
-    case IndirectTargetRefinementBudgetDimension::Rounds: return "rounds";
+    case IndirectTargetRefinementBudgetDimension::StagnantRounds:
+        return "stagnant_rounds";
     case IndirectTargetRefinementBudgetDimension::UniqueCandidates:
         return "unique_candidates";
     case IndirectTargetRefinementBudgetDimension::CandidateAssessments:
@@ -1910,6 +1908,7 @@ IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::obse
             unique_target_candidates_.emplace(target_identity, true);
             ++counters_.unique_candidates;
             result.newly_unique_candidate = true;
+            round_productive_ = round_active_ || round_productive_;
         }
         WorkItem work;
         work.observed = std::move(normalized);
@@ -1921,7 +1920,11 @@ IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::obse
         work.processed = !work.pending;
         work.processed_generation = map_generation_;
         work_items_.emplace(identity, std::move(work));
-        if (!assessment.decision.eligible_for_promotion) ++counters_.rejected_candidates;
+        if (!assessment.decision.eligible_for_promotion)
+        {
+            ++counters_.rejected_candidates;
+            ++counters_.terminal_resolutions;
+        }
         return result;
     }
 
@@ -1959,6 +1962,11 @@ IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::obse
         assessment.decision.kind == IndirectTargetDecisionKind::AliasOfExistingEntry)
     {
         ++counters_.existing_trusted_hits;
+        if (work.pending || !work.processed)
+        {
+            ++counters_.terminal_resolutions;
+            round_productive_ = round_active_ || round_productive_;
+        }
         work.pending = false;
         work.processed = true;
         work.processed_generation = map_generation_;
@@ -1972,14 +1980,22 @@ IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::obse
             work.pending = true;
             result.reconsidered_after_map_change = true;
             ++counters_.candidates_reconsidered_after_map_change;
+            round_productive_ = round_active_ || round_productive_;
         }
         else if (!work.processed)
         {
             work.pending = true;
+            round_productive_ = round_active_ || round_productive_;
         }
     }
     else
     {
+        const bool was_unresolved = work.pending || !work.processed;
+        if (was_unresolved)
+        {
+            ++counters_.terminal_resolutions;
+            round_productive_ = round_active_ || round_productive_;
+        }
         ++counters_.rejected_candidates;
         work.pending = false;
         work.processed = true;
@@ -1992,15 +2008,34 @@ bool IndirectTargetRefinementWorklist::begin_round() noexcept
 {
     if (counters_.exhaustion.dimension != IndirectTargetRefinementBudgetDimension::None)
         return false;
-    if (counters_.refinement_rounds >= budgets_.max_rounds)
-    {
-        counters_.exhaustion = IndirectTargetRefinementExhaustion{
-            IndirectTargetRefinementBudgetDimension::Rounds,
-            counters_.refinement_rounds, budgets_.max_rounds};
-        return false;
-    }
-    ++counters_.refinement_rounds;
+    if (round_active_) return false;
+    ++counters_.total_execution_attempts;
+    round_active_ = true;
+    round_productive_ = false;
     return true;
+}
+
+void IndirectTargetRefinementWorklist::end_round() noexcept
+{
+    if (!round_active_) return;
+    if (round_productive_)
+    {
+        ++counters_.productive_rounds;
+        counters_.stagnant_rounds = 0U;
+    }
+    else
+    {
+        ++counters_.stagnant_rounds;
+        if (counters_.stagnant_rounds >= budgets_.max_stagnant_rounds &&
+            counters_.exhaustion.dimension == IndirectTargetRefinementBudgetDimension::None)
+        {
+            counters_.exhaustion = IndirectTargetRefinementExhaustion{
+                IndirectTargetRefinementBudgetDimension::StagnantRounds,
+                counters_.stagnant_rounds, budgets_.max_stagnant_rounds};
+        }
+    }
+    round_active_ = false;
+    round_productive_ = false;
 }
 
 bool IndirectTargetRefinementWorklist::begin_candidate_assessment(
@@ -2046,17 +2081,26 @@ void IndirectTargetRefinementWorklist::record_terminal_candidate(
 {
     const auto item = work_items_.find(candidate);
     if (item == work_items_.end()) return;
+    const bool was_unresolved = item->second.pending || !item->second.processed;
     item->second.pending = false;
     item->second.processed = true;
     item->second.processed_generation = map_generation_;
+    if (was_unresolved)
+    {
+        ++counters_.terminal_resolutions;
+        round_productive_ = round_active_ || round_productive_;
+    }
 }
 
 void IndirectTargetRefinementWorklist::record_promotion(
-    const IndirectTargetCandidateIdentity& candidate) noexcept
+    const IndirectTargetCandidateIdentity& candidate, std::size_t module_maps_rebuilt,
+    std::size_t module_maps_reused) noexcept
 {
     if (!can_promote()) return;
     ++counters_.successful_promotions;
     ++counters_.map_rebuilds;
+    counters_.module_maps_rebuilt += module_maps_rebuilt;
+    counters_.module_maps_reused += module_maps_reused;
     const auto item = work_items_.find(candidate);
     if (item != work_items_.end())
     {
@@ -2065,6 +2109,7 @@ void IndirectTargetRefinementWorklist::record_promotion(
         item->second.processed_generation = map_generation_;
     }
     ++map_generation_;
+    round_productive_ = round_active_ || round_productive_;
 }
 
 std::vector<ObservedIndirectTarget> IndirectTargetRefinementWorklist::pending_candidates() const
