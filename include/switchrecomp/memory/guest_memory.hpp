@@ -4,9 +4,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace switchrecomp::memory
@@ -95,14 +97,59 @@ struct GuestMemoryLimits
     std::size_t max_regions = guest_default_max_regions;
 };
 
+// A mapping token is an exact capability for one dynamically owned mapping.
+// It intentionally exposes no address or name that a caller could use to
+// request an imprecise unmap. GuestMemory authenticates both the memory domain
+// and the per-mapping identity before releasing a region.
+struct GuestMemoryMappingToken
+{
+    GuestMemoryMappingToken() = default;
+
+  private:
+    std::shared_ptr<const void> memory_domain_;
+    std::shared_ptr<const void> mapping_identity_;
+    GuestAddress base_ = 0U;
+    GuestSize size_ = 0U;
+
+    GuestMemoryMappingToken(std::shared_ptr<const void> memory_domain,
+                            std::shared_ptr<const void> mapping_identity,
+                            GuestAddress base, GuestSize size)
+        : memory_domain_(std::move(memory_domain)),
+          mapping_identity_(std::move(mapping_identity)), base_(base), size_(size)
+    {
+    }
+
+    friend class GuestMemory;
+};
+
+struct GuestMemoryAccounting
+{
+    GuestSize max_region_size = 0U;
+    GuestSize max_total_size = 0U;
+    std::size_t max_regions = 0U;
+    GuestSize live_mapped_bytes = 0U;
+    GuestSize peak_live_mapped_bytes = 0U;
+    GuestSize cumulative_mapped_bytes = 0U;
+    std::size_t live_region_count = 0U;
+    std::size_t peak_region_count = 0U;
+    std::size_t owned_mappings_created = 0U;
+    std::size_t owned_mappings_reclaimed = 0U;
+    std::size_t live_owned_mappings = 0U;
+    std::size_t peak_live_owned_mappings = 0U;
+    GuestSize live_owned_bytes = 0U;
+    GuestSize peak_live_owned_bytes = 0U;
+    GuestSize cumulative_owned_bytes = 0U;
+    GuestAddress virtual_address_high_water = 0U;
+};
+
 class GuestMemory
 {
   public:
     explicit GuestMemory(GuestMemoryLimits limits = {});
 
-    GuestMemory(const GuestMemory&) = default;
+    GuestMemory(const GuestMemory& other);
     GuestMemory(GuestMemory&&) noexcept = default;
-    GuestMemory& operator=(const GuestMemory&) = default;
+    GuestMemory& operator=(const GuestMemory& other);
     GuestMemory& operator=(GuestMemory&&) noexcept = default;
     ~GuestMemory() = default;
 
@@ -113,6 +160,20 @@ class GuestMemory
     [[nodiscard]] Result<void> map(GuestAddress base, std::span<const std::byte> initial_data,
                                    GuestMemoryPermissions permissions, std::string_view name = {},
                                    GuestRegionKind kind = GuestRegionKind::Other);
+
+    [[nodiscard]] Result<GuestMemoryMappingToken> map_owned(
+        GuestAddress base, GuestSize size, GuestMemoryPermissions permissions,
+        std::string_view name = {}, GuestRegionKind kind = GuestRegionKind::Other);
+
+    [[nodiscard]] Result<GuestMemoryMappingToken> map_owned(
+        GuestAddress base, std::span<const std::byte> initial_data,
+        GuestMemoryPermissions permissions, std::string_view name = {},
+        GuestRegionKind kind = GuestRegionKind::Other);
+
+    // Release exactly the whole mapping represented by token. A token from a
+    // different GuestMemory, a stale token, a token for a different mapping,
+    // or a token for a static map fails without mutating this object.
+    [[nodiscard]] Result<void> release_owned(const GuestMemoryMappingToken& token);
 
     [[nodiscard]] Result<void> read(GuestAddress address, std::span<std::byte> destination) const;
 
@@ -137,18 +198,29 @@ class GuestMemory
 
     [[nodiscard]] std::size_t region_count() const noexcept;
     [[nodiscard]] GuestSize total_mapped_size() const noexcept;
+    [[nodiscard]] GuestMemoryAccounting accounting() const noexcept;
     [[nodiscard]] const GuestMemoryLimits& limits() const noexcept;
 
   private:
+    struct OwnershipDomain
+    {
+    };
+
+    struct OwnedMappingIdentity
+    {
+    };
+
     struct GuestRegion
     {
         GuestMemoryRegionInfo info;
         std::vector<std::byte> bytes;
+        std::shared_ptr<const void> owned_mapping;
     };
 
     [[nodiscard]] Result<void> map_bytes(GuestAddress base, std::span<const std::byte> initial_data,
                                          GuestSize size, GuestMemoryPermissions permissions,
-                                         std::string_view name, GuestRegionKind kind);
+                                         std::string_view name, GuestRegionKind kind,
+                                         std::shared_ptr<const void> owned_mapping = {});
 
     [[nodiscard]] const GuestRegion* find_region(GuestAddress address) const noexcept;
     [[nodiscard]] GuestRegion* find_region(GuestAddress address) noexcept;
@@ -160,7 +232,19 @@ class GuestMemory
     [[nodiscard]] Result<GuestRegion*> validate_write_range(GuestAddress address, GuestSize size);
 
     GuestMemoryLimits limits_;
+    std::shared_ptr<const OwnershipDomain> ownership_domain_;
     GuestSize total_mapped_size_ = 0U;
+    GuestSize peak_live_mapped_size_ = 0U;
+    GuestSize cumulative_mapped_size_ = 0U;
+    std::size_t peak_region_count_ = 0U;
+    std::size_t owned_mappings_created_ = 0U;
+    std::size_t owned_mappings_reclaimed_ = 0U;
+    std::size_t live_owned_mappings_ = 0U;
+    std::size_t peak_live_owned_mappings_ = 0U;
+    GuestSize live_owned_size_ = 0U;
+    GuestSize peak_live_owned_size_ = 0U;
+    GuestSize cumulative_owned_size_ = 0U;
+    GuestAddress virtual_address_high_water_ = 0U;
     std::vector<GuestRegion> regions_;
 };
 

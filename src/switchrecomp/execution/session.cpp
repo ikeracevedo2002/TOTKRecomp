@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <exception>
 #include <iomanip>
 #include <limits>
 #include <nlohmann/json.hpp>
@@ -1414,6 +1415,26 @@ ExecutionSession::ExecutionSession(
     if (!function_map.maps().empty()) function_map_ = &function_map.maps().front();
 }
 
+ExecutionSession::~ExecutionSession() noexcept
+{
+    if (!stack_mapping_) return;
+    const auto released = release_stack();
+    if (!released) std::terminate();
+}
+
+Result<void> ExecutionSession::release_stack() noexcept
+{
+    if (!stack_mapping_) return Result<void>::success();
+    if (memory_ == nullptr)
+    {
+        return Result<void>::failure(
+            make_error(ErrorCode::InvalidArgument, "controlled stack has no guest memory owner"));
+    }
+    const auto released = memory_->release_owned(stack_mapping_.value());
+    if (released) stack_mapping_.reset();
+    return released;
+}
+
 const analysis::FunctionRecord* ExecutionSession::function_record(GuestAddress entry) const noexcept
 {
     if (process_function_map_ != nullptr) return process_function_map_->find(entry);
@@ -1697,18 +1718,11 @@ Result<void> ExecutionSession::map_stack(ExecutionSessionResult& result)
         return Result<void>::failure(make_error(
             ErrorCode::InvalidArgument, "controlled execution requires a non-empty synthetic stack"));
     }
-    GuestAddress highest_end = 0U;
-    for (const auto& region : memory_->regions())
-    {
-        const auto end = checked_add_u64(region.base, region.size);
-        if (!end)
-        {
-            return Result<void>::failure(make_error(
-                ErrorCode::ArithmeticOverflow, "mapped guest region end overflows"));
-        }
-        highest_end = std::max(highest_end, end.value());
-    }
-    const auto gap_end = checked_add_u64(highest_end, options_.stack_guard_gap);
+    // GuestMemory retains only a virtual high-water mark after an owned
+    // mapping is released. This preserves the old append-only guest-visible
+    // stack address sequence without retaining the old backing storage.
+    const auto gap_end = checked_add_u64(memory_->accounting().virtual_address_high_water,
+                                         options_.stack_guard_gap);
     if (!gap_end)
     {
         return Result<void>::failure(make_error(
@@ -1731,19 +1745,22 @@ Result<void> ExecutionSession::map_stack(ExecutionSessionResult& result)
         return Result<void>::failure(make_error(
             ErrorCode::ArithmeticOverflow, "synthetic stack end overflows"));
     }
-    const auto mapped = memory_->map(base.value(), size.value(),
-                                     memory::GuestMemoryPermissions::Read |
-                                         memory::GuestMemoryPermissions::Write,
-                                     "synthetic.controlled.stack", memory::GuestRegionKind::Other);
+    const auto mapped = memory_->map_owned(
+        base.value(), size.value(), memory::GuestMemoryPermissions::Read |
+                                       memory::GuestMemoryPermissions::Write,
+        "synthetic.controlled.stack", memory::GuestRegionKind::Other);
     if (!mapped)
     {
-        return mapped;
+        return Result<void>::failure(mapped.error());
     }
+    stack_mapping_ = std::move(mapped).value();
     result.stack_base = base.value();
     result.stack_end = end.value();
     result.initial_sp = result.stack_end & ~GuestAddress{0xfU};
     if ((result.initial_sp & 0xfU) != 0U || result.initial_sp <= result.stack_base)
     {
+        const auto released = release_stack();
+        if (!released) return released;
         return Result<void>::failure(make_error(
             ErrorCode::InvalidGuestAddress, "synthetic stack cannot provide an aligned initial SP"));
     }
@@ -2380,6 +2397,15 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
             make_error(ErrorCode::InvalidGuestAddress, "selected execution entry is invalid"));
     }
 
+    // A second run on the same session replaces the previous logical
+    // generation. The first run's stack was kept alive through its caller's
+    // assessment window; releasing it here is the replacement boundary.
+    const auto released_previous_stack = release_stack();
+    if (!released_previous_stack)
+    {
+        return Result<ExecutionSessionResult>::failure(released_previous_stack.error());
+    }
+
     running_ = true;
     suspended_frames_.clear();
     current_ = SessionFrame{};
@@ -2390,6 +2416,7 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     result.entry = entry;
     result.options = options_;
     result.relocations = load_summary_;
+    result.guest_memory = memory_->accounting();
     if (process_image_ != nullptr)
     {
         result.process = process_image_->summary();
@@ -2504,11 +2531,13 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     if (!stack)
     {
         (void)stop(result, classify_error(stack.error()), stack.error().message);
+        result.guest_memory = memory_->accounting();
         return Result<ExecutionSessionResult>::success(std::move(result));
     }
     if (!running_)
     {
         result.final_cpu = cpu_;
+        result.guest_memory = memory_->accounting();
         return Result<ExecutionSessionResult>::success(std::move(result));
     }
     const auto sentinel = checked_add_u64(result.stack_end, 0x1000U);
@@ -2809,6 +2838,7 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     {
         running_ = false;
     }
+    result.guest_memory = memory_->accounting();
     return Result<ExecutionSessionResult>::success(std::move(result));
 }
 
@@ -3156,6 +3186,37 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                          {"synthetic_lr_sentinel", hex_address(result.synthetic_lr_sentinel)},
                                          {"tls", "synthetic_zero"},
                                          {"state_description", "deterministic controlled-run state"}}},
+                {"guest_memory", [&]() {
+                     const auto& accounting = result.guest_memory;
+                     const auto non_stack_bytes =
+                         accounting.live_mapped_bytes >= accounting.live_owned_bytes
+                             ? accounting.live_mapped_bytes - accounting.live_owned_bytes
+                             : 0U;
+                     return json{{"max_individual_region_size", accounting.max_region_size},
+                                 {"max_total_size", accounting.max_total_size},
+                                 {"max_regions", accounting.max_regions},
+                                 {"live_mapped_bytes", accounting.live_mapped_bytes},
+                                 {"non_stack_live_mapped_bytes", non_stack_bytes},
+                                 {"peak_live_mapped_bytes", accounting.peak_live_mapped_bytes},
+                                 {"final_live_mapped_bytes", accounting.live_mapped_bytes},
+                                 {"live_region_count", accounting.live_region_count},
+                                 {"peak_region_count", accounting.peak_region_count},
+                                 {"controlled_stack_mappings_created",
+                                  accounting.owned_mappings_created},
+                                 {"controlled_stack_mappings_reclaimed",
+                                  accounting.owned_mappings_reclaimed},
+                                 {"controlled_stack_mappings_live", accounting.live_owned_mappings},
+                                 {"peak_simultaneously_live_controlled_stacks",
+                                  accounting.peak_live_owned_mappings},
+                                 {"live_controlled_stack_bytes", accounting.live_owned_bytes},
+                                 {"peak_live_controlled_stack_bytes",
+                                  accounting.peak_live_owned_bytes},
+                                 {"cumulative_mapped_bytes", accounting.cumulative_mapped_bytes},
+                                 {"cumulative_controlled_stack_bytes",
+                                  accounting.cumulative_owned_bytes},
+                                 {"virtual_stack_allocation_high_water",
+                                  hex_address(accounting.virtual_address_high_water)}};
+                 }()},
                 {"execution", json{{"stop_reason", execution_stop_reason_name(result.stop_reason)},
                                     {"stop_pc", hex_address(result.stop_pc)},
                                     {"source_pc", result.source_pc

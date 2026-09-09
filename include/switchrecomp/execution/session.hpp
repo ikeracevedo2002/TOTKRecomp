@@ -302,7 +302,7 @@ struct ExecutionSessionResult
 {
     // M26 separates productive refinement progress from independently
     // bounded no-progress retries while retaining deterministic evidence.
-    static constexpr std::uint32_t schema_version = 15U;
+    static constexpr std::uint32_t schema_version = 16U;
 
     analysis::ModuleIdentity identity;
     EntrySelection entry;
@@ -314,6 +314,7 @@ struct ExecutionSessionResult
     std::size_t precise_conflicts = 0U;
     memory::GuestSize precise_owned_bytes = 0U;
     std::vector<analysis::AnalysisAccounting> analysis;
+    memory::GuestMemoryAccounting guest_memory;
     memory::GuestAddress stack_base = 0U;
     memory::GuestAddress stack_end = 0U;
     memory::GuestAddress initial_sp = 0U;
@@ -390,6 +391,8 @@ class ExecutionSession
                       ExecutionLoadSummary load_summary = {},
                       runtime::RuntimeImportRegistry* runtime_imports = nullptr);
 
+    ~ExecutionSession() noexcept;
+
     [[nodiscard]] Result<ExecutionSessionResult> run(const EntrySelection& entry);
 
   private:
@@ -409,6 +412,7 @@ class ExecutionSession
     };
 
     [[nodiscard]] Result<void> map_stack(ExecutionSessionResult& result);
+    [[nodiscard]] Result<void> release_stack() noexcept;
     [[nodiscard]] Result<const ir::Function*> lift_for_execution(
         memory::GuestAddress entry, ExecutionSessionResult& result);
     [[nodiscard]] Result<void> enter_function(memory::GuestAddress entry,
@@ -451,6 +455,7 @@ class ExecutionSession
     std::vector<memory::GuestAddress> observation_targets_;
     std::vector<memory::GuestAddress> instruction_observation_targets_;
     std::vector<SessionFrame> suspended_frames_;
+    std::optional<memory::GuestMemoryMappingToken> stack_mapping_;
     SessionFrame current_;
     runtime::CpuState cpu_{};
     runtime::RuntimeContext runtime_{};

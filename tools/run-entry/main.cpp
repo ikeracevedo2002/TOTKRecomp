@@ -1368,6 +1368,10 @@ int main(int argc, char** argv)
                 final_result.indirect_target_discovery.end());
             final_result.indirect_target_discovery.push_back(std::move(merged));
         }
+        // Every loop-local ExecutionSession has now been destroyed, including
+        // the terminal or failed generation. Capture post-lifetime accounting
+        // so the report distinguishes live storage from cumulative churn.
+        final_result.guest_memory = process.value().memory().accounting();
         const auto report = execution::render_execution_report_json(final_result);
         if (!report_path.empty())
         {
@@ -1466,22 +1470,26 @@ int main(int argc, char** argv)
         print_error(registered.error());
         return static_cast<int>(ExitCode::InfrastructureFailure);
     }
-    execution::ExecutionSession session(loaded.value().memory, map.value(),
-                                        loaded.value().unresolved_relocations, execution_options,
-                                        execution::ExecutionLoadSummary{
-                                            loaded.value().relocations.size(),
-                                            loaded.value().applied_relocations,
-                                            loaded.value().unresolved_relocations.size()},
-                                        &runtime_imports, &loaded.value().metadata,
-                                        loaded.value().symbols ? &loaded.value().symbols.value()
-                                                               : nullptr);
-    const auto run = session.run(selected.value());
-    if (!run)
+    std::optional<execution::ExecutionSessionResult> single_run;
     {
-        print_error(run.error());
-        return static_cast<int>(ExitCode::InfrastructureFailure);
+        execution::ExecutionSession session(
+            loaded.value().memory, map.value(), loaded.value().unresolved_relocations,
+            execution_options,
+            execution::ExecutionLoadSummary{loaded.value().relocations.size(),
+                                             loaded.value().applied_relocations,
+                                             loaded.value().unresolved_relocations.size()},
+            &runtime_imports, &loaded.value().metadata,
+            loaded.value().symbols ? &loaded.value().symbols.value() : nullptr);
+        const auto run = session.run(selected.value());
+        if (!run)
+        {
+            print_error(run.error());
+            return static_cast<int>(ExitCode::InfrastructureFailure);
+        }
+        single_run = std::move(run).value();
     }
-    const auto report = execution::render_execution_report_json(run.value());
+    single_run->guest_memory = loaded.value().memory.accounting();
+    const auto report = execution::render_execution_report_json(single_run.value());
     if (!report_path.empty())
     {
         std::ofstream output(report_path, std::ios::binary);
@@ -1503,8 +1511,9 @@ int main(int argc, char** argv)
     }
     else
     {
-        std::cout << "STOPPED: " << execution::execution_stop_reason_name(run.value().stop_reason)
-                  << " pc=" << std::hex << run.value().stop_pc << std::dec << '\n';
+        std::cout << "STOPPED: "
+                  << execution::execution_stop_reason_name(single_run->stop_reason)
+                  << " pc=" << std::hex << single_run->stop_pc << std::dec << '\n';
     }
     return static_cast<int>(ExitCode::Success);
 }
