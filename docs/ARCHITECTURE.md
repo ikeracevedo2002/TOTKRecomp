@@ -197,8 +197,9 @@ RuntimeImportRegistry / import boundary
 ```
 
 The interpreter owns one resumable function frame. `ExecutionSession` owns the
-explicit guest call stack, global budgets, synthetic stack, exact-entry
-dispatch, tail-transfer return contracts, and deterministic events. `BL`/`BLR`
+explicit guest call stack, global budgets, one generation-scoped synthetic
+stack mapping, exact-entry dispatch, tail-transfer return contracts, and
+deterministic events. `BL`/`BLR`
 are calls with X30=`PC+4`; `B`/`BR` function transfers preserve X30 and do not
 push a call frame. Unresolved imports remain boundaries and are never replaced
 with host stubs. Milestone 12 adds a session-local ordered runtime-import
@@ -405,7 +406,10 @@ before committing them, so overlap, limit, and allocation failures leave an
 existing `GuestMemory` unchanged.
 
 The current implementation is intentionally not a page table, MMU, native
-address mirror, or CPU memory subsystem. Milestone 5 adds an explicit
+address mirror, or CPU memory subsystem. M30 adds exact opaque ownership tokens
+for dynamic whole-region mappings; controlled stacks use those tokens and
+retain only a checked virtual high-water cursor after release. Static loader
+mappings remain permanent process-image state. Milestone 5 adds an explicit
 loader-time privileged write path for relocation application while preserving
 normal guest write permission checks.
 
@@ -2481,3 +2485,20 @@ replaying side effects. Ordinary session termination remains governed by the
 finite guest-block, transition, call-depth, event, and refinement resources.
 An explicitly configured `--max-ir-operations N` remains an exact global hard
 guard and is reported separately from the slice quantum.
+
+## Generation-scoped controlled stack memory
+
+Milestone 30 gives dynamic controlled stacks an exact whole-region ownership
+token. `ExecutionSession` keeps the token for the lifetime of one logical
+execution generation, including candidate assessment and immutable refinement
+work performed by `run-entry`, then releases it on scope destruction. A
+release authenticates the memory domain, mapping identity, base, and size
+before removing exactly one region. Static loader mappings use the existing
+permanent mapping API and cannot be released by a controlled-stack token.
+
+Live mapped bytes remain the finite guest-memory resource. Cumulative mapping
+activity is diagnostic churn, and a checked virtual high-water cursor preserves
+the deterministic guest-visible stack-address sequence after backing storage
+is reclaimed. Every new stack is explicitly zero-filled. M30 does not provide
+a general heap, page table, snapshot, or escaped-stack-pointer lifetime model;
+those require separate ownership contracts.

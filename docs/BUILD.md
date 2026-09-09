@@ -130,9 +130,12 @@ paths or target data in the repository:
 ```
 
 Each configured value is finite and is reported with its provenance. Generated
-execution reports use schema 15 for the structural candidate bound,
+execution reports use schema 16 for the structural candidate bound,
 legacy-limit distinction, sparse-record accounting, aggregate limits,
 consumption, typed-exhaustion context, and immutable-generation accounting.
+Schema 16 also reports live versus cumulative guest-memory mapping activity,
+generation-scoped controlled-stack ownership/reclamation, and the checked
+virtual stack allocation high-water mark.
 
 ## Execution slicing
 
