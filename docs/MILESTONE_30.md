@@ -280,10 +280,10 @@ machine-specific paths remain uncommitted local artifacts.
 The complete standard CTest suite passed `317/317`; the M30 focused suite
 passed `12,120` assertions in `10` cases; and the unchanged M29 focused suite
 passed `307` assertions in `10` cases. Local GCC passed `317/317`, ASan/UBSan
-passed `317/317`, and TSan passed `317/317`. LLVM 18 and MSVC are covered by
-the repository CI matrix but are not installed in this macOS environment;
-their status is reported from CI rather than inferred locally. No new
-third-party dependency was added.
+passed `317/317`, and TSan passed `317/317`. The final PR validation matrix
+was also terminal and successful: all `10/10` configured push/PR checks
+passed, including Linux/GCC, LLVM 18, ASan/UBSan, TSan, and Windows/MSVC.
+No new third-party dependency was added.
 
 ## Known limitations and M31 recommendation
 
