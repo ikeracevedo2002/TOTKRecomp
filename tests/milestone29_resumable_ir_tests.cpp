@@ -374,21 +374,37 @@ TEST_CASE("M29 tiny IR slices are semantically equivalent to a large slice")
     REQUIRE(ir::verify(function));
     memory::GuestMemory large_memory;
     memory::GuestMemory tiny_memory;
+    memory::GuestMemory two_memory;
+    memory::GuestMemory three_memory;
     REQUIRE(large_memory.map(0x3000U, 0x100U,
                              memory::GuestMemoryPermissions::Read | memory::GuestMemoryPermissions::Write,
                              "m29.large.data", memory::GuestRegionKind::Data));
     REQUIRE(tiny_memory.map(0x3000U, 0x100U,
                             memory::GuestMemoryPermissions::Read | memory::GuestMemoryPermissions::Write,
                             "m29.tiny.data", memory::GuestRegionKind::Data));
+    REQUIRE(two_memory.map(0x3000U, 0x100U,
+                           memory::GuestMemoryPermissions::Read | memory::GuestMemoryPermissions::Write,
+                           "m29.two.data", memory::GuestRegionKind::Data));
+    REQUIRE(three_memory.map(0x3000U, 0x100U,
+                             memory::GuestMemoryPermissions::Read | memory::GuestMemoryPermissions::Write,
+                             "m29.three.data", memory::GuestRegionKind::Data));
     runtime::CpuState large_cpu{};
     runtime::CpuState tiny_cpu{};
+    runtime::CpuState two_cpu{};
+    runtime::CpuState three_cpu{};
     const std::array<std::uint64_t, 1> observed{0x1000U};
     const auto large = run_sliced(function, large_memory, large_cpu, 4096U, std::nullopt, observed);
     const auto tiny = run_sliced(function, tiny_memory, tiny_cpu, 1U, std::nullopt, observed);
+    const auto two = run_sliced(function, two_memory, two_cpu, 2U, std::nullopt, observed);
+    const auto three = run_sliced(function, three_memory, three_cpu, 3U, std::nullopt, observed);
     require_same_run(large, large_cpu, tiny, tiny_cpu);
+    require_same_run(large, large_cpu, two, two_cpu);
+    require_same_run(large, large_cpu, three, three_cpu);
     REQUIRE(large.result.executed_blocks == 2U);
     REQUIRE(large.result.executed_guest_instructions == 2U);
     REQUIRE(read_word(large_memory, 0x3000U) == read_word(tiny_memory, 0x3000U));
+    REQUIRE(read_word(large_memory, 0x3000U) == read_word(two_memory, 0x3000U));
+    REQUIRE(read_word(large_memory, 0x3000U) == read_word(three_memory, 0x3000U));
     REQUIRE(large_cpu.x[0U] == 7U);
     REQUIRE(large_cpu.x[1U] == 8U);
 }

@@ -187,7 +187,7 @@ reported as an execution capacity.
 
 ## Synthetic validation
 
-The focused M29 suite contains ten test cases and passed `261` assertions.
+The focused M29 suite contains ten test cases and passed `307` assertions.
 It validates:
 
 - identical CPU, memory, PC, observations, guest instruction traces, and
@@ -260,7 +260,7 @@ independent of slice size. Final private report sizes and hashes are recorded
 in the milestone handoff; no private report, binary, key, local configuration,
 absolute machine path, or proprietary byte is committed.
 
-The final local validation was `306/306` for the standard suite, `261`
+The final local validation was `306/306` for the standard suite, `307`
 assertions in ten focused M29 cases, `306/306` under ASan/UBSan, and `306/306`
 under TSan. The final-head PR validation also passed Linux/GCC, Linux/GCC /
 LLVM 18, Linux/GCC / ASan + UBSan, Linux/GCC / TSan, and Windows/MSVC.
