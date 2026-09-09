@@ -14,6 +14,7 @@ limits.
 - M27 branch: `milestone-27-aggregate-refinement-resource`
 - Implementation commit: `fd48ab0` (`Implement aggregate refinement analysis resources`)
 - Documentation commit before CI-result update: `2e1116c` (`Document Milestone 27 refinement resources`)
+- Accounting clarification commit: `f4f8205` (`Separate new and reanalyzed refinement work`)
 - Final documentation-result commit: branch tip recorded in the handoff
 - PR: [#32](https://github.com/ikeracevedo2002/TOTKRecomp/pull/32), stacked against `milestone-26-progress-aware-indirect-refinement`, not `main`
 
@@ -72,7 +73,7 @@ aggregate ledger was:
 
 | Dimension | Consumed | Default limit |
 | --- | ---: | ---: |
-| functions newly CFG-analyzed | 586 | 200,000 |
+| functions newly CFG-analyzed | 580 | 200,000 |
 | functions reanalyzed | 6 | 100,000 |
 | instructions | 19,250 | 8,000,000 |
 | blocks | 3,708 | 2,000,000 |
@@ -223,8 +224,8 @@ The two ordinary private reports were byte-identical:
 
 - report 1: 35,114,732 bytes;
 - report 2: 35,114,732 bytes;
-- SHA-256 1: `2ee4ba4598a4d6aee1d9458e478488303e1d46232fa22671afe7077d7bf3426b`;
-- SHA-256 2: `2ee4ba4598a4d6aee1d9458e478488303e1d46232fa22671afe7077d7bf3426b`;
+- SHA-256 1: `9ba3e72c42b10fd5a8184377d371ae9cf993b09b306b31b5f4ac7947ef1864fe`;
+- SHA-256 2: `9ba3e72c42b10fd5a8184377d371ae9cf993b09b306b31b5f4ac7947ef1864fe`;
 - byte comparison: identical.
 
 ## Validation matrix
@@ -238,7 +239,10 @@ The two ordinary private reports were byte-identical:
 - ASan/UBSan CI: passed, job `102482032566`;
 - TSan CI: passed, job `102482032746`;
 - Windows/MSVC CI: passed, job `102482032592`;
-- combined workflow: passed, run `34356387182`.
+- combined workflow for the main implementation/documentation commits: passed,
+  run `34357100622`.
+- final-head workflow for the accounting clarification and final documentation:
+  recorded in the handoff as it completes.
 
 No sanitizer suppression was added. The local host does not provide a genuine
 GCC, LLVM 18 package, or MSVC toolchain; remote workflow results are therefore
