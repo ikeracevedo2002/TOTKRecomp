@@ -710,7 +710,7 @@ void account_cfg(const ControlFlowGraph& cfg, IndirectTargetValidation& validati
 {
     return IndirectTargetRefinementAnalysisWork{
         accounting.module,
-        accounting.functions_cfg_analyzed,
+        accounting.newly_analyzed_functions,
         accounting.reanalyzed_functions,
         accounting.reused_functions,
         accounting.instructions_consumed,
