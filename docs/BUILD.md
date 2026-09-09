@@ -130,6 +130,16 @@ paths or target data in the repository:
 ```
 
 Each configured value is finite and is reported with its provenance. Generated
-execution reports use schema 14 for the structural candidate bound,
+execution reports use schema 15 for the structural candidate bound,
 legacy-limit distinction, sparse-record accounting, aggregate limits,
 consumption, typed-exhaustion context, and immutable-generation accounting.
+
+## Execution slicing
+
+`run-entry` ordinary execution uses a finite internal Semantic IR scheduling
+quantum and exact resumable interpreter state. The quantum is not an execution
+capacity and is not the ordinary termination guard. The existing finite guest
+block, function-transition, call-depth, event, and refinement resources remain
+the aggregate termination model. `--max-ir-operations N` is an explicit
+global hard limit; it is reported separately with explicit CLI provenance and
+cannot be bypassed by internal slices.

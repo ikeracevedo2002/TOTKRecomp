@@ -2469,3 +2469,15 @@ This RFC is complete when:
 - The next implementation task follows the current milestone roadmap and does not involve attempting to boot TOTK.
 - Every target-specific unknown remains marked as **Needs verification**.
 - Any future implementation claiming progress points back to a test, report, or exact-build artifact.
+
+## Resumable Semantic IR execution
+
+Milestone 29 separates interpreter scheduling from execution termination. A
+finite internal IR-operation slice yields an `InterpreterFrame` with an exact
+block and operation cursor; it does not create a guest boundary, function
+transition, refinement attempt, or candidate observation. The frame also owns
+the SSA/provenance and pending-observation state needed to continue without
+replaying side effects. Ordinary session termination remains governed by the
+finite guest-block, transition, call-depth, event, and refinement resources.
+An explicitly configured `--max-ir-operations N` remains an exact global hard
+guard and is reported separately from the slice quantum.
