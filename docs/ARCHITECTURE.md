@@ -210,6 +210,20 @@ handlers. `BL`/`BLR` imports resume their explicit guest continuation;
 are never cast to host function pointers. A recognized import can therefore
 remain an explicit unimplemented boundary when its contract is not established.
 
+Milestone 31 makes the function-transition resource semantic and auditable.
+The schema-17 `execution.transition_accounting` record classifies each
+successful function entry as an initial entry, direct call, indirect call,
+non-call function transfer, or other typed category. Resumable IR slices,
+mid-block resumes, and return restoration do not create fresh entries. The
+unchanged default `max_function_transitions=1,000` charges only successful
+cross-function `B`/`BR` transfers, which bounds non-returning transfer churn;
+ordinary `BL`/`BLR` activity remains bounded by call depth, guest blocks,
+events, refinement, and the other finite execution resources. The retained
+forensic history is separately capped at `max_guest_blocks + 1` entries and
+reports truncation if that derived diagnostic bound is reached. This model
+does not alter indirect-target certification, candidate ordering, or call and
+return contracts.
+
 This controlled entry execution consumes a single prepared main module and a
 metadata-selected `DT_INIT` candidate. It is not full process launch: no rtld,
 SDK, Horizon, service bring-up, multi-module image, or verified process-entry

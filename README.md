@@ -152,6 +152,7 @@ On a multi-config generator, use `build/Debug/nso-inspect`.
 - [Milestone 19 move-wide semantics and real UMULH frontier](docs/MILESTONE_19.md)
 - [Milestone 29 resumable IR execution](docs/MILESTONE_29.md)
 - [Milestone 30 generation-scoped controlled stack memory](docs/MILESTONE_30.md)
+- [Milestone 31 semantic function-transition frontier](docs/MILESTONE_31.md)
 - [AArch64 support matrix and coverage workflow](docs/AARCH64_SUPPORT.md)
 - [Build notes](docs/BUILD.md)
 - [Dependency policy](docs/DEPENDENCIES.md)

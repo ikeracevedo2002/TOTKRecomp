@@ -130,12 +130,16 @@ paths or target data in the repository:
 ```
 
 Each configured value is finite and is reported with its provenance. Generated
-execution reports use schema 16 for the structural candidate bound,
+execution reports use schema 17 for the structural candidate bound,
 legacy-limit distinction, sparse-record accounting, aggregate limits,
 consumption, typed-exhaustion context, and immutable-generation accounting.
-Schema 16 also reports live versus cumulative guest-memory mapping activity,
+Schema 17 also reports live versus cumulative guest-memory mapping activity,
 generation-scoped controlled-stack ownership/reclamation, and the checked
-virtual stack allocation high-water mark.
+virtual stack allocation high-water mark. It additionally reports bounded
+function-transition forensics: all successful function entries are classified,
+while the unchanged `max_function_transitions` value charges only successful
+non-call function transfers. The diagnostic history is explicitly bounded by
+`max_guest_blocks + 1`.
 
 ## Execution slicing
 
@@ -145,4 +149,6 @@ capacity and is not the ordinary termination guard. The existing finite guest
 block, function-transition, call-depth, event, and refinement resources remain
 the aggregate termination model. `--max-ir-operations N` is an explicit
 global hard limit; it is reported separately with explicit CLI provenance and
-cannot be bypassed by internal slices.
+cannot be bypassed by internal slices. Ordinary BL/BLR call entries are not
+charged to the function-transfer resource; call depth, guest blocks, events,
+and refinement limits remain finite independent guards.
