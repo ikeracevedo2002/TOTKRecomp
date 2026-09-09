@@ -218,7 +218,10 @@ This is downstream of M29: the former attempt `422`, generation `421`, and
 `100,716`-IR-operation memory frontier is no longer the stop. No indirect
 target was seeded or uncertified; candidate identity, assessment order,
 promotion order, map generations, provenance, and function-entry
-certification remain on the existing M29 path.
+certification remain on the existing M29 path. The one stagnant round versus
+M29's zero is a later natural no-new-promotion round after the former
+frontier was crossed; it did not change candidate ordering, certification, or
+any finite limit.
 
 ## Guest-memory resource accounting
 
