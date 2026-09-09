@@ -2112,8 +2112,8 @@ the exact next execution boundary.
 
 The outer refinement driver uses a deterministic pending worklist rather than
 rescanning all historical observations as new discoveries. Its typed finite
-limits separately bound rounds, target candidates, candidate assessments,
-successful promotions, and immutable map rebuilds. A work item includes the
+limits separately bound stagnant retries, target candidates, candidate
+assessments, successful promotions, and immutable map rebuilds. A work item includes the
 target module/address and source/control-flow/pointer provenance; repeated
 unchanged observations are coalesced while their guest-side provenance and
 observation count remain auditable. A promotion changes the immutable map and
@@ -2121,6 +2121,39 @@ advances a generation; only a later observation whose certification result can
 have changed is reconsidered. Exhaustion is reported with the exact dimension,
 consumed value, limit, and pending work, and never authorizes uncertified guest
 execution. See [MILESTONE_23.md](MILESTONE_23.md).
+
+### Milestone 26 — Progress-aware indirect refinement closure
+
+The indirect-refinement driver distinguishes total execution attempts from
+monotonic work. `total_execution_attempts` is accounting only. A productive
+round records a newly admitted candidate, a terminal candidate resolution, a
+generation-dependent reconsideration, or a successful promotion. A round that
+does none of these transitions increments the consecutive `stagnant_rounds`
+counter and is bounded by `max_stagnant_rounds`; productive work does not
+consume that retry allowance. The report schema is 12 because the former
+`max_rounds` field represented a total-attempt ceiling and would be misleading
+under this model. The CLI retains `--refinement-max-rounds` only as an
+explicitly deprecated alias for the stagnation budget.
+
+The finite-state argument is explicit: newly admitted target identities,
+candidate assessments, successful promotions, immutable map generations, and
+terminal resolutions are each bounded by their configured finite dimensions.
+Equivalent observations coalesce by stable guest-side identity and cannot
+create new work. A pending candidate is either promoted, becomes trusted, or
+becomes terminally rejected; only an attempt that makes none of those
+transitions consumes the finite stagnation allowance. Therefore a refinement
+driver cannot retry forever, while a sequence of independently certified
+promotions is not mistaken for stagnation.
+
+Process refinement remains transactional and immutable. The target module is
+rebuilt and fully revalidated from its deterministic seeds; unchanged frozen
+module maps are carried into the new process-map generation without another
+CFG/function reconstruction. Process-wide static function-target and
+relocation-slot indexes are built once when the process image is loaded. They
+preserve module/index provenance and relocation readback checks while avoiding
+repeated full metadata scans for duplicate runtime observations. The former
+M25 target was consequently assessed, certified, promoted, and entered through
+normal guest dispatch. See [MILESTONE_26.md](MILESTONE_26.md).
 
 ### Future milestone — Filesystem and asset loading
 
