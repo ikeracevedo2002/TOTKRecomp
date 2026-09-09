@@ -260,6 +260,12 @@ independent of slice size. Final private report sizes and hashes are recorded
 in the milestone handoff; no private report, binary, key, local configuration,
 absolute machine path, or proprietary byte is committed.
 
+The final local validation was `306/306` for the standard suite, `261`
+assertions in ten focused M29 cases, `306/306` under ASan/UBSan, and `306/306`
+under TSan. The final-head PR validation also passed Linux/GCC, Linux/GCC /
+LLVM 18, Linux/GCC / ASan + UBSan, Linux/GCC / TSan, and Windows/MSVC.
+No new dependency was introduced.
+
 ## Known limitations and M30 recommendation
 
 The controlled process currently retains each generation's synthetic stack in
