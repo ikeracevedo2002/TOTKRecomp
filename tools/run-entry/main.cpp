@@ -151,7 +151,7 @@ void help(std::ostream& output)
               "  --refinement-max-analysis-boundary-passes N Cumulative boundary-finalization work.\n"
               "  --refinement-max-invalidated-records N      Cumulative invalidation work.\n"
               "  --refinement-max-analysis-transactions N    Cumulative immutable transactions.\n"
-              "  --max-ir-operations N          Global execution IR budget.\n"
+              "  --max-ir-operations N          Explicit global execution IR hard limit.\n"
               "  --max-function-transitions N   Global guest transition budget.\n"
               "  --max-call-depth N             Guest call-depth budget.\n"
               "  --max-events N                 Trace event budget.\n"
@@ -456,6 +456,21 @@ int main(int argc, char** argv)
             continue;
         }
 
+        if (take_value(index, argc, argv, "--max-ir-operations", value))
+        {
+            std::uint64_t parsed = 0U;
+            if (!parse_u64(value, parsed) || parsed == 0U ||
+                parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+            {
+                std::cerr << "invalid numeric option\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
+            execution_options.budgets.max_ir_operations = static_cast<std::size_t>(parsed);
+            execution_options.budgets.ir_operation_limit_provenance =
+                execution::IrOperationLimitProvenance::ExplicitCli;
+            continue;
+        }
+
         bool invalid_number = false;
         const auto parse_number = [&]<typename T>(std::string_view name, T& destination) {
             if (argument != name) return false;
@@ -509,7 +524,6 @@ int main(int argc, char** argv)
                          refinement_budgets.analysis.max_invalidated_records) ||
             parse_number("--refinement-max-analysis-transactions",
                          refinement_budgets.analysis.max_transactions) ||
-            parse_number("--max-ir-operations", execution_options.budgets.max_ir_operations) ||
             parse_number("--max-function-transitions", execution_options.budgets.max_function_transitions) ||
             parse_number("--max-call-depth", execution_options.budgets.max_call_depth) ||
             parse_number("--max-events", execution_options.budgets.max_events) ||
@@ -1251,6 +1265,20 @@ int main(int argc, char** argv)
                 return static_cast<int>(ExitCode::InfrastructureFailure);
             }
             auto run_result = std::move(run).value();
+            if (run_result.stop_reason == execution::ExecutionStopReason::GuestMemoryResourceLimitExceeded &&
+                last_run_result)
+            {
+                // A new refinement generation owns a fresh controlled stack.
+                // If the process-wide guest-memory resource prevents that
+                // generation from starting, retain the last complete
+                // execution evidence and attach the actual next blocker.
+                auto blocked_result = std::move(last_run_result.value());
+                blocked_result.stop_reason = run_result.stop_reason;
+                blocked_result.diagnostic = run_result.diagnostic;
+                blocked_result.indirect_target_refinement = worklist.summary();
+                final_result = std::move(blocked_result);
+                break;
+            }
             if (run_result.stop_reason == execution::ExecutionStopReason::UnknownGuestFunction)
             {
                 for (const auto& assessment : run_result.indirect_target_discovery)

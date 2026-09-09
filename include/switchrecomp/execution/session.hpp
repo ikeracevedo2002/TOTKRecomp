@@ -30,6 +30,16 @@ enum class EntrySelectionKind
 
 [[nodiscard]] const char* entry_selection_kind_name(EntrySelectionKind kind) noexcept;
 
+enum class IrOperationLimitProvenance
+{
+    OrdinaryDefault,
+    ExplicitCli,
+    ExplicitLibraryApi,
+};
+
+[[nodiscard]] const char* ir_operation_limit_provenance_name(
+    IrOperationLimitProvenance provenance) noexcept;
+
 struct EntrySelection
 {
     EntrySelectionKind kind = EntrySelectionKind::DynamicInit;
@@ -66,6 +76,7 @@ enum class ExecutionStopReason
     IrOperationLimitExceeded,
     EventLimitExceeded,
     GuestBlockLimitExceeded,
+    GuestMemoryResourceLimitExceeded,
     InvalidCrossModuleTarget,
     IndirectTargetRefinementBudgetExceeded,
 };
@@ -130,7 +141,13 @@ struct ExecutionEvent
 
 struct ExecutionBudgets
 {
-    std::size_t max_ir_operations = 100'000U;
+    // Absent in the ordinary profile: execution is bounded by the finite
+    // guest-block/function/refinement resources below. A present value is an
+    // exact global compatibility guard, not a slice quantum.
+    std::optional<std::size_t> max_ir_operations;
+    IrOperationLimitProvenance ir_operation_limit_provenance =
+        IrOperationLimitProvenance::OrdinaryDefault;
+    std::size_t slice_ir_operations = 4'096U;
     std::size_t max_function_transitions = 1'000U;
     std::size_t max_call_depth = 128U;
     std::size_t max_events = 4'096U;
@@ -285,7 +302,7 @@ struct ExecutionSessionResult
 {
     // M26 separates productive refinement progress from independently
     // bounded no-progress retries while retaining deterministic evidence.
-    static constexpr std::uint32_t schema_version = 14U;
+    static constexpr std::uint32_t schema_version = 15U;
 
     analysis::ModuleIdentity identity;
     EntrySelection entry;
@@ -328,6 +345,13 @@ struct ExecutionSessionResult
     std::size_t ir_operations = 0U;
     std::size_t guest_blocks = 0U;
     std::size_t guest_instruction_count = 0U;
+    std::size_t execution_slices = 0U;
+    std::size_t resumable_yields = 0U;
+    std::size_t resumes = 0U;
+    std::size_t mid_block_resumes = 0U;
+    std::size_t maximum_ir_operations_in_slice = 0U;
+    std::optional<std::uint32_t> terminal_ir_block;
+    std::optional<std::size_t> terminal_ir_operation_index;
     std::size_t instructions_after_former_blocker = 0U;
     std::size_t instructions_after_smulh = 0U;
     std::size_t maximum_call_depth = 0U;

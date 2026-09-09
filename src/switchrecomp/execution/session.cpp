@@ -1146,6 +1146,18 @@ const char* entry_selection_kind_name(EntrySelectionKind kind) noexcept
     return "unknown";
 }
 
+const char* ir_operation_limit_provenance_name(
+    IrOperationLimitProvenance provenance) noexcept
+{
+    switch (provenance)
+    {
+    case IrOperationLimitProvenance::OrdinaryDefault: return "ordinary_default";
+    case IrOperationLimitProvenance::ExplicitCli: return "explicit_cli";
+    case IrOperationLimitProvenance::ExplicitLibraryApi: return "explicit_library_api";
+    }
+    return "unknown";
+}
+
 Result<EntrySelection> select_entry(const analysis::ModuleIdentity& identity,
                                     EntrySelectionKind kind,
                                     std::optional<GuestAddress> analyst_address)
@@ -1234,6 +1246,8 @@ const char* execution_stop_reason_name(ExecutionStopReason reason) noexcept
     case ExecutionStopReason::IrOperationLimitExceeded: return "ir_operation_limit_exceeded";
     case ExecutionStopReason::EventLimitExceeded: return "event_limit_exceeded";
     case ExecutionStopReason::GuestBlockLimitExceeded: return "guest_block_limit_exceeded";
+    case ExecutionStopReason::GuestMemoryResourceLimitExceeded:
+        return "guest_memory_resource_limit_exceeded";
     case ExecutionStopReason::InvalidCrossModuleTarget: return "invalid_cross_module_target";
     case ExecutionStopReason::IndirectTargetRefinementBudgetExceeded:
         return "indirect_target_refinement_budget_exceeded";
@@ -1640,6 +1654,7 @@ ExecutionStopReason ExecutionSession::classify_error(const Error& error) const n
     {
     case ErrorCode::ExecutionTrap: return ExecutionStopReason::GuestTrap;
     case ErrorCode::ExecutionLimitExceeded: return ExecutionStopReason::IrOperationLimitExceeded;
+    case ErrorCode::ResourceLimit: return ExecutionStopReason::GuestMemoryResourceLimitExceeded;
     case ErrorCode::FunctionBoundaryConflict:
         return ExecutionStopReason::FunctionOwnershipConflict;
     case ErrorCode::UnknownGuestFunction: return ExecutionStopReason::UnknownGuestFunction;
@@ -1890,7 +1905,9 @@ Result<void> ExecutionSession::stop(ExecutionSessionResult& result, ExecutionSto
              reason == ExecutionStopReason::InvalidIndirectTarget ||
              reason == ExecutionStopReason::IndirectTargetRefinementBudgetExceeded)
         event_kind = ExecutionEventKind::IndirectBoundary;
-    else if (reason == ExecutionStopReason::MemoryFault) event_kind = ExecutionEventKind::MemoryFault;
+    else if (reason == ExecutionStopReason::MemoryFault ||
+             reason == ExecutionStopReason::GuestMemoryResourceLimitExceeded)
+        event_kind = ExecutionEventKind::MemoryFault;
     else if (reason == ExecutionStopReason::RuntimeImportUnimplemented ||
              reason == ExecutionStopReason::RuntimeImportAbiViolation ||
              reason == ExecutionStopReason::RuntimeImportMemoryFault ||
@@ -2039,7 +2056,7 @@ Result<void> ExecutionSession::dispatch_call(const runtime::ExecutionResult& bou
     {
         return Result<void>::success();
     }
-    current_.interpreter.current_block = boundary.boundary.continuation_block;
+    current_.interpreter.resume_at(boundary.boundary.continuation_block);
     suspended_frames_.push_back(std::move(current_));
     current_ = SessionFrame{};
     current_.call_site_pc = boundary.boundary.source_guest_pc;
@@ -2309,7 +2326,7 @@ Result<void> ExecutionSession::dispatch_runtime_import(
                         "handled external call has no valid guest continuation",
                         boundary.boundary.target_guest_address, &boundary);
         }
-        current_.interpreter.current_block = boundary.boundary.continuation_block;
+        current_.interpreter.resume_at(boundary.boundary.continuation_block);
         cpu_.pc = boundary.boundary.continuation_guest_pc;
         return Result<void>::success();
     }
@@ -2349,7 +2366,8 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         return Result<ExecutionSessionResult>::failure(
             make_error(ErrorCode::InvalidArgument, "execution session is already running"));
     }
-    if (memory_ == nullptr || function_map_ == nullptr || options_.budgets.max_ir_operations == 0U ||
+    if (memory_ == nullptr || function_map_ == nullptr || options_.budgets.slice_ir_operations == 0U ||
+        (options_.budgets.max_ir_operations && options_.budgets.max_ir_operations.value() == 0U) ||
         options_.budgets.max_function_transitions == 0U || options_.budgets.max_call_depth == 0U ||
         options_.budgets.max_events == 0U || options_.budgets.max_guest_blocks == 0U)
     {
@@ -2485,8 +2503,8 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     const auto stack = map_stack(result);
     if (!stack)
     {
-        running_ = false;
-        return Result<ExecutionSessionResult>::failure(stack.error());
+        (void)stop(result, classify_error(stack.error()), stack.error().message);
+        return Result<ExecutionSessionResult>::success(std::move(result));
     }
     if (!running_)
     {
@@ -2520,6 +2538,17 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     std::optional<memory::GuestAddress> former_blocker_pc;
     bool smulh_seen = false;
     std::optional<memory::GuestAddress> smulh_pc;
+    bool resumable_continuation = false;
+    const auto add_counter = [](std::size_t& total, std::size_t delta) -> Result<void> {
+        const auto updated = checked_add(total, delta);
+        if (!updated)
+        {
+            return Result<void>::failure(make_error(
+                ErrorCode::ArithmeticOverflow, "execution accounting counter overflowed"));
+        }
+        total = updated.value();
+        return Result<void>::success();
+    };
     while (running_)
     {
         const auto function_result = lift_for_execution(current_.function_entry, result);
@@ -2530,15 +2559,13 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
             break;
         }
         const auto* function = function_result.value();
-        if (result.ir_operations >= options_.budgets.max_ir_operations)
-        {
-            (void)stop(result, ExecutionStopReason::IrOperationLimitExceeded,
-                       "session IR operation limit exhausted");
-            break;
-        }
         runtime::ExecutionOptions interpreter_options;
-        interpreter_options.max_ir_operations =
-            options_.budgets.max_ir_operations - result.ir_operations;
+        interpreter_options.max_ir_operations = options_.budgets.max_ir_operations
+                                                    ? std::optional<std::size_t>(
+                                                          options_.budgets.max_ir_operations.value() -
+                                                          result.ir_operations)
+                                                    : std::nullopt;
+        interpreter_options.slice_ir_operations = options_.budgets.slice_ir_operations;
         interpreter_options.observed_guest_pcs =
             std::span<const memory::GuestAddress>(instruction_observation_targets_);
         interpreter_options.max_observed_guest_pcs = 32U;
@@ -2549,9 +2576,61 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
             (void)stop(result, classify_error(step.error()), step.error().message);
             break;
         }
-        result.ir_operations += step.value().executed_operations;
-        result.guest_blocks += step.value().executed_blocks;
-        result.guest_instruction_count += step.value().executed_guest_instructions;
+        if (const auto added = add_counter(result.ir_operations, step.value().executed_operations);
+            !added)
+        {
+            running_ = false;
+            return Result<ExecutionSessionResult>::failure(added.error());
+        }
+        if (const auto added = add_counter(result.guest_blocks, step.value().executed_blocks);
+            !added)
+        {
+            running_ = false;
+            return Result<ExecutionSessionResult>::failure(added.error());
+        }
+        if (const auto added = add_counter(result.guest_instruction_count,
+                                           step.value().executed_guest_instructions);
+            !added)
+        {
+            running_ = false;
+            return Result<ExecutionSessionResult>::failure(added.error());
+        }
+        if (const auto added = add_counter(result.execution_slices, 1U); !added)
+        {
+            running_ = false;
+            return Result<ExecutionSessionResult>::failure(added.error());
+        }
+        if (resumable_continuation)
+        {
+            if (const auto added = add_counter(result.resumes, 1U); !added)
+            {
+                running_ = false;
+                return Result<ExecutionSessionResult>::failure(added.error());
+            }
+            if (current_.interpreter.ir_operation_index != 0U)
+            {
+                if (const auto added = add_counter(result.mid_block_resumes, 1U); !added)
+                {
+                    running_ = false;
+                    return Result<ExecutionSessionResult>::failure(added.error());
+                }
+            }
+        }
+        result.maximum_ir_operations_in_slice = std::max(
+            result.maximum_ir_operations_in_slice, step.value().executed_operations);
+        if (step.value().status == runtime::ExecutionStatus::Yielded)
+        {
+            if (const auto added = add_counter(result.resumable_yields, 1U); !added)
+            {
+                running_ = false;
+                return Result<ExecutionSessionResult>::failure(added.error());
+            }
+            resumable_continuation = true;
+        }
+        else
+        {
+            resumable_continuation = false;
+        }
         for (const auto& observed_execution : step.value().observed_instruction_executions)
         {
             const auto already_recorded = std::find_if(
@@ -2619,9 +2698,15 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         const auto& boundary = step.value().boundary;
         if (step.value().status == runtime::ExecutionStatus::LimitExceeded)
         {
+            result.terminal_ir_block = step.value().resume_block;
+            result.terminal_ir_operation_index = step.value().resume_operation_index;
             (void)stop(result, ExecutionStopReason::IrOperationLimitExceeded,
                        "session IR operation limit exhausted", std::nullopt, &step.value());
             break;
+        }
+        if (step.value().status == runtime::ExecutionStatus::Yielded)
+        {
+            continue;
         }
         switch (boundary.kind)
         {
@@ -2692,6 +2777,14 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         case runtime::ExecutionBoundaryKind::BudgetExhaustion:
             (void)stop(result, ExecutionStopReason::IrOperationLimitExceeded,
                        "session IR operation limit exhausted", std::nullopt, &step.value());
+            break;
+        case runtime::ExecutionBoundaryKind::SliceExhaustion:
+            // A yielded step is consumed above. Reaching this case would mean
+            // an inconsistent interpreter status, so fail closed as an
+            // unsupported semantic boundary rather than publishing progress.
+            (void)stop(result, ExecutionStopReason::UnsupportedSemantic,
+                       "interpreter returned an untyped slice boundary", std::nullopt,
+                       &step.value());
             break;
         case runtime::ExecutionBoundaryKind::None:
             (void)stop(result, ExecutionStopReason::UnsupportedSemantic,
@@ -3091,6 +3184,16 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                     {"ir_operations", result.ir_operations},
                                     {"guest_blocks", result.guest_blocks},
                                     {"guest_instruction_count", result.guest_instruction_count},
+                                    {"execution_slices", result.execution_slices},
+                                    {"resumable_yields", result.resumable_yields},
+                                    {"resumes", result.resumes},
+                                    {"mid_block_resumes", result.mid_block_resumes},
+                                    {"maximum_ir_operations_in_slice",
+                                     result.maximum_ir_operations_in_slice},
+                                    {"terminal_ir_cursor", result.terminal_ir_block
+                                                                  ? json{{"block", result.terminal_ir_block.value()},
+                                                                         {"operation_index", result.terminal_ir_operation_index.value_or(0U)}}
+                                                                  : json(nullptr)},
                                     {"instructions_after_former_blocker",
                                      result.instructions_after_former_blocker},
                                     {"instructions_after_smulh", result.instructions_after_smulh},
@@ -3130,7 +3233,19 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                      indirect_target_refinement_json(result.indirect_target_refinement)},
                                     {"indirect_target_discovery", std::move(indirect_target_discovery)},
                                     {"diagnostic", result.diagnostic}}},
-                {"budgets", json{{"max_ir_operations", result.options.budgets.max_ir_operations},
+                {"budgets", json{{"max_ir_operations", result.options.budgets.max_ir_operations
+                                                               ? json(result.options.budgets.max_ir_operations.value())
+                                                               : json(nullptr)},
+                                  {"ir_operation_limit_provenance",
+                                   result.options.budgets.max_ir_operations
+                                       ? ir_operation_limit_provenance_name(
+                                             result.options.budgets.ir_operation_limit_provenance ==
+                                                     IrOperationLimitProvenance::OrdinaryDefault
+                                                 ? IrOperationLimitProvenance::ExplicitLibraryApi
+                                                 : result.options.budgets.ir_operation_limit_provenance)
+                                       : ir_operation_limit_provenance_name(
+                                             IrOperationLimitProvenance::OrdinaryDefault)},
+                                  {"slice_ir_operations", result.options.budgets.slice_ir_operations},
                                   {"max_function_transitions", result.options.budgets.max_function_transitions},
                                   {"max_call_depth", result.options.budgets.max_call_depth},
                                   {"max_events", result.options.budgets.max_events},
