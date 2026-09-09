@@ -138,7 +138,7 @@ void help(std::ostream& output)
               "  --analysis-profile NAME        whole_module or execution_closure.\n"
               "  --refinement-max-stagnant-rounds N No-progress refinement retry budget.\n"
               "  --refinement-max-rounds N      Deprecated alias for stagnant-round budget.\n"
-              "  --refinement-max-candidates N  Unique indirect-candidate budget.\n"
+              "  --refinement-max-candidates N  Explicit legacy unique-candidate ceiling.\n"
               "  --refinement-max-assessments N Candidate-assessment budget.\n"
               "  --refinement-max-promotions N  Deprecated legacy event guard.\n"
               "  --refinement-max-rebuilds N    Deprecated legacy event guard.\n"
@@ -282,6 +282,7 @@ int main(int argc, char** argv)
     std::set<analysis::AnalysisBudgetDimension> analysis_cli_overrides;
     std::set<analysis::IndirectTargetRefinementAnalysisDimension>
         refinement_analysis_cli_overrides;
+    bool refinement_candidate_limit_cli_override = false;
     bool analysis_profile_cli_override = false;
 
     const auto apply_analysis_profile = [&](analysis::AnalysisBudgets profile,
@@ -438,6 +439,23 @@ int main(int argc, char** argv)
             continue;
         }
 
+        if (take_value(index, argc, argv, "--refinement-max-candidates", value))
+        {
+            std::uint64_t parsed = 0U;
+            if (!parse_u64(value, parsed) || parsed == 0U ||
+                parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+            {
+                std::cerr << "invalid numeric option\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
+            refinement_budgets.max_unique_candidates = static_cast<std::size_t>(parsed);
+            refinement_budgets.candidate_limit_provenance = analysis::AnalysisBudgetProvenance{
+                analysis::AnalysisBudgetProvenanceKind::ExplicitCliOverride,
+                "run_entry_cli"};
+            refinement_candidate_limit_cli_override = true;
+            continue;
+        }
+
         bool invalid_number = false;
         const auto parse_number = [&]<typename T>(std::string_view name, T& destination) {
             if (argument != name) return false;
@@ -470,7 +488,6 @@ int main(int argc, char** argv)
             parse_number("--refinement-max-stagnant-rounds",
                          refinement_budgets.max_stagnant_rounds) ||
             parse_number("--refinement-max-rounds", refinement_budgets.max_stagnant_rounds) ||
-            parse_number("--refinement-max-candidates", refinement_budgets.max_unique_candidates) ||
             parse_number("--refinement-max-assessments", refinement_budgets.max_candidate_assessments) ||
             parse_number("--refinement-max-promotions", refinement_budgets.max_promotions) ||
             parse_number("--refinement-max-rebuilds", refinement_budgets.max_map_rebuilds) ||
@@ -699,6 +716,24 @@ int main(int argc, char** argv)
             if (!refinement_budget_object.is_object())
                 throw std::runtime_error(
                     "refinement_analysis budgets configuration must be an object");
+            if (!refinement_candidate_limit_cli_override &&
+                refinement_budget_object.contains("max_unique_candidates"))
+            {
+                const auto& value = refinement_budget_object.at("max_unique_candidates");
+                if (!value.is_number_unsigned())
+                    throw std::runtime_error(
+                        "legacy candidate limit must be an unsigned integer");
+                const auto parsed = value.get<std::uint64_t>();
+                if (parsed == 0U ||
+                    parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+                    throw std::runtime_error(
+                        "legacy candidate limit is zero or overflows its type");
+                refinement_budgets.max_unique_candidates = static_cast<std::size_t>(parsed);
+                refinement_budgets.candidate_limit_provenance =
+                    analysis::AnalysisBudgetProvenance{
+                        analysis::AnalysisBudgetProvenanceKind::LocalConfigurationOverride,
+                        "run_entry_local_config"};
+            }
             const auto parse_local_refinement_budget =
                 [&](std::string_view key, auto& destination,
                     analysis::AnalysisBudgetProvenance& provenance,
@@ -1055,6 +1090,14 @@ int main(int argc, char** argv)
             print_error(process.error());
             return static_cast<int>(ExitCode::InfrastructureFailure);
         }
+        const auto candidate_universe =
+            analysis::derive_indirect_target_candidate_universe(process.value());
+        if (!candidate_universe)
+        {
+            print_error(candidate_universe.error());
+            return static_cast<int>(ExitCode::InfrastructureFailure);
+        }
+        refinement_budgets.candidate_universe = candidate_universe.value();
         const auto* primary_process_module = process.value().module(configured_primary);
         if (primary_process_module == nullptr)
         {

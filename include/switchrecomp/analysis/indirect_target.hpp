@@ -6,8 +6,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -348,6 +350,24 @@ struct IndirectTargetCandidateIdentity
 [[nodiscard]] IndirectTargetCandidateIdentity indirect_target_candidate_identity(
     const ObservedIndirectTarget& observed);
 
+// The current outer worklist charges one persistent candidate record per
+// target-module/address pair.  This universe is the finite set of aligned
+// instruction slots in the immutable executable image.  The representation
+// is a count, not an eagerly materialized address set.
+struct IndirectTargetCandidateUniverse
+{
+    std::size_t executable_instruction_slots = std::numeric_limits<std::size_t>::max() / 4U;
+    AnalysisBudgetProvenance provenance{
+        AnalysisBudgetProvenanceKind::DerivedStructuralBound,
+        "aarch64_guest_address_domain"};
+};
+
+[[nodiscard]] Result<IndirectTargetCandidateUniverse>
+derive_indirect_target_candidate_universe(std::span<const ModuleIdentity> modules);
+
+[[nodiscard]] Result<IndirectTargetCandidateUniverse>
+derive_indirect_target_candidate_universe(const ProcessImage& process_image);
+
 enum class IndirectTargetRefinementAnalysisDimension : std::uint8_t
 {
     None,
@@ -434,6 +454,7 @@ enum class IndirectTargetRefinementBudgetDimension : std::uint8_t
     None,
     StagnantRounds,
     UniqueCandidates,
+    StructuralCandidateUniverse,
     CandidateAssessments,
     Promotions,
     MapRebuilds,
@@ -460,13 +481,18 @@ struct IndirectTargetRefinementBudgets
     // This budget applies only to consecutive attempts which make no
     // monotonic worklist transition.
     std::size_t max_stagnant_rounds = 64U;
-    std::size_t max_unique_candidates = 256U;
+    // Optional pre-M28 compatibility guard. Ordinary operation derives the
+    // candidate bound from candidate_universe instead of using a fixed count.
+    std::optional<std::size_t> max_unique_candidates;
+    AnalysisBudgetProvenance candidate_limit_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "not_configured"};
     std::size_t max_candidate_assessments = 512U;
     // Retained only for explicit pre-M27 compatibility. Ordinary defaults do
     // not charge valid monotonic work to these successful-event counts.
     std::size_t max_promotions = 128U;
     std::size_t max_map_rebuilds = 128U;
     bool legacy_event_limits = false;
+    IndirectTargetCandidateUniverse candidate_universe;
     IndirectTargetRefinementAnalysisBudgets analysis;
 };
 
@@ -490,6 +516,8 @@ struct IndirectTargetRefinementSummary
     std::size_t observations_received = 0U;
     std::size_t unique_observations = 0U;
     std::size_t unique_candidates = 0U;
+    std::size_t candidate_records = 0U;
+    std::size_t structurally_ineligible_candidates = 0U;
     std::size_t candidate_assessments = 0U;
     std::size_t terminal_resolutions = 0U;
     std::size_t successful_promotions = 0U;
@@ -519,9 +547,11 @@ struct IndirectTargetRefinementObservationResult
 struct IndirectTargetAssessment;
 
 // Deterministic, finite outer-discovery accounting.  The worklist stores one
-// logical work item per target/provenance identity, while the unique-candidate
-// quota is charged once per target module/address.  Every distinct guest-side
-// observation provenance remains in its representative observation.
+// sparse logical work item per target module/address.  The full source,
+// control-flow, register, and pointer-provenance identity remains in the
+// representative observation/history, so coalescing records does not discard
+// guest-side evidence.  The structural candidate universe therefore bounds
+// both unique target records and persistent candidate storage.
 class IndirectTargetRefinementWorklist
 {
   public:
@@ -554,14 +584,18 @@ class IndirectTargetRefinementWorklist
         ObservedIndirectTarget observed;
         bool pending = false;
         bool processed = false;
+        bool promoted = false;
         std::size_t processed_generation = 0U;
     };
 
+    using TargetIdentity = std::pair<std::string, memory::GuestAddress>;
+
+    [[nodiscard]] std::size_t candidate_limit() const noexcept;
+
     IndirectTargetRefinementBudgets budgets_;
     IndirectTargetRefinementSummary counters_;
-    std::map<IndirectTargetCandidateIdentity, WorkItem> work_items_;
+    std::map<TargetIdentity, WorkItem> work_items_;
     std::map<std::string, bool> unique_observations_;
-    std::map<std::pair<std::string, memory::GuestAddress>, bool> unique_target_candidates_;
     std::size_t map_generation_ = 0U;
     std::optional<IndirectTargetCandidateIdentity> overflow_pending_;
     bool round_active_ = false;
@@ -575,6 +609,9 @@ struct IndirectTargetValidation
     bool mapped = false;
     bool executable = false;
     bool unique_module_owner = false;
+    // This is an immutable process-image eligibility result only. It is not
+    // certification and never authorizes promotion or guest dispatch.
+    bool structurally_eligible = false;
     std::string target_module;
     std::optional<memory::GuestAddress> target_module_base;
     IndirectTargetOwnership ownership = IndirectTargetOwnership::Unknown;

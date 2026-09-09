@@ -1250,6 +1250,7 @@ Result<IndirectTargetAssessment> assess_indirect_target(
     }
     auto& validation = assessment.validation;
     auto& decision = assessment.decision;
+    validation.structurally_eligible = false;
     validation.nonzero = observed.target != 0U;
     validation.aligned = (observed.target & 0x3U) == 0U;
     if (!validation.nonzero || !validation.aligned)
@@ -1324,6 +1325,10 @@ Result<IndirectTargetAssessment> assess_indirect_target(
         validation.unique_module_owner = false;
         return complete_assessment(std::move(assessment));
     }
+    // Executability, checked four-byte coverage, and unique immutable
+    // process-module ownership are the only structural facts used here. The
+    // later evidence/CFG/certification path remains authoritative for trust.
+    validation.structurally_eligible = true;
 
     const auto exact_count = static_cast<std::size_t>(std::count_if(
         maps.begin(), maps.end(), [](const auto& item) { return item.exact != nullptr; }));
@@ -1863,6 +1868,116 @@ IndirectTargetCandidateIdentity indirect_target_candidate_identity(
                                           observed.guest_load_address};
 }
 
+namespace
+{
+
+using CandidateModuleIdentity = const ModuleIdentity*;
+
+[[nodiscard]] Result<IndirectTargetCandidateUniverse>
+derive_indirect_target_candidate_universe_impl(
+    std::span<const CandidateModuleIdentity> modules)
+{
+    std::vector<CandidateModuleIdentity> ordered(modules.begin(), modules.end());
+    std::sort(ordered.begin(), ordered.end(), [](const auto* left, const auto* right) {
+        return left->module < right->module;
+    });
+
+    IndirectTargetCandidateUniverse result;
+    result.executable_instruction_slots = 0U;
+    result.provenance = AnalysisBudgetProvenance{
+        AnalysisBudgetProvenanceKind::DerivedStructuralBound,
+        "process_image_executable_instruction_slots"};
+
+    for (std::size_t index = 0U; index < ordered.size(); ++index)
+    {
+        const auto* module = ordered[index];
+        if (module == nullptr || module->module.empty())
+        {
+            return Result<IndirectTargetCandidateUniverse>::failure(make_error(
+                ErrorCode::InvalidArgument,
+                "candidate universe requires non-empty module identities"));
+        }
+        if (index != 0U && ordered[index - 1U]->module == module->module)
+        {
+            return Result<IndirectTargetCandidateUniverse>::failure(make_error(
+                ErrorCode::DuplicateModuleIdentity,
+                "candidate universe requires unique module identities"));
+        }
+
+        std::vector<std::pair<GuestAddress, GuestAddress>> ranges;
+        ranges.reserve(module->executable_ranges.size());
+        for (const auto& range : module->executable_ranges)
+        {
+            if (range.size == 0U) continue;
+            const auto end = checked_add_u64(range.base, range.size);
+            if (!end)
+            {
+                return Result<IndirectTargetCandidateUniverse>::failure(make_error(
+                    ErrorCode::InvalidGuestAddress,
+                    "executable range overflows while deriving candidate universe"));
+            }
+            ranges.emplace_back(range.base, end.value());
+        }
+        std::sort(ranges.begin(), ranges.end());
+
+        std::vector<std::pair<GuestAddress, GuestAddress>> merged;
+        for (const auto& range : ranges)
+        {
+            if (merged.empty() || range.first > merged.back().second)
+            {
+                merged.push_back(range);
+                continue;
+            }
+            merged.back().second = std::max(merged.back().second, range.second);
+        }
+
+        for (const auto& [base, end] : merged)
+        {
+            const auto aligned_base = checked_add_u64(base, 3U);
+            if (!aligned_base)
+            {
+                return Result<IndirectTargetCandidateUniverse>::failure(make_error(
+                    ErrorCode::InvalidGuestAddress,
+                    "executable range alignment overflows while deriving candidate universe"));
+            }
+            const auto first = aligned_base.value() & ~GuestAddress{3U};
+            if (first >= end) continue;
+            const auto slots = (end - first) / 4U;
+            if (slots > std::numeric_limits<std::size_t>::max() -
+                            result.executable_instruction_slots)
+            {
+                return Result<IndirectTargetCandidateUniverse>::failure(make_error(
+                    ErrorCode::ArithmeticOverflow,
+                    "executable instruction-slot count overflows candidate universe"));
+            }
+            result.executable_instruction_slots += static_cast<std::size_t>(slots);
+        }
+    }
+    return Result<IndirectTargetCandidateUniverse>::success(std::move(result));
+}
+
+} // namespace
+
+Result<IndirectTargetCandidateUniverse> derive_indirect_target_candidate_universe(
+    std::span<const ModuleIdentity> modules)
+{
+    std::vector<CandidateModuleIdentity> views;
+    views.reserve(modules.size());
+    for (const auto& module : modules) views.push_back(&module);
+    return derive_indirect_target_candidate_universe_impl(
+        std::span<const CandidateModuleIdentity>(views.data(), views.size()));
+}
+
+Result<IndirectTargetCandidateUniverse> derive_indirect_target_candidate_universe(
+    const ProcessImage& process_image)
+{
+    std::vector<CandidateModuleIdentity> views;
+    views.reserve(process_image.modules().size());
+    for (const auto& module : process_image.modules()) views.push_back(&module.identity);
+    return derive_indirect_target_candidate_universe_impl(
+        std::span<const CandidateModuleIdentity>(views.data(), views.size()));
+}
+
 std::string_view indirect_target_refinement_budget_dimension_name(
     IndirectTargetRefinementBudgetDimension dimension) noexcept
 {
@@ -1873,6 +1988,8 @@ std::string_view indirect_target_refinement_budget_dimension_name(
         return "stagnant_rounds";
     case IndirectTargetRefinementBudgetDimension::UniqueCandidates:
         return "unique_candidates";
+    case IndirectTargetRefinementBudgetDimension::StructuralCandidateUniverse:
+        return "structural_candidate_universe";
     case IndirectTargetRefinementBudgetDimension::CandidateAssessments:
         return "candidate_assessments";
     case IndirectTargetRefinementBudgetDimension::Promotions: return "promotions";
@@ -1926,8 +2043,21 @@ IndirectTargetRefinementWorklist::IndirectTargetRefinementWorklist(
     IndirectTargetRefinementBudgets budgets)
     : budgets_(budgets)
 {
+    if (budgets_.max_unique_candidates &&
+        budgets_.candidate_limit_provenance.detail == "not_configured")
+    {
+        budgets_.candidate_limit_provenance = AnalysisBudgetProvenance{
+            AnalysisBudgetProvenanceKind::ExplicitApiOverride, "library_api"};
+    }
     counters_.configured = budgets_;
     counters_.analysis.configured = budgets_.analysis;
+}
+
+std::size_t IndirectTargetRefinementWorklist::candidate_limit() const noexcept
+{
+    const auto structural = budgets_.candidate_universe.executable_instruction_slots;
+    if (!budgets_.max_unique_candidates) return structural;
+    return std::min(structural, budgets_.max_unique_candidates.value());
 }
 
 IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::observe(
@@ -1961,29 +2091,42 @@ IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::obse
         return result;
     }
 
+    if (!assessment.validation.structurally_eligible)
+    {
+        // The assessment remains in the execution result, including its
+        // provenance and typed rejection. It does not consume a persistent
+        // candidate record or the structural target-slot universe.
+        if (result.newly_unique_observation)
+        {
+            ++counters_.structurally_ineligible_candidates;
+            ++counters_.rejected_candidates;
+            ++counters_.terminal_resolutions;
+            round_productive_ = round_active_ || round_productive_;
+        }
+        return result;
+    }
+
     const auto target_identity = std::make_pair(identity.target_module, identity.target);
-    const bool newly_unique_target =
-        unique_target_candidates_.find(target_identity) == unique_target_candidates_.end();
-    auto item = work_items_.find(identity);
+    auto item = work_items_.find(target_identity);
     if (item == work_items_.end())
     {
-        if (newly_unique_target && counters_.unique_candidates >= budgets_.max_unique_candidates)
+        if (counters_.unique_candidates >= candidate_limit())
         {
+            const auto dimension = budgets_.max_unique_candidates &&
+                                           counters_.unique_candidates >=
+                                               budgets_.max_unique_candidates.value()
+                                       ? IndirectTargetRefinementBudgetDimension::UniqueCandidates
+                                       : IndirectTargetRefinementBudgetDimension::StructuralCandidateUniverse;
             counters_.exhaustion = IndirectTargetRefinementExhaustion{
-                IndirectTargetRefinementBudgetDimension::UniqueCandidates,
-                counters_.unique_candidates, budgets_.max_unique_candidates, {}, 0U,
-                std::nullopt};
+                dimension, counters_.unique_candidates, candidate_limit(), identity.target_module,
+                map_generation_, identity};
             overflow_pending_ = identity;
             result.accepted = false;
             return result;
         }
-        if (newly_unique_target)
-        {
-            unique_target_candidates_.emplace(target_identity, true);
-            ++counters_.unique_candidates;
-            result.newly_unique_candidate = true;
-            round_productive_ = round_active_ || round_productive_;
-        }
+        ++counters_.unique_candidates;
+        result.newly_unique_candidate = true;
+        round_productive_ = round_active_ || round_productive_;
         WorkItem work;
         work.observed = std::move(normalized);
         work.observed.observation_count = observed.observation_count;
@@ -1993,7 +2136,8 @@ IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::obse
                        assessment.decision.kind == IndirectTargetDecisionKind::TrustedNewEntry;
         work.processed = !work.pending;
         work.processed_generation = map_generation_;
-        work_items_.emplace(identity, std::move(work));
+        work_items_.emplace(target_identity, std::move(work));
+        counters_.candidate_records = work_items_.size();
         if (!assessment.decision.eligible_for_promotion)
         {
             ++counters_.rejected_candidates;
@@ -2049,11 +2193,15 @@ IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::obse
     if (assessment.decision.eligible_for_promotion &&
         assessment.decision.kind == IndirectTargetDecisionKind::TrustedNewEntry)
     {
-        if (!work.pending && work.processed && work.processed_generation < map_generation_)
+        if (!work.pending && work.processed &&
+            (!work.promoted || work.processed_generation < map_generation_))
         {
             work.pending = true;
-            result.reconsidered_after_map_change = true;
-            ++counters_.candidates_reconsidered_after_map_change;
+            if (work.promoted && work.processed_generation < map_generation_)
+            {
+                result.reconsidered_after_map_change = true;
+                ++counters_.candidates_reconsidered_after_map_change;
+            }
             round_productive_ = round_active_ || round_productive_;
         }
         else if (!work.processed)
@@ -2065,6 +2213,7 @@ IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::obse
     else
     {
         const bool was_unresolved = work.pending || !work.processed;
+        if (work.pending || work.promoted) return result;
         if (was_unresolved)
         {
             ++counters_.terminal_resolutions;
@@ -2212,7 +2361,7 @@ bool IndirectTargetRefinementWorklist::can_commit_refinement(
 void IndirectTargetRefinementWorklist::record_terminal_candidate(
     const IndirectTargetCandidateIdentity& candidate) noexcept
 {
-    const auto item = work_items_.find(candidate);
+    const auto item = work_items_.find(std::make_pair(candidate.target_module, candidate.target));
     if (item == work_items_.end()) return;
     const bool was_unresolved = item->second.pending || !item->second.processed;
     item->second.pending = false;
@@ -2246,11 +2395,12 @@ void IndirectTargetRefinementWorklist::record_promotion(
     counters_.analysis.boundary_finalization_passes += work.boundary_finalization_passes;
     counters_.analysis.invalidated_records += work.invalidated_records;
     counters_.analysis.transactions += work.transactions;
-    const auto item = work_items_.find(candidate);
+    const auto item = work_items_.find(std::make_pair(candidate.target_module, candidate.target));
     if (item != work_items_.end())
     {
         item->second.pending = false;
         item->second.processed = true;
+        item->second.promoted = true;
         item->second.processed_generation = map_generation_;
     }
     ++map_generation_;
@@ -2272,6 +2422,7 @@ std::vector<ObservedIndirectTarget> IndirectTargetRefinementWorklist::pending_ca
 IndirectTargetRefinementSummary IndirectTargetRefinementWorklist::summary() const
 {
     auto result = counters_;
+    result.candidate_records = work_items_.size();
     const auto pending = pending_candidates();
     result.pending_candidate_count = pending.size() + (overflow_pending_ ? 1U : 0U);
     if (!pending.empty()) result.next_pending_candidate = indirect_target_candidate_identity(pending.front());

@@ -58,6 +58,7 @@ enum class AnalysisBudgetProvenanceKind : std::uint8_t
     LibraryDefault,
     ExecutionToolProfile,
     ExplicitCliOverride,
+    ExplicitApiOverride,
     LocalConfigurationOverride,
     DerivedStructuralBound,
 };

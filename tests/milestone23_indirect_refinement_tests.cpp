@@ -45,6 +45,7 @@ using memory::GuestAddress;
                                     : IndirectTargetDecisionKind::InsufficientEvidence;
     result.decision.eligible_for_promotion = eligible;
     result.validation.target_module = observed_target.target_module;
+    result.validation.structurally_eligible = true;
     return result;
 }
 

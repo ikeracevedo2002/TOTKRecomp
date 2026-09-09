@@ -513,6 +513,7 @@ using json = nlohmann::json;
                                      {"mapped", validation.mapped},
                                      {"executable", validation.executable},
                                      {"unique_module_owner", validation.unique_module_owner},
+                                     {"structurally_eligible", validation.structurally_eligible},
                                      {"target_module_base", validation.target_module_base
                                                                   ? json(hex_address(*validation.target_module_base))
                                                                   : json(nullptr)},
@@ -588,11 +589,26 @@ using json = nlohmann::json;
     return json{
         {"configured_limits",
          json{{"max_stagnant_rounds", budgets.max_stagnant_rounds},
-              {"max_unique_candidates", budgets.max_unique_candidates},
+              {"legacy_max_unique_candidates", budgets.max_unique_candidates
+                                                       ? json(budgets.max_unique_candidates.value())
+                                                       : json(nullptr)},
+              {"candidate_limit_provenance", provenance_json(budgets.candidate_limit_provenance)},
               {"max_candidate_assessments", budgets.max_candidate_assessments},
               {"max_promotions", budgets.max_promotions},
               {"max_map_rebuilds", budgets.max_map_rebuilds},
               {"legacy_event_limits", budgets.legacy_event_limits}}},
+        {"candidate_scaling",
+         json{{"structural_universe_kind", "executable_guest_instruction_slots"},
+              {"structural_universe_limit",
+               budgets.candidate_universe.executable_instruction_slots},
+              {"structural_universe_provenance",
+               provenance_json(budgets.candidate_universe.provenance)},
+              {"effective_unique_candidate_limit",
+               budgets.max_unique_candidates
+                   ? std::min(budgets.max_unique_candidates.value(),
+                              budgets.candidate_universe.executable_instruction_slots)
+                   : budgets.candidate_universe.executable_instruction_slots},
+              {"sparse_records", true}}},
         {"aggregate_analysis_limits",
          json{{"max_functions_analyzed", analysis_budgets.max_functions_analyzed},
               {"max_functions_reanalyzed", analysis_budgets.max_functions_reanalyzed},
@@ -632,6 +648,8 @@ using json = nlohmann::json;
         {"observations_received", summary.observations_received},
         {"unique_observations", summary.unique_observations},
         {"unique_candidates", summary.unique_candidates},
+        {"candidate_records", summary.candidate_records},
+        {"structurally_ineligible_candidates", summary.structurally_ineligible_candidates},
         {"candidate_assessments", summary.candidate_assessments},
         {"terminal_resolutions", summary.terminal_resolutions},
         {"successful_promotions", summary.successful_promotions},

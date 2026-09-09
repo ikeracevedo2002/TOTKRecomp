@@ -110,6 +110,7 @@ struct SyntheticModule
     IndirectTargetAssessment result;
     result.observed = item;
     result.validation.target_module = item.target_module;
+    result.validation.structurally_eligible = true;
     result.decision.kind = IndirectTargetDecisionKind::TrustedNewEntry;
     result.decision.eligible_for_promotion = true;
     return result;

@@ -51,6 +51,7 @@ std::string_view analysis_budget_provenance_kind_name(
     case AnalysisBudgetProvenanceKind::LibraryDefault: return "library_default";
     case AnalysisBudgetProvenanceKind::ExecutionToolProfile: return "execution_tool_profile";
     case AnalysisBudgetProvenanceKind::ExplicitCliOverride: return "explicit_cli_override";
+    case AnalysisBudgetProvenanceKind::ExplicitApiOverride: return "explicit_api_override";
     case AnalysisBudgetProvenanceKind::LocalConfigurationOverride:
         return "local_configuration_override";
     case AnalysisBudgetProvenanceKind::DerivedStructuralBound:

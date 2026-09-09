@@ -53,6 +53,7 @@ using memory::GuestAddress;
     result.decision.kind = eligible ? IndirectTargetDecisionKind::TrustedNewEntry
                                     : IndirectTargetDecisionKind::InsufficientEvidence;
     result.decision.eligible_for_promotion = eligible;
+    result.validation.structurally_eligible = true;
     return result;
 }
 
