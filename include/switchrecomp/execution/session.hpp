@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -429,6 +430,7 @@ class ExecutionSession
     SessionFrame current_;
     runtime::CpuState cpu_{};
     runtime::RuntimeContext runtime_{};
+    std::unique_ptr<runtime::SharedRuntimeState> shared_runtime_;
     runtime::RuntimeState runtime_state_{};
     bool running_ = false;
 };

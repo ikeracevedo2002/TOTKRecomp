@@ -995,11 +995,13 @@ int main(int argc, char** argv)
         discovery_options.cfg = function_options.cfg;
         analysis::IndirectTargetRefinementWorklist worklist(refinement_budgets);
         std::vector<analysis::IndirectTargetAssessment> promoted_targets;
+        std::optional<execution::ExecutionSessionResult> last_run_result;
         execution::ExecutionSessionResult final_result;
         for (;;)
         {
             if (!worklist.begin_round())
             {
+                if (last_run_result) final_result = std::move(last_run_result.value());
                 final_result.indirect_target_refinement = worklist.summary();
                 final_result.stop_reason =
                     execution::ExecutionStopReason::IndirectTargetRefinementBudgetExceeded;
@@ -1055,7 +1057,11 @@ int main(int argc, char** argv)
                 refined = true;
                 break;
             }
-            if (refined) continue;
+            if (refined)
+            {
+                last_run_result = std::move(run_result);
+                continue;
+            }
 
             if (worklist.exhausted())
             {

@@ -2,6 +2,7 @@
 
 #include "switchrecomp/common/checked_arithmetic.hpp"
 #include "switchrecomp/common/portable_arithmetic.hpp"
+#include "switchrecomp/interpreter/m9_semantics.hpp"
 #include "switchrecomp/ir/verifier.hpp"
 #include "switchrecomp/runtime/fp.hpp"
 
@@ -120,6 +121,7 @@ Result<runtime::ExecutionResult> execute_until_boundary(
         return Result<runtime::ExecutionResult>::failure(verified.error());
     }
     runtime.clear_error();
+    runtime.cpu = &cpu;
     if (frame.function != &function || frame.values.size() != function.values().size())
     {
         frame.reset(function);
@@ -184,6 +186,20 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                 frame.provenance[instruction.result] = value_provenance;
                 return Result<void>::success();
             };
+
+            if (is_m9_opcode(instruction.opcode))
+            {
+                const auto executed = execute_m9_instruction(
+                    instruction, runtime, read,
+                    [&](std::uint64_t value, InterpreterValueProvenance provenance) {
+                        return store_result(value, 0U, provenance);
+                    });
+                if (!executed)
+                {
+                    return Result<runtime::ExecutionResult>::failure(executed.error());
+                }
+                continue;
+            }
 
             switch (instruction.opcode)
             {

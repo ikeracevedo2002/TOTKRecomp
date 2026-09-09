@@ -2429,6 +2429,8 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     cpu_.pc = entry.address;
     cpu_.x[30U] = result.synthetic_lr_sentinel;
     runtime_ = runtime::RuntimeContext{memory_};
+    shared_runtime_ = std::make_unique<runtime::SharedRuntimeState>(*memory_);
+    runtime_.shared = shared_runtime_.get();
     runtime_.cpu = &cpu_;
     current_.function_entry = entry.address;
     current_.expected_return_pc = result.synthetic_lr_sentinel;
