@@ -2155,6 +2155,38 @@ repeated full metadata scans for duplicate runtime observations. The former
 M25 target was consequently assessed, certified, promoted, and entered through
 normal guest dispatch. See [MILESTONE_26.md](MILESTONE_26.md).
 
+### Milestone 27 — Proof-preserving aggregate refinement scaling
+
+M27 replaces the ordinary productive-event charge from successful promotions
+and target-module map rebuilds with a finite aggregate ledger of actual
+immutable refinement work. The ledger reuses M24 accounting dimensions where
+they have the same meaning: newly CFG-analyzed functions, reanalyzed
+functions, instructions, blocks, edges, analyzed bytes,
+boundary-finalization passes, invalidated records, and immutable refinement
+transactions. Each dimension has a finite default, explicit provenance, stable
+serialization, and typed exhaustion context containing the module, generation,
+and deterministic next candidate when one exists.
+
+Persistent reuse is copy-on-publish, not mutation. A refinement starts from a
+frozen prior module map, copies validated records into candidate state, and
+introduces only the newly certified callable boundary and its validated direct
+call targets. A copied record is reusable only when its stable module identity
+and executable layout match and the new boundary cannot intersect its precise
+owned ranges or recorded boundary dependencies. An affected record is cleared,
+reanalyzed, and revalidated before the candidate map can be published. The
+old generation remains dispatchable if any assessment, ownership check,
+provider check, CFG analysis, or budget check fails.
+
+The former `max_promotions` and `max_map_rebuilds` fields remain visible for
+intentional legacy CLI/library compatibility. They are disabled by the
+ordinary default profile and are enabled when an old event limit is explicitly
+selected; M27 does not silently reinterpret a larger event count as an
+analysis limit. Finite candidate identities, assessment work, terminal
+resolution, stagnation handling, and the aggregate ledger together provide the
+termination proof. See [MILESTONE_27.md](MILESTONE_27.md) for measured
+full-rebuild versus reuse work, synthetic invalidation/transaction tests, the
+real executable frontier, and schema-13 report evidence.
+
 ### Future milestone — Filesystem and asset loading
 
 **Goal:** Mount user-provided game data and implement the required streaming path.

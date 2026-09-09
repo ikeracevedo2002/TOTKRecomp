@@ -89,3 +89,41 @@ does not claim successful game translation.
 
 The normal build never accesses game files and never requires Nintendo keys or
 other proprietary content.
+
+## Indirect-refinement budgets
+
+The ordinary refinement profile uses finite candidate, assessment, stagnation,
+and aggregate-analysis budgets. The M27 aggregate dimensions are configured by
+the `--refinement-max-analysis-*` options shown by `run-entry --help`:
+functions analyzed, functions reanalyzed, instructions, blocks, edges, bytes,
+boundary-finalization passes, invalidated records, and immutable transactions.
+Zero, overflowed, or otherwise unrepresentable values are rejected.
+
+The older `--refinement-max-promotions` and
+`--refinement-max-rebuilds` options are retained as explicit deprecated legacy
+event guards. They are not charged by the ordinary default profile; passing
+either option intentionally enables its old finite guard. The report records
+that compatibility mode as `legacy_event_limits`.
+
+Local-only JSON configuration may set aggregate limits without putting private
+paths or target data in the repository:
+
+```json
+{
+  "refinement_analysis": {
+    "max_functions_analyzed": 200000,
+    "max_functions_reanalyzed": 100000,
+    "max_instructions": 8000000,
+    "max_blocks": 2000000,
+    "max_edges": 4000000,
+    "max_bytes_analyzed": 268435456,
+    "max_boundary_finalization_passes": 2048,
+    "max_invalidated_records": 100000,
+    "max_transactions": 512
+  }
+}
+```
+
+Each configured value is finite and is reported with its provenance. Generated
+execution reports use schema 13 for the aggregate limits, consumption,
+typed-exhaustion context, and immutable-generation accounting.
