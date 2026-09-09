@@ -23,10 +23,28 @@ void InterpreterFrame::reset(const ir::Function& function_value)
 {
     function = &function_value;
     current_block = function_value.entry_block();
+    ir_operation_index = 0U;
+    function_verified = false;
+    counted_block = ir::invalid_block;
+    block_entry_serial = 0U;
+    completed_block = ir::invalid_block;
+    block_terminated = false;
     values.assign(function_value.values().size(), 0U);
     high_values.assign(function_value.values().size(), 0U);
     provenance.assign(function_value.values().size(), InterpreterValueProvenance{});
     register_provenance.fill(InterpreterValueProvenance{});
+    pending_observation.reset();
+    completed_observation_pcs.clear();
+}
+
+void InterpreterFrame::resume_at(ir::BlockId block) noexcept
+{
+    current_block = block;
+    ir_operation_index = 0U;
+    counted_block = ir::invalid_block;
+    completed_block = ir::invalid_block;
+    block_terminated = false;
+    pending_observation.reset();
 }
 
 namespace
@@ -115,61 +133,137 @@ Result<runtime::ExecutionResult> execute_until_boundary(
     const ir::Function& function, runtime::CpuState& cpu, runtime::RuntimeContext& runtime,
     InterpreterFrame& frame, const runtime::ExecutionOptions& options)
 {
-    const auto verified = ir::verify(function);
-    if (!verified)
-    {
-        return Result<runtime::ExecutionResult>::failure(verified.error());
-    }
-    runtime.clear_error();
-    runtime.cpu = &cpu;
     if (frame.function != &function || frame.values.size() != function.values().size())
     {
         frame.reset(function);
     }
+    if (!frame.function_verified)
+    {
+        const auto verified = ir::verify(function);
+        if (!verified)
+        {
+            return Result<runtime::ExecutionResult>::failure(verified.error());
+        }
+        frame.function_verified = true;
+    }
+    runtime.clear_error();
+    runtime.cpu = &cpu;
+    if (options.slice_ir_operations == 0U)
+    {
+        return Result<runtime::ExecutionResult>::failure(
+            make_error(ErrorCode::InvalidArgument, "execution slice must be non-zero"));
+    }
+    if (frame.values.size() != function.values().size() ||
+        frame.high_values.size() != function.values().size() ||
+        frame.provenance.size() != function.values().size())
+    {
+        return Result<runtime::ExecutionResult>::failure(
+            make_error(ErrorCode::InvalidIrValue, "interpreter frame value storage is malformed"));
+    }
     runtime::ExecutionResult result;
-    std::optional<runtime::ObservedInstructionExecution> pending_observation;
     const auto flush_observation = [&](std::optional<std::uint64_t> next_guest_pc) {
-        if (!pending_observation) return;
-        pending_observation->post_state = cpu;
-        pending_observation->next_guest_pc = next_guest_pc;
-        result.observed_instruction_executions.push_back(std::move(pending_observation.value()));
-        pending_observation.reset();
+        if (!frame.pending_observation) return;
+        frame.pending_observation->post_state = cpu;
+        frame.pending_observation->next_guest_pc = next_guest_pc;
+        frame.completed_observation_pcs.push_back(frame.pending_observation->guest_pc);
+        result.observed_instruction_executions.push_back(std::move(frame.pending_observation.value()));
+        frame.pending_observation.reset();
+    };
+    const auto capture_cursor = [&]() {
+        result.resume_block = frame.current_block;
+        result.resume_operation_index = frame.ir_operation_index;
+    };
+    const auto increment = [](std::size_t& counter, const char* message) -> Result<void> {
+        const auto updated = checked_add(counter, 1U);
+        if (!updated)
+        {
+            return Result<void>::failure(make_error(ErrorCode::ArithmeticOverflow, message));
+        }
+        counter = updated.value();
+        return Result<void>::success();
+    };
+    const auto yield = [&]() -> Result<runtime::ExecutionResult> {
+        result.status = runtime::ExecutionStatus::Yielded;
+        result.boundary = runtime::ExecutionBoundary{
+            runtime::ExecutionBoundaryKind::SliceExhaustion, cpu.pc, 0U, false,
+            ir::invalid_block, 0U, function.guest_entry(), false, 0U, {}, {}};
+        result.final_guest_pc = cpu.pc;
+        capture_cursor();
+        return Result<runtime::ExecutionResult>::success(std::move(result));
     };
 
     while (true)
     {
+        if (frame.block_terminated)
+        {
+            if (frame.current_block == frame.completed_block)
+            {
+                return Result<runtime::ExecutionResult>::failure(make_error(
+                    ErrorCode::InvalidControlFlow,
+                    "interpreter boundary was resumed without selecting its continuation"));
+            }
+            frame.block_terminated = false;
+            frame.completed_block = ir::invalid_block;
+            frame.ir_operation_index = 0U;
+            frame.counted_block = ir::invalid_block;
+        }
         const auto* block = function.block(frame.current_block);
         if (block == nullptr)
         {
             return Result<runtime::ExecutionResult>::failure(
                 make_error(ErrorCode::InvalidIrBlock, "interpreter reached a missing block"));
         }
-        ++result.executed_blocks;
-        for (const auto& instruction : block->instructions)
+        if (frame.ir_operation_index > block->instructions.size())
         {
-            if (result.executed_operations >= options.max_ir_operations)
+            return Result<runtime::ExecutionResult>::failure(make_error(
+                ErrorCode::InvalidIrBlock, "interpreter frame operation cursor is outside its block"));
+        }
+        if (frame.counted_block == ir::invalid_block)
+        {
+            if (const auto added = increment(frame.block_entry_serial,
+                                             "interpreter block-entry cursor overflowed");
+                !added)
+                return Result<runtime::ExecutionResult>::failure(added.error());
+            if (const auto added = increment(result.executed_blocks,
+                                             "interpreter block accounting overflowed");
+                !added)
+                return Result<runtime::ExecutionResult>::failure(added.error());
+            frame.counted_block = frame.current_block;
+        }
+        while (frame.ir_operation_index < block->instructions.size())
+        {
+            const auto& instruction = block->instructions[frame.ir_operation_index];
+            if (options.max_ir_operations &&
+                result.executed_operations >= options.max_ir_operations.value())
             {
                 result.status = runtime::ExecutionStatus::LimitExceeded;
                 result.boundary = runtime::ExecutionBoundary{
                     runtime::ExecutionBoundaryKind::BudgetExhaustion, cpu.pc, 0U, false,
                     ir::invalid_block, 0U, function.guest_entry(), false, 0U, {}, {}};
                 result.final_guest_pc = cpu.pc;
+                capture_cursor();
                 return Result<runtime::ExecutionResult>::success(std::move(result));
             }
-            ++result.executed_operations;
+            if (const auto added = increment(result.executed_operations,
+                                             "interpreter operation accounting overflowed");
+                !added)
+                return Result<runtime::ExecutionResult>::failure(added.error());
             const bool observe_instruction = instruction.opcode == ir::Opcode::SetPc &&
                 std::find(options.observed_guest_pcs.begin(), options.observed_guest_pcs.end(),
                           instruction.source.guest_pc) != options.observed_guest_pcs.end();
             if (instruction.opcode == ir::Opcode::SetPc)
             {
                 flush_observation(instruction.source.guest_pc);
-                ++result.executed_guest_instructions;
+                if (const auto added = increment(result.executed_guest_instructions,
+                                                 "interpreter guest-instruction accounting overflowed");
+                    !added)
+                    return Result<runtime::ExecutionResult>::failure(added.error());
                 result.executed_guest_pcs.push_back(instruction.source.guest_pc);
             }
             if (observe_instruction &&
                 result.observed_guest_pcs.size() < options.max_observed_guest_pcs &&
-                std::find(result.observed_guest_pcs.begin(), result.observed_guest_pcs.end(),
-                          instruction.source.guest_pc) == result.observed_guest_pcs.end())
+                std::find(frame.completed_observation_pcs.begin(), frame.completed_observation_pcs.end(),
+                          instruction.source.guest_pc) == frame.completed_observation_pcs.end())
             {
                 result.observed_guest_pcs.push_back(instruction.source.guest_pc);
             }
@@ -198,9 +292,9 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                 {
                     return Result<runtime::ExecutionResult>::failure(executed.error());
                 }
-                continue;
             }
-
+            else
+            {
             switch (instruction.opcode)
             {
             case ir::Opcode::Constant:
@@ -217,15 +311,15 @@ Result<runtime::ExecutionResult> execute_until_boundary(
             case ir::Opcode::SetPc:
                 cpu.pc = instruction.source.guest_pc;
                 if (observe_instruction &&
-                    std::find_if(result.observed_instruction_executions.begin(),
-                                 result.observed_instruction_executions.end(),
-                                 [&](const auto& observed) {
-                                     return observed.guest_pc == instruction.source.guest_pc;
-                                 }) == result.observed_instruction_executions.end())
+                    std::find(frame.completed_observation_pcs.begin(),
+                              frame.completed_observation_pcs.end(),
+                              instruction.source.guest_pc) == frame.completed_observation_pcs.end() &&
+                    (!frame.pending_observation ||
+                     frame.pending_observation->guest_pc != instruction.source.guest_pc))
                 {
-                    pending_observation = runtime::ObservedInstructionExecution{};
-                    pending_observation->guest_pc = instruction.source.guest_pc;
-                    pending_observation->pre_state = cpu;
+                    frame.pending_observation = runtime::ObservedInstructionExecution{};
+                    frame.pending_observation->guest_pc = instruction.source.guest_pc;
+                    frame.pending_observation->pre_state = cpu;
                 }
                 break;
             case ir::Opcode::ReadRegister:
@@ -834,6 +928,12 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                     ErrorCode::UnsupportedInstruction,
                     "legacy interpreter received a Milestone 9 opcode"));
             }
+            }
+            ++frame.ir_operation_index;
+            if (result.executed_operations >= options.slice_ir_operations)
+            {
+                return yield();
+            }
         }
 
         if (!block->has_terminator)
@@ -846,6 +946,9 @@ Result<runtime::ExecutionResult> execute_until_boundary(
         {
         case ir::TerminatorKind::Branch:
             frame.current_block = terminator.target;
+            frame.ir_operation_index = 0U;
+            frame.counted_block = ir::invalid_block;
+            if (block->instructions.empty()) return yield();
             break;
         case ir::TerminatorKind::ConditionalBranch:
         {
@@ -855,6 +958,9 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                 return Result<runtime::ExecutionResult>::failure(condition.error());
             }
             frame.current_block = condition.value() != 0U ? terminator.target : terminator.false_target;
+            frame.ir_operation_index = 0U;
+            frame.counted_block = ir::invalid_block;
+            if (block->instructions.empty()) return yield();
             break;
         }
         case ir::TerminatorKind::Return:
@@ -874,6 +980,8 @@ Result<runtime::ExecutionResult> execute_until_boundary(
             result.boundary = runtime::ExecutionBoundary{
                 runtime::ExecutionBoundaryKind::Return, terminator.source.guest_pc, cpu.pc,
                 cpu.pc != 0U, ir::invalid_block, 0U, function.guest_entry(), false, 0U, {}, {}};
+            frame.block_terminated = true;
+            frame.completed_block = frame.current_block;
             flush_observation(cpu.pc == 0U ? std::nullopt
                                           : std::optional<std::uint64_t>(cpu.pc));
             return Result<runtime::ExecutionResult>::success(result);
@@ -919,6 +1027,8 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                 provenance.kind == InterpreterValueProvenance::Kind::GuestLoad,
                 provenance.address, std::move(target_provenance),
                 terminator.target_register ? ir::register_name(terminator.target_register.value()) : ""};
+            frame.block_terminated = true;
+            frame.completed_block = frame.current_block;
             flush_observation(cpu.pc == 0U ? std::nullopt
                                           : std::optional<std::uint64_t>(cpu.pc));
             return Result<runtime::ExecutionResult>::success(result);
@@ -932,6 +1042,8 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                     terminator.source.guest_pc, 0U, false, ir::invalid_block, 0U,
                     function.guest_entry(), false, 0U,
                     terminator.trap_reason.substr(std::string("unsupported_instruction:").size()), {}};
+                frame.block_terminated = true;
+                frame.completed_block = frame.current_block;
                 result.final_guest_pc = cpu.pc;
                 flush_observation(std::nullopt);
                 return Result<runtime::ExecutionResult>::success(std::move(result));
@@ -944,6 +1056,8 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                     runtime::ExecutionBoundaryKind::Trap, terminator.source.guest_pc, 0U, false,
                     ir::invalid_block, 0U, function.guest_entry(), false, 0U,
                     runtime.last_error.message, {}};
+                frame.block_terminated = true;
+                frame.completed_block = frame.current_block;
                 result.final_guest_pc = cpu.pc;
                 flush_observation(std::nullopt);
                 return Result<runtime::ExecutionResult>::success(std::move(result));
@@ -955,31 +1069,75 @@ Result<runtime::ExecutionResult> execute_until_boundary(
 
 // Preserve the historical one-function API. M11 callers use
 // execute_until_boundary directly so a call boundary remains typed and
-// resumable; legacy callers still receive an error for operation exhaustion.
+// resumable; this wrapper consumes internal slices before returning a real
+// guest boundary or translating an explicit hard-limit exhaustion.
 Result<runtime::ExecutionResult> execute_legacy(const ir::Function& function,
                                                 runtime::CpuState& cpu,
                                                 runtime::RuntimeContext& runtime,
                                                 const runtime::ExecutionOptions& options)
 {
     InterpreterFrame frame;
-    const auto result = execute_until_boundary(function, cpu, runtime, frame, options);
-    if (!result)
+    runtime::ExecutionResult aggregate;
+    const auto append = [&aggregate, &options](const runtime::ExecutionResult& part) -> Result<void> {
+        const auto operations = checked_add(aggregate.executed_operations, part.executed_operations);
+        const auto blocks = checked_add(aggregate.executed_blocks, part.executed_blocks);
+        const auto guest_instructions =
+            checked_add(aggregate.executed_guest_instructions, part.executed_guest_instructions);
+        if (!operations || !blocks || !guest_instructions)
+        {
+            return Result<void>::failure(make_error(
+                ErrorCode::ArithmeticOverflow, "interpreter execution accounting overflowed"));
+        }
+        aggregate.executed_operations = operations.value();
+        aggregate.executed_blocks = blocks.value();
+        aggregate.executed_guest_instructions = guest_instructions.value();
+        for (const auto pc : part.observed_guest_pcs)
+        {
+            if (aggregate.observed_guest_pcs.size() >= options.max_observed_guest_pcs ||
+                std::find(aggregate.observed_guest_pcs.begin(), aggregate.observed_guest_pcs.end(),
+                          pc) != aggregate.observed_guest_pcs.end())
+                continue;
+            aggregate.observed_guest_pcs.push_back(pc);
+        }
+        aggregate.observed_instruction_executions.insert(
+            aggregate.observed_instruction_executions.end(),
+            part.observed_instruction_executions.begin(), part.observed_instruction_executions.end());
+        aggregate.executed_guest_pcs.insert(aggregate.executed_guest_pcs.end(),
+                                             part.executed_guest_pcs.begin(),
+                                             part.executed_guest_pcs.end());
+        aggregate.final_guest_pc = part.final_guest_pc;
+        aggregate.status = part.status;
+        aggregate.boundary = part.boundary;
+        return Result<void>::success();
+    };
+
+    while (true)
     {
-        return result;
+        auto slice_options = options;
+        if (options.max_ir_operations)
+        {
+            slice_options.max_ir_operations =
+                options.max_ir_operations.value() - aggregate.executed_operations;
+        }
+        const auto result = execute_until_boundary(function, cpu, runtime, frame, slice_options);
+        if (!result) return result;
+        const auto merged = append(result.value());
+        if (!merged) return Result<runtime::ExecutionResult>::failure(merged.error());
+        if (result.value().status == runtime::ExecutionStatus::Yielded) continue;
+        if (result.value().status == runtime::ExecutionStatus::LimitExceeded)
+        {
+            return Result<runtime::ExecutionResult>::failure(make_error(
+                ErrorCode::ExecutionLimitExceeded,
+                "interpreter exceeded the configured IR operation limit"));
+        }
+        if (result.value().status == runtime::ExecutionStatus::Trapped)
+        {
+            return Result<runtime::ExecutionResult>::failure(
+                runtime.has_error ? runtime.last_error
+                                  : make_error(ErrorCode::ExecutionTrap, "guest execution trapped"));
+        }
+        return Result<runtime::ExecutionResult>::success(std::move(aggregate));
     }
-    if (result.value().status == runtime::ExecutionStatus::LimitExceeded)
-    {
-        return Result<runtime::ExecutionResult>::failure(make_error(
-            ErrorCode::ExecutionLimitExceeded,
-            "interpreter exceeded the configured IR operation limit"));
-    }
-    if (result.value().status == runtime::ExecutionStatus::Trapped)
-    {
-        return Result<runtime::ExecutionResult>::failure(
-            runtime.has_error ? runtime.last_error
-                              : make_error(ErrorCode::ExecutionTrap, "guest execution trapped"));
-    }
-    return result;
 }
 
 } // namespace switchrecomp::interpreter

@@ -459,6 +459,7 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/milestone26_progress_refinement_tests.cpp
         tests/milestone27_aggregate_refinement_tests.cpp
         tests/milestone28_structural_candidate_tests.cpp
+        tests/milestone29_resumable_ir_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE
