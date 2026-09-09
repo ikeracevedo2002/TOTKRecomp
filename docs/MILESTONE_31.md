@@ -384,8 +384,8 @@ are used; no pointer identity or unordered-container iteration is serialized.
 - Optional-LLVM configuration: `333/333`, but `LLVM_DIR` was not found, so
   the LLVM backend was disabled; this is not an LLVM 18 result.
 - GNU GCC, LLVM 18, and MSVC were not installed on this macOS host. GitHub
-  Linux/GCC, LLVM 18, ASan/UBSan, TSan, and Windows/MSVC checks are only
-  claimed after the pushed PR reports terminal success.
+  Linux/GCC, LLVM 18, ASan/UBSan, TSan, and Windows/MSVC checks all passed in
+  both the push and PR workflows: `10/10` configured jobs passed.
 
 ## 15. Dependencies and privacy
 
@@ -398,13 +398,12 @@ already used by project diagnostics.
 
 ## 16. Pull request and recommendation
 
-The branch is intended to be opened as a stacked PR on
-`milestone-30-generation-scoped-stack-memory`. The PR must state the exact
+PR [#36](https://github.com/ikeracevedo2002/TOTKRecomp/pull/36) is open as a
+stacked PR on `milestone-30-generation-scoped-stack-memory`. Its exact
 base, old reproduction, accounting equation, forensic cause, unchanged
 `1,000` default, natural old-frontier crossing, new refinement frontier,
-tests, sanitizer/CI status, dependency count, and privacy statement. No CI
-status is claimed here until the corresponding checks are terminal and
-successful.
+tests, local sanitizer status, `10/10` terminal-passing CI matrix, dependency
+count, and privacy statement are recorded in the PR body.
 
 M32 should address the measured `indirect_target_refinement_budget_exceeded`
 frontier through the existing proof-preserving refinement resources. It must
