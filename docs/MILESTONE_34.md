@@ -427,13 +427,13 @@ Local validation completed:
 - M34 focused tests: `8/8`, `94 assertions`;
 - M29/M30/M31/M32/M33 filter: `51/51`;
 - Linux/GCC, Linux/GCC + LLVM 18, Linux/GCC + ASan/UBSan, Linux/GCC + TSan,
-  and Windows/MSVC PR CI all passed in workflow run `34497595864`;
+  and Windows/MSVC PR CI all passed in workflow run `34498565824`;
 - no sanitizer suppression was added;
 - new dependency count: `0`.
 
 The local host is macOS with AppleClang 17. The Linux jobs used GNU GCC and
 LLVM 18, and the Windows job used MSVC. The duplicate push-triggered workflow
-run `34497569085` also passed all five jobs. No sanitizer suppression was
+run `34498560273` also passed all five jobs. No sanitizer suppression was
 added. The local ASan/UBSan full suite passed `356/356`; the local TSan
 M29--M34 regression set passed `59/59`, with a final M34 rerun of `8/8`.
 
