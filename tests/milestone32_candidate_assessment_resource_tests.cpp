@@ -445,7 +445,7 @@ TEST_CASE("M32 assessment reports are deterministic and expose the semantic mode
     const auto first_report = rendered_worklist(first);
     const auto second_report = rendered_worklist(second);
     REQUIRE(first_report == second_report);
-    REQUIRE(execution::ExecutionSessionResult::schema_version == 19U);
+    REQUIRE(execution::ExecutionSessionResult::schema_version == 20U);
     REQUIRE(first_report.find("\"schema_version\"") != std::string::npos);
     REQUIRE(first_report.find("\"assessment_accounting\"") != std::string::npos);
     REQUIRE(first_report.find("structural_candidate_generation_v1") != std::string::npos);

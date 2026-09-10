@@ -348,12 +348,12 @@ TEST_CASE("M33 reports ordinary and explicit transaction semantics deterministic
     execution::ExecutionSessionResult ordinary_result;
     ordinary_result.indirect_target_refinement = ordinary;
     const auto ordinary_report = execution::render_execution_report_json(ordinary_result);
-    REQUIRE(execution::ExecutionSessionResult::schema_version == 19U);
+    REQUIRE(execution::ExecutionSessionResult::schema_version == 20U);
     const auto ordinary_json = nlohmann::json::parse(ordinary_report);
     const auto& ordinary_resource = ordinary_json.at("execution")
                                         .at("indirect_target_refinement")
                                         .at("transaction_resource");
-    REQUIRE(ordinary_json.at("schema_version").get<std::uint32_t>() == 19U);
+    REQUIRE(ordinary_json.at("schema_version").get<std::uint32_t>() == 20U);
     REQUIRE(ordinary_resource.at("ordinary_termination_mode") ==
             "semantic_aggregate_resources");
     REQUIRE_FALSE(ordinary_resource.at("transaction_ceiling_configured").get<bool>());

@@ -8,6 +8,7 @@
 #include "switchrecomp/runtime/execution.hpp"
 #include "switchrecomp/runtime/imports.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -123,6 +124,9 @@ enum class ExecutionEventKind
 
 [[nodiscard]] const char* execution_event_kind_name(ExecutionEventKind kind) noexcept;
 
+inline constexpr std::size_t execution_event_kind_count =
+    static_cast<std::size_t>(ExecutionEventKind::SessionStop) + 1U;
+
 struct ExecutionEvent
 {
     std::size_t sequence = 0U;
@@ -137,7 +141,50 @@ struct ExecutionEvent
     std::string import_symbol;
     std::string function_module;
     std::string target_module;
+    // Counters sampled when the logical event is emitted. These are
+    // observational snapshots and do not participate in guest execution.
+    std::size_t guest_instruction_count = 0U;
+    std::size_t guest_block_count = 0U;
+    std::size_t ir_operation_count = 0U;
 };
+
+enum class EventExecutionLimitProvenance
+{
+    NotConfigured,
+    ExplicitCli,
+    ExplicitLocalConfiguration,
+    ExplicitLibraryApi,
+};
+
+[[nodiscard]] const char* event_execution_limit_provenance_name(
+    EventExecutionLimitProvenance provenance) noexcept;
+
+struct ExecutionEventResource
+{
+    std::string model = "checked_logical_count_bounded_history_v1";
+    std::size_t total_generated = 0U;
+    std::size_t retained = 0U;
+    std::size_t omitted = 0U;
+    bool history_truncated = false;
+    std::string history_policy = "first_prefix_plus_recent_window";
+    std::size_t retention_limit = 4'096U;
+    std::optional<std::size_t> execution_limit;
+    EventExecutionLimitProvenance execution_limit_provenance =
+        EventExecutionLimitProvenance::NotConfigured;
+    std::array<std::size_t, execution_event_kind_count> by_kind{};
+    std::optional<std::size_t> first_sequence_retained;
+    std::optional<std::size_t> last_sequence_retained;
+    bool reconciles = true;
+    std::optional<std::size_t> terminal_attempt_sequence;
+    std::optional<ExecutionEventKind> terminal_attempt_kind;
+    std::optional<ExecutionEvent> terminal_attempt;
+};
+
+// The returned value is the next logical sequence/count after one event is
+// emitted. It is public so overflow behavior can be tested without attempting
+// to execute SIZE_MAX guest events.
+[[nodiscard]] Result<std::size_t> checked_next_execution_event_sequence(
+    std::size_t total_generated);
 
 struct ExecutionBudgets
 {
@@ -149,7 +196,15 @@ struct ExecutionBudgets
     std::size_t slice_ir_operations = 4'096U;
     std::size_t max_function_transitions = 1'000U;
     std::size_t max_call_depth = 128U;
-    std::size_t max_events = 4'096U;
+    // An absent value means ordinary execution has no diagnostic-event
+    // execution guard. Explicit callers retain the historical --max-events
+    // compatibility guard.
+    std::optional<std::size_t> max_events;
+    EventExecutionLimitProvenance event_execution_limit_provenance =
+        EventExecutionLimitProvenance::NotConfigured;
+    // The retained event vector is always bounded by this diagnostic-only
+    // capacity. It never controls guest execution.
+    std::size_t event_history_limit = 4'096U;
     std::size_t max_guest_blocks = 1'000'000U;
 };
 
@@ -430,7 +485,7 @@ struct ExecutionSessionResult
     // bounded no-progress retries while retaining deterministic evidence;
     // M33 keeps transaction accounting while making its ordinary ceiling
     // semantic rather than a fixed event default.
-    static constexpr std::uint32_t schema_version = 19U;
+    static constexpr std::uint32_t schema_version = 20U;
 
     analysis::ModuleIdentity identity;
     EntrySelection entry;
@@ -493,6 +548,7 @@ struct ExecutionSessionResult
     SmulhFrontierEvidence smulh_frontier;
     std::vector<analysis::IndirectTargetAssessment> indirect_target_discovery;
     analysis::IndirectTargetRefinementSummary indirect_target_refinement;
+    ExecutionEventResource event_resource;
     std::vector<ExecutionEvent> events;
     RuntimeExecutionSummary runtime;
 };
@@ -584,7 +640,8 @@ class ExecutionSession
     [[nodiscard]] Result<void> stop(ExecutionSessionResult& result, ExecutionStopReason reason,
                                     std::string diagnostic, std::optional<memory::GuestAddress> target = std::nullopt,
                                     const runtime::ExecutionResult* boundary = nullptr);
-    [[nodiscard]] bool record_event(ExecutionSessionResult& result, ExecutionEvent event);
+    [[nodiscard]] Result<bool> record_event(ExecutionSessionResult& result,
+                                            ExecutionEvent event);
     [[nodiscard]] ExecutionStopReason classify_error(const Error& error) const noexcept;
     [[nodiscard]] Result<void> classify_target(const runtime::ExecutionResult& boundary,
                                                ExecutionSessionResult& result, bool call);

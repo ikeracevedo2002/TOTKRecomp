@@ -139,25 +139,34 @@ An intentional finite transaction compatibility ceiling can be added as
 when absent, the typed limit is `null` and provenance is `not_configured`.
 
 Each configured value is finite and is reported with its provenance. Generated
-execution reports use schema 19 for the structural candidate bound,
+execution reports use schema 20 for the structural candidate bound,
 legacy-limit distinction, sparse-record accounting, aggregate limits,
 consumption, typed-exhaustion context, and immutable-generation accounting.
-Schema 19 also reports live versus cumulative guest-memory mapping activity,
+Schema 20 also reports live versus cumulative guest-memory mapping activity,
 generation-scoped controlled-stack ownership/reclamation, and the checked
 virtual stack allocation high-water mark. It additionally reports bounded
 function-transition forensics: all successful function entries are classified,
 while the unchanged `max_function_transitions` value charges only successful
 non-call function transfers. The diagnostic history is explicitly bounded by
-`max_guest_blocks + 1`.
+`max_guest_blocks + 1`. Execution-event accounting is separate: ordinary
+execution has no event-count guard, while `--max-events N` remains a positive
+finite explicit compatibility/debug guard. Every logical event receives a
+checked sequence and increments `event_resource.total_generated`; the
+serialized history is bounded by `event_history_limit` using the deterministic
+first-prefix plus recent-window policy. The report retains per-kind counts,
+omitted-event reconciliation, execution-limit provenance, and a structured
+terminal attempt when an explicit event guard is reached. CLI values override
+the equivalent local `execution`/`budgets` configuration values.
 
 ## Execution slicing
 
 `run-entry` ordinary execution uses a finite internal Semantic IR scheduling
 quantum and exact resumable interpreter state. The quantum is not an execution
 capacity and is not the ordinary termination guard. The existing finite guest
-block, function-transition, call-depth, event, and refinement resources remain
-the aggregate termination model. `--max-ir-operations N` is an explicit
+block, function-transition, call-depth, refinement, and memory resources remain
+the aggregate semantic termination model. Event accounting is diagnostic unless
+an explicit compatibility guard is configured. `--max-ir-operations N` is an explicit
 global hard limit; it is reported separately with explicit CLI provenance and
 cannot be bypassed by internal slices. Ordinary BL/BLR call entries are not
-charged to the function-transfer resource; call depth, guest blocks, events,
-and refinement limits remain finite independent guards.
+charged to the function-transfer resource; call depth, guest blocks, and
+refinement limits remain finite independent guards.

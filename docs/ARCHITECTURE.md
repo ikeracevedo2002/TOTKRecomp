@@ -218,8 +218,8 @@ mid-block resumes, and return restoration do not create fresh entries. The
 unchanged default `max_function_transitions=1,000` charges only successful
 cross-function `B`/`BR` transfers, which bounds non-returning transfer churn;
 ordinary `BL`/`BLR` activity remains bounded by call depth, guest blocks,
-events, refinement, and the other finite execution resources. The retained
-forensic history is separately capped at `max_guest_blocks + 1` entries and
+refinement, and the other finite execution resources. The transition
+accounting history is separately capped at `max_guest_blocks + 1` entries and
 reports truncation if that derived diagnostic bound is reached. This model
 does not alter indirect-target certification, candidate ordering, or call and
 return contracts.
@@ -234,6 +234,23 @@ transaction count remains in reports, while its fixed ordinary ceiling is
 absent. A positive finite explicit ceiling remains available for compatibility
 and debugging and is reported with its provenance; absence is represented as
 `null`/`not_configured`.
+
+Milestone 34 separates execution progress from event observability. The
+session maintains a checked `total_generated` logical event count and assigns
+sequences from that count; it never uses the retained vector length as a guest
+execution guard. Ordinary `max_events` is absent (`null`/`not_configured`). An
+explicit `--max-events N`, local configuration value, or library option remains
+a positive finite compatibility/debug execution guard with typed provenance.
+The diagnostic event vector uses a deterministic first-prefix plus recent
+window policy, bounded by `event_history_limit`; omitted events remain counted
+and per-kind totals are retained. Terminal execution state is structured in the
+report, and an event that would hit an explicit guard is represented as a
+terminal attempt rather than silently dropping the stop evidence. Sequence and
+counter overflow fails closed with `arithmetic_overflow`. Event generation is
+finite because each production emission is attached to session setup, a guest
+block boundary, a function entry/call/return/transfer, or a runtime-import
+boundary; the finite guest-block, call-depth, transition, memory, refinement,
+and explicit hard resources therefore dominate ordinary execution.
 
 This controlled entry execution consumes a single prepared main module and a
 metadata-selected `DT_INIT` candidate. It is not full process launch: no rtld,

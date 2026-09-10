@@ -1537,6 +1537,32 @@ const char* execution_event_kind_name(ExecutionEventKind kind) noexcept
     return "unknown";
 }
 
+const char* event_execution_limit_provenance_name(
+    EventExecutionLimitProvenance provenance) noexcept
+{
+    switch (provenance)
+    {
+    case EventExecutionLimitProvenance::NotConfigured: return "not_configured";
+    case EventExecutionLimitProvenance::ExplicitCli: return "explicit_cli";
+    case EventExecutionLimitProvenance::ExplicitLocalConfiguration:
+        return "explicit_local_configuration";
+    case EventExecutionLimitProvenance::ExplicitLibraryApi: return "explicit_library_api";
+    }
+    return "unknown";
+}
+
+Result<std::size_t> checked_next_execution_event_sequence(std::size_t total_generated)
+{
+    const auto next = checked_add(total_generated, 1U);
+    if (!next)
+    {
+        return Result<std::size_t>::failure(make_error(
+            ErrorCode::ArithmeticOverflow,
+            "logical execution event sequence overflowed before emission"));
+    }
+    return next;
+}
+
 ImportBoundaryIndex::ImportBoundaryIndex(
     const std::vector<loader::UnresolvedRelocation>& relocations)
 {
@@ -1934,18 +1960,104 @@ ExecutionStopReason ExecutionSession::classify_error(const Error& error) const n
     }
 }
 
-bool ExecutionSession::record_event(ExecutionSessionResult& result, ExecutionEvent event)
+Result<bool> ExecutionSession::record_event(ExecutionSessionResult& result, ExecutionEvent event)
 {
-    if (result.events.size() >= options_.budgets.max_events)
+    event.guest_instruction_count = result.guest_instruction_count;
+    event.guest_block_count = result.guest_blocks;
+    event.ir_operation_count = result.ir_operations;
+    if (result.event_resource.execution_limit &&
+        result.event_resource.total_generated >= result.event_resource.execution_limit.value())
     {
         result.stop_reason = ExecutionStopReason::EventLimitExceeded;
-        result.diagnostic = "execution event limit exhausted";
+        result.diagnostic = "execution event limit exhausted (consumed=" +
+                            std::to_string(result.event_resource.total_generated) +
+                            " limit=" +
+                            std::to_string(result.event_resource.execution_limit.value()) +
+                            " attempted_sequence=" +
+                            std::to_string(result.event_resource.total_generated) + ")";
+        event.sequence = result.event_resource.total_generated;
+        result.event_resource.terminal_attempt_sequence = event.sequence;
+        result.event_resource.terminal_attempt_kind = event.kind;
+        result.event_resource.terminal_attempt = event;
+        result.final_cpu = cpu_;
+        result.current_function = current_.function_entry;
+        result.current_function_module = module_name_for(current_.function_entry);
+        result.stop_module = event.target_module.empty() ? result.current_function_module
+                                                         : event.target_module;
+        result.stop_pc = event.guest_pc == 0U ? cpu_.pc : event.guest_pc;
         running_ = false;
-        return false;
+        return Result<bool>::success(false);
     }
-    event.sequence = result.events.size();
-    result.events.push_back(std::move(event));
-    return true;
+    const auto next_total = checked_next_execution_event_sequence(
+        result.event_resource.total_generated);
+    if (!next_total)
+    {
+        running_ = false;
+        return Result<bool>::failure(next_total.error());
+    }
+    const auto kind_index = static_cast<std::size_t>(event.kind);
+    if (kind_index >= execution_event_kind_count)
+    {
+        running_ = false;
+        return Result<bool>::failure(
+            make_error(ErrorCode::InvalidArgument, "execution event kind is out of range"));
+    }
+    const auto next_kind_count = checked_add(result.event_resource.by_kind[kind_index], 1U);
+    if (!next_kind_count)
+    {
+        running_ = false;
+        return Result<bool>::failure(make_error(
+            ErrorCode::ArithmeticOverflow, "execution event kind counter overflowed"));
+    }
+
+    event.sequence = result.event_resource.total_generated;
+    result.event_resource.total_generated = next_total.value();
+    result.event_resource.by_kind[kind_index] = next_kind_count.value();
+
+    const auto retention_limit = options_.budgets.event_history_limit;
+    if (result.events.size() < retention_limit)
+    {
+        result.events.push_back(std::move(event));
+    }
+    else
+    {
+        const auto prefix_limit = retention_limit / 2U;
+        if (!result.event_resource.history_truncated)
+        {
+            result.events.erase(result.events.begin() + static_cast<std::ptrdiff_t>(prefix_limit),
+                                result.events.end());
+            result.event_resource.history_truncated = true;
+        }
+        else
+        {
+            // The prefix is immutable. Once the recent window is full, evict
+            // only its oldest logical event before appending the new one.
+            result.events.erase(result.events.begin() + static_cast<std::ptrdiff_t>(prefix_limit));
+        }
+        result.events.push_back(std::move(event));
+    }
+    result.event_resource.retained = result.events.size();
+    const auto omitted = checked_sub(result.event_resource.total_generated,
+                                     result.event_resource.retained);
+    if (!omitted)
+    {
+        running_ = false;
+        return Result<bool>::failure(omitted.error());
+    }
+    result.event_resource.omitted = omitted.value();
+    result.event_resource.first_sequence_retained = result.events.empty()
+                                                        ? std::nullopt
+                                                        : std::optional<std::size_t>(
+                                                              result.events.front().sequence);
+    result.event_resource.last_sequence_retained = result.events.empty()
+                                                       ? std::nullopt
+                                                       : std::optional<std::size_t>(
+                                                             result.events.back().sequence);
+    const auto reconciled = checked_add(result.event_resource.retained,
+                                        result.event_resource.omitted);
+    result.event_resource.reconciles = reconciled &&
+                                       reconciled.value() == result.event_resource.total_generated;
+    return Result<bool>::success(true);
 }
 
 Result<void> ExecutionSession::map_stack(ExecutionSessionResult& result)
@@ -2001,9 +2113,15 @@ Result<void> ExecutionSession::map_stack(ExecutionSessionResult& result)
         return Result<void>::failure(make_error(
             ErrorCode::InvalidGuestAddress, "synthetic stack cannot provide an aligned initial SP"));
     }
-    if (!record_event(result, ExecutionEvent{0U, ExecutionEventKind::StackMapped, 0U, 0U,
-                                               result.stack_base, true, 0U,
-                                               runtime::ExecutionBoundaryKind::None, {}, {}, {}, {}}))
+    const auto recorded = record_event(
+        result, ExecutionEvent{0U, ExecutionEventKind::StackMapped, 0U, 0U,
+                               result.stack_base, true, 0U,
+                               runtime::ExecutionBoundaryKind::None, {}, {}, {}, {}});
+    if (!recorded)
+    {
+        return Result<void>::failure(recorded.error());
+    }
+    if (!recorded.value())
     {
         return Result<void>::success();
     }
@@ -2327,9 +2445,9 @@ Result<void> ExecutionSession::enter_function(GuestAddress entry,
                          current_.call_depth, runtime::ExecutionBoundaryKind::None,
                          {}, {}, {}, {}};
     event.function_module = module_name_for(entry);
-    return record_event(result, std::move(event))
-               ? Result<void>::success()
-               : Result<void>::success();
+    const auto recorded = record_event(result, std::move(event));
+    if (!recorded) return Result<void>::failure(recorded.error());
+    return Result<void>::success();
 }
 
 Result<void> ExecutionSession::stop(ExecutionSessionResult& result, ExecutionStopReason reason,
@@ -2408,7 +2526,12 @@ Result<void> ExecutionSession::stop(ExecutionSessionResult& result, ExecutionSto
                                execution_stop_reason_name(reason), import_symbol, {}, {}};
     stop_event.function_module = result.current_function_module;
     stop_event.target_module = module_name_for(target.value_or(current_.function_entry));
-    if (!record_event(result, std::move(stop_event)))
+    const auto recorded_stop = record_event(result, std::move(stop_event));
+    if (!recorded_stop)
+    {
+        return Result<void>::failure(recorded_stop.error());
+    }
+    if (!recorded_stop.value())
     {
         return Result<void>::success();
     }
@@ -2420,7 +2543,11 @@ Result<void> ExecutionSession::stop(ExecutionSessionResult& result, ExecutionSto
                                 execution_stop_reason_name(reason), import_symbol, {}, {}};
     session_stop.function_module = result.current_function_module;
     session_stop.target_module = module_name_for(target.value_or(current_.function_entry));
-    (void)record_event(result, std::move(session_stop));
+    const auto recorded_session_stop = record_event(result, std::move(session_stop));
+    if (!recorded_session_stop)
+    {
+        return Result<void>::failure(recorded_session_stop.error());
+    }
     running_ = false;
     return Result<void>::success();
 }
@@ -2537,7 +2664,12 @@ Result<void> ExecutionSession::dispatch_call(const runtime::ExecutionResult& bou
                               current_.call_depth, boundary.boundary.kind, {}, {}, {}, {}};
     call_event.function_module = module_name_for(current_.function_entry);
     call_event.target_module = module_name_for(boundary.boundary.target_guest_address);
-    if (!record_event(result, std::move(call_event)))
+    const auto recorded = record_event(result, std::move(call_event));
+    if (!recorded)
+    {
+        return Result<void>::failure(recorded.error());
+    }
+    if (!recorded.value())
     {
         return Result<void>::success();
     }
@@ -2579,7 +2711,12 @@ Result<void> ExecutionSession::dispatch_transfer(const runtime::ExecutionResult&
                                   current_.call_depth, boundary.boundary.kind, {}, {}, {}, {}};
     transfer_event.function_module = module_name_for(current_.function_entry);
     transfer_event.target_module = module_name_for(boundary.boundary.target_guest_address);
-    if (!record_event(result, std::move(transfer_event)))
+    const auto recorded_transfer = record_event(result, std::move(transfer_event));
+    if (!recorded_transfer)
+    {
+        return Result<void>::failure(recorded_transfer.error());
+    }
+    if (!recorded_transfer.value())
     {
         return Result<void>::success();
     }
@@ -2614,9 +2751,9 @@ Result<void> ExecutionSession::dispatch_transfer(const runtime::ExecutionResult&
                          current_.function_entry, 0U, false, current_.call_depth,
                          runtime::ExecutionBoundaryKind::None, {}, {}, {}, {}};
     event.function_module = module_name_for(current_.function_entry);
-    return record_event(result, std::move(event))
-               ? Result<void>::success()
-               : Result<void>::success();
+    const auto recorded = record_event(result, std::move(event));
+    if (!recorded) return Result<void>::failure(recorded.error());
+    return Result<void>::success();
 }
 
 Result<void> ExecutionSession::dispatch_runtime_import(
@@ -2746,24 +2883,42 @@ Result<void> ExecutionSession::dispatch_runtime_import(
                     boundary.boundary.target_guest_address, &boundary);
     }
 
-    if (!runtime_event(ExecutionEventKind::RuntimeImportResolved,
-                       std::string(runtime::runtime_support_status_name(descriptor->support))))
+    const auto resolved_event = runtime_event(
+        ExecutionEventKind::RuntimeImportResolved,
+        std::string(runtime::runtime_support_status_name(descriptor->support)));
+    if (!resolved_event)
+    {
+        return Result<void>::failure(resolved_event.error());
+    }
+    if (!resolved_event.value())
     {
         observation.abi_validation = "not_attempted";
         observation.outcome = "event_limit";
         result.runtime.imports.push_back(std::move(observation));
         return Result<void>::success();
     }
-    if (!runtime_event(ExecutionEventKind::RuntimeImportEnter,
-                       std::string(runtime::external_invocation_kind_name(invocation))))
+    const auto enter_event = runtime_event(
+        ExecutionEventKind::RuntimeImportEnter,
+        std::string(runtime::external_invocation_kind_name(invocation)));
+    if (!enter_event)
+    {
+        return Result<void>::failure(enter_event.error());
+    }
+    if (!enter_event.value())
     {
         observation.abi_validation = "not_attempted";
         observation.outcome = "event_limit";
         result.runtime.imports.push_back(std::move(observation));
         return Result<void>::success();
     }
-    if (!runtime_event(ExecutionEventKind::RuntimeImportArgumentSummary,
-                       "observed_argument_slots=" + std::to_string(observed_count)))
+    const auto argument_event = runtime_event(
+        ExecutionEventKind::RuntimeImportArgumentSummary,
+        "observed_argument_slots=" + std::to_string(observed_count));
+    if (!argument_event)
+    {
+        return Result<void>::failure(argument_event.error());
+    }
+    if (!argument_event.value())
     {
         observation.abi_validation = "not_attempted";
         observation.outcome = "event_limit";
@@ -2825,8 +2980,14 @@ Result<void> ExecutionSession::dispatch_runtime_import(
         }
     }
 
-    if (!runtime_event(ExecutionEventKind::RuntimeImportReturn,
-                       std::string(runtime::runtime_import_outcome_name(outcome.kind))))
+    const auto return_event = runtime_event(
+        ExecutionEventKind::RuntimeImportReturn,
+        std::string(runtime::runtime_import_outcome_name(outcome.kind)));
+    if (!return_event)
+    {
+        return Result<void>::failure(return_event.error());
+    }
+    if (!return_event.value())
     {
         return Result<void>::success();
     }
@@ -2867,14 +3028,15 @@ Result<void> ExecutionSession::dispatch_runtime_import(
     current_ = std::move(suspended_frames_.back());
     suspended_frames_.pop_back();
     cpu_.pc = expected_return;
-    return record_event(result, ExecutionEvent{0U, ExecutionEventKind::FunctionResume,
-                                                current_.function_entry, expected_return, 0U,
-                                                false, current_.call_depth,
-                                                runtime::ExecutionBoundaryKind::Return,
-                                                "runtime_tail_transfer_resume",
-                                                import.symbol.name, {}, {}})
-               ? Result<void>::success()
-               : Result<void>::success();
+    const auto recorded = record_event(
+        result, ExecutionEvent{0U, ExecutionEventKind::FunctionResume,
+                               current_.function_entry, expected_return, 0U,
+                               false, current_.call_depth,
+                               runtime::ExecutionBoundaryKind::Return,
+                               "runtime_tail_transfer_resume",
+                               import.symbol.name, {}, {}});
+    if (!recorded) return Result<void>::failure(recorded.error());
+    return Result<void>::success();
 }
 
 Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry)
@@ -2887,7 +3049,8 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     if (memory_ == nullptr || function_map_ == nullptr || options_.budgets.slice_ir_operations == 0U ||
         (options_.budgets.max_ir_operations && options_.budgets.max_ir_operations.value() == 0U) ||
         options_.budgets.max_function_transitions == 0U || options_.budgets.max_call_depth == 0U ||
-        options_.budgets.max_events == 0U || options_.budgets.max_guest_blocks == 0U)
+        (options_.budgets.max_events && options_.budgets.max_events.value() == 0U) ||
+        options_.budgets.event_history_limit == 0U || options_.budgets.max_guest_blocks == 0U)
     {
         return Result<ExecutionSessionResult>::failure(
             make_error(ErrorCode::InvalidArgument, "execution budgets and session inputs must be non-zero"));
@@ -2916,6 +3079,15 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     result.identity = function_map_->identity();
     result.entry = entry;
     result.options = options_;
+    result.event_resource.retention_limit = options_.budgets.event_history_limit;
+    result.event_resource.execution_limit = options_.budgets.max_events;
+    result.event_resource.execution_limit_provenance =
+        options_.budgets.max_events
+            ? (options_.budgets.event_execution_limit_provenance ==
+                       EventExecutionLimitProvenance::NotConfigured
+                   ? EventExecutionLimitProvenance::ExplicitLibraryApi
+                   : options_.budgets.event_execution_limit_provenance)
+            : EventExecutionLimitProvenance::NotConfigured;
     result.transition_accounting.configured_limit =
         options_.budgets.max_function_transitions;
     result.transition_accounting.history_limit =
@@ -3023,13 +3195,28 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     prepare_observation_targets();
     result.observation_targets = observation_targets_;
     result.instruction_observation_targets = instruction_observation_targets_;
-    if (!record_event(result, ExecutionEvent{0U, ExecutionEventKind::SessionStart, 0U, 0U, 0U,
-                                               false, 0U,
-                                               runtime::ExecutionBoundaryKind::None, {}, {}, {}, {}}) ||
-        !record_event(result, ExecutionEvent{0U, ExecutionEventKind::EntrySelected, 0U,
-                                               entry.address, entry.address, true, 0U,
-                                               runtime::ExecutionBoundaryKind::None,
-                                               entry_selection_kind_name(entry.kind), {}, {}, {}}))
+    const auto session_start = record_event(
+        result, ExecutionEvent{0U, ExecutionEventKind::SessionStart, 0U, 0U, 0U,
+                               false, 0U,
+                               runtime::ExecutionBoundaryKind::None, {}, {}, {}, {}});
+    if (!session_start)
+    {
+        running_ = false;
+        return Result<ExecutionSessionResult>::failure(session_start.error());
+    }
+    const auto entry_selected = session_start.value()
+                                    ? record_event(
+                                          result, ExecutionEvent{0U, ExecutionEventKind::EntrySelected, 0U,
+                                                                 entry.address, entry.address, true, 0U,
+                                                                 runtime::ExecutionBoundaryKind::None,
+                                                                 entry_selection_kind_name(entry.kind), {}, {}, {}})
+                                    : Result<bool>::success(false);
+    if (!entry_selected)
+    {
+        running_ = false;
+        return Result<ExecutionSessionResult>::failure(entry_selected.error());
+    }
+    if (!session_start.value() || !entry_selected.value())
     {
         result.final_cpu = cpu_;
         return Result<ExecutionSessionResult>::success(std::move(result));
@@ -3037,7 +3224,12 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     const auto stack = map_stack(result);
     if (!stack)
     {
-        (void)stop(result, classify_error(stack.error()), stack.error().message);
+        const auto stopped = stop(result, classify_error(stack.error()), stack.error().message);
+        if (!stopped)
+        {
+            running_ = false;
+            return Result<ExecutionSessionResult>::failure(stopped.error());
+        }
         result.guest_memory = memory_->accounting();
         return Result<ExecutionSessionResult>::success(std::move(result));
     }
@@ -3096,8 +3288,13 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         const auto function_result = lift_for_execution(current_.function_entry, result);
         if (!function_result)
         {
-            (void)stop(result, classify_error(function_result.error()), function_result.error().message,
-                       current_.function_entry);
+            const auto stopped = stop(result, classify_error(function_result.error()),
+                                       function_result.error().message, current_.function_entry);
+            if (!stopped)
+            {
+                running_ = false;
+                return Result<ExecutionSessionResult>::failure(stopped.error());
+            }
             break;
         }
         const auto* function = function_result.value();
@@ -3115,7 +3312,12 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
             *function, cpu_, runtime_, current_.interpreter, interpreter_options);
         if (!step)
         {
-            (void)stop(result, classify_error(step.error()), step.error().message);
+            const auto stopped = stop(result, classify_error(step.error()), step.error().message);
+            if (!stopped)
+            {
+                running_ = false;
+                return Result<ExecutionSessionResult>::failure(stopped.error());
+            }
             break;
         }
         if (const auto added = add_counter(result.ir_operations, step.value().executed_operations);
@@ -3233,8 +3435,13 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         }
         if (result.guest_blocks > options_.budgets.max_guest_blocks)
         {
-            (void)stop(result, ExecutionStopReason::GuestBlockLimitExceeded,
-                       "guest block execution limit exhausted");
+            const auto stopped = stop(result, ExecutionStopReason::GuestBlockLimitExceeded,
+                                      "guest block execution limit exhausted");
+            if (!stopped)
+            {
+                running_ = false;
+                return Result<ExecutionSessionResult>::failure(stopped.error());
+            }
             break;
         }
         const auto& boundary = step.value().boundary;
@@ -3242,8 +3449,14 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         {
             result.terminal_ir_block = step.value().resume_block;
             result.terminal_ir_operation_index = step.value().resume_operation_index;
-            (void)stop(result, ExecutionStopReason::IrOperationLimitExceeded,
-                       "session IR operation limit exhausted", std::nullopt, &step.value());
+            const auto stopped = stop(result, ExecutionStopReason::IrOperationLimitExceeded,
+                                      "session IR operation limit exhausted", std::nullopt,
+                                      &step.value());
+            if (!stopped)
+            {
+                running_ = false;
+                return Result<ExecutionSessionResult>::failure(stopped.error());
+            }
             break;
         }
         if (step.value().status == runtime::ExecutionStatus::Yielded)
@@ -3253,37 +3466,65 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         switch (boundary.kind)
         {
         case runtime::ExecutionBoundaryKind::Return:
+        {
             ++result.returns;
-            if (!record_event(result, ExecutionEvent{0U, ExecutionEventKind::Return,
-                                                       current_.function_entry,
-                                                       boundary.source_guest_pc,
-                                                       boundary.target_guest_address,
-                                                       boundary.target_known, current_.call_depth,
-                                                       boundary.kind, {}, {}, {}, {}}))
+            const auto return_event = record_event(
+                result, ExecutionEvent{0U, ExecutionEventKind::Return,
+                                       current_.function_entry,
+                                       boundary.source_guest_pc,
+                                       boundary.target_guest_address,
+                                       boundary.target_known, current_.call_depth,
+                                       boundary.kind, {}, {}, {}, {}});
+            if (!return_event)
+            {
+                running_ = false;
+                return Result<ExecutionSessionResult>::failure(return_event.error());
+            }
+            if (!return_event.value())
                 break;
             if (suspended_frames_.empty())
             {
-                (void)stop(result, ExecutionStopReason::EntryReturned,
-                           "controlled entry component returned", std::nullopt, &step.value());
+                const auto stopped = stop(result, ExecutionStopReason::EntryReturned,
+                                          "controlled entry component returned", std::nullopt,
+                                          &step.value());
+                if (!stopped)
+                {
+                    running_ = false;
+                    return Result<ExecutionSessionResult>::failure(stopped.error());
+                }
                 break;
             }
             if (boundary.target_guest_address != current_.expected_return_pc)
             {
-                (void)stop(result, ExecutionStopReason::ReturnTargetMismatch,
-                           "guest return target does not match the caller continuation",
-                           boundary.target_guest_address, &step.value());
+                const auto stopped = stop(
+                    result, ExecutionStopReason::ReturnTargetMismatch,
+                    "guest return target does not match the caller continuation",
+                    boundary.target_guest_address, &step.value());
+                if (!stopped)
+                {
+                    running_ = false;
+                    return Result<ExecutionSessionResult>::failure(stopped.error());
+                }
                 break;
             }
             current_ = std::move(suspended_frames_.back());
             suspended_frames_.pop_back();
             cpu_.pc = current_.expected_return_pc;
-            if (!record_event(result, ExecutionEvent{0U, ExecutionEventKind::FunctionResume,
-                                                       current_.function_entry,
-                                                       current_.expected_return_pc, 0U, false,
-                                                       current_.call_depth,
-                                                       runtime::ExecutionBoundaryKind::Return, {}, {}, {}, {}}))
+            const auto resume_event = record_event(
+                result, ExecutionEvent{0U, ExecutionEventKind::FunctionResume,
+                                       current_.function_entry,
+                                       current_.expected_return_pc, 0U, false,
+                                       current_.call_depth,
+                                       runtime::ExecutionBoundaryKind::Return, {}, {}, {}, {}});
+            if (!resume_event)
+            {
+                running_ = false;
+                return Result<ExecutionSessionResult>::failure(resume_event.error());
+            }
+            if (!resume_event.value())
                 break;
             break;
+        }
         case runtime::ExecutionBoundaryKind::DirectCall:
         case runtime::ExecutionBoundaryKind::IndirectCall:
         {
@@ -3309,30 +3550,66 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
             break;
         }
         case runtime::ExecutionBoundaryKind::Trap:
-            (void)stop(result, ExecutionStopReason::GuestTrap,
-                       boundary.target_provenance, std::nullopt, &step.value());
+        {
+            const auto stopped = stop(result, ExecutionStopReason::GuestTrap,
+                                      boundary.target_provenance, std::nullopt, &step.value());
+            if (!stopped)
+            {
+                running_ = false;
+                return Result<ExecutionSessionResult>::failure(stopped.error());
+            }
             break;
+        }
         case runtime::ExecutionBoundaryKind::UnsupportedInstruction:
-            (void)stop(result, ExecutionStopReason::UnsupportedInstruction,
-                       boundary.target_provenance, std::nullopt, &step.value());
+        {
+            const auto stopped = stop(result, ExecutionStopReason::UnsupportedInstruction,
+                                      boundary.target_provenance, std::nullopt, &step.value());
+            if (!stopped)
+            {
+                running_ = false;
+                return Result<ExecutionSessionResult>::failure(stopped.error());
+            }
             break;
+        }
         case runtime::ExecutionBoundaryKind::BudgetExhaustion:
-            (void)stop(result, ExecutionStopReason::IrOperationLimitExceeded,
-                       "session IR operation limit exhausted", std::nullopt, &step.value());
+        {
+            const auto stopped = stop(result, ExecutionStopReason::IrOperationLimitExceeded,
+                                      "session IR operation limit exhausted", std::nullopt,
+                                      &step.value());
+            if (!stopped)
+            {
+                running_ = false;
+                return Result<ExecutionSessionResult>::failure(stopped.error());
+            }
             break;
+        }
         case runtime::ExecutionBoundaryKind::SliceExhaustion:
             // A yielded step is consumed above. Reaching this case would mean
             // an inconsistent interpreter status, so fail closed as an
             // unsupported semantic boundary rather than publishing progress.
-            (void)stop(result, ExecutionStopReason::UnsupportedSemantic,
-                       "interpreter returned an untyped slice boundary", std::nullopt,
-                       &step.value());
+        {
+            const auto stopped = stop(result, ExecutionStopReason::UnsupportedSemantic,
+                                      "interpreter returned an untyped slice boundary",
+                                      std::nullopt, &step.value());
+            if (!stopped)
+            {
+                running_ = false;
+                return Result<ExecutionSessionResult>::failure(stopped.error());
+            }
             break;
+        }
         case runtime::ExecutionBoundaryKind::None:
-            (void)stop(result, ExecutionStopReason::UnsupportedSemantic,
-                       "interpreter returned without a semantic boundary", std::nullopt,
-                       &step.value());
+        {
+            const auto stopped = stop(result, ExecutionStopReason::UnsupportedSemantic,
+                                      "interpreter returned without a semantic boundary",
+                                      std::nullopt, &step.value());
+            if (!stopped)
+            {
+                running_ = false;
+                return Result<ExecutionSessionResult>::failure(stopped.error());
+            }
             break;
+        }
         }
     }
     result.final_cpu = cpu_;
@@ -3362,20 +3639,65 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
     {
         executable_ranges.push_back(range_json(range));
     }
-    json events = json::array();
-    for (const auto& event : result.events)
-    {
+    const auto event_json = [](const ExecutionEvent& event) {
         json item{{"sequence", event.sequence}, {"kind", execution_event_kind_name(event.kind)},
                   {"function_entry", hex_address(event.function_entry)},
                   {"guest_pc", hex_address(event.guest_pc)}, {"call_depth", event.call_depth},
+                  {"guest_instruction_count", event.guest_instruction_count},
+                  {"guest_block_count", event.guest_block_count},
+                  {"ir_operation_count", event.ir_operation_count},
                   {"boundary", runtime::execution_boundary_kind_name(event.boundary)},
                   {"code", event.code}};
         if (event.has_target) item["target"] = hex_address(event.target);
         if (!event.import_symbol.empty()) item["import_symbol"] = event.import_symbol;
         if (!event.function_module.empty()) item["function_module"] = event.function_module;
         if (!event.target_module.empty()) item["target_module"] = event.target_module;
-        events.push_back(std::move(item));
+        return item;
+    };
+    json events = json::array();
+    for (const auto& event : result.events)
+    {
+        events.push_back(event_json(event));
     }
+    json event_counts = json::object();
+    for (std::size_t index = 0U; index < execution_event_kind_count; ++index)
+    {
+        event_counts[execution_event_kind_name(static_cast<ExecutionEventKind>(index))] =
+            result.event_resource.by_kind[index];
+    }
+    const auto terminal_attempt = result.event_resource.terminal_attempt
+                                      ? event_json(result.event_resource.terminal_attempt.value())
+                                      : json(nullptr);
+    const json event_resource{
+        {"model", result.event_resource.model},
+        {"total_generated", result.event_resource.total_generated},
+        {"retained", result.event_resource.retained},
+        {"omitted", result.event_resource.omitted},
+        {"history_truncated", result.event_resource.history_truncated},
+        {"history_policy", result.event_resource.history_policy},
+        {"retention_limit", result.event_resource.retention_limit},
+        {"execution_limit", result.event_resource.execution_limit
+                                 ? json(result.event_resource.execution_limit.value())
+                                 : json(nullptr)},
+        {"execution_limit_provenance",
+         event_execution_limit_provenance_name(
+             result.event_resource.execution_limit_provenance)},
+        {"by_kind", std::move(event_counts)},
+        {"first_sequence_retained", result.event_resource.first_sequence_retained
+                                         ? json(result.event_resource.first_sequence_retained.value())
+                                         : json(nullptr)},
+        {"last_sequence_retained", result.event_resource.last_sequence_retained
+                                        ? json(result.event_resource.last_sequence_retained.value())
+                                        : json(nullptr)},
+        {"reconciles", result.event_resource.reconciles},
+        {"terminal_attempt_sequence", result.event_resource.terminal_attempt_sequence
+                                           ? json(result.event_resource.terminal_attempt_sequence.value())
+                                           : json(nullptr)},
+        {"terminal_attempt_kind", result.event_resource.terminal_attempt_kind
+                                       ? json(execution_event_kind_name(
+                                             result.event_resource.terminal_attempt_kind.value()))
+                                       : json(nullptr)},
+        {"terminal_attempt", terminal_attempt}};
     json stack = json::array();
     for (const auto& frame : result.call_stack)
     {
@@ -3824,7 +4146,15 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                   {"slice_ir_operations", result.options.budgets.slice_ir_operations},
                                   {"max_function_transitions", result.options.budgets.max_function_transitions},
                                   {"max_call_depth", result.options.budgets.max_call_depth},
-                                  {"max_events", result.options.budgets.max_events},
+                                  {"max_events", result.options.budgets.max_events
+                                                      ? json(result.options.budgets.max_events.value())
+                                                      : json(nullptr)},
+                                  {"event_execution_limit_provenance",
+                                   result.options.budgets.max_events
+                                       ? event_execution_limit_provenance_name(
+                                             result.event_resource.execution_limit_provenance)
+                                       : "not_configured"},
+                                  {"event_history_limit", result.options.budgets.event_history_limit},
                                   {"max_guest_blocks", result.options.budgets.max_guest_blocks}}},
                 {"call_stack_snapshot", std::move(stack)},
                 {"registers", cpu_json(result.final_cpu)},
@@ -3847,6 +4177,7 @@ std::string render_execution_report_json(const ExecutionSessionResult& result)
                                       }
                                       return imports;
                                   }()}}},
+                {"event_resource", event_resource},
                 {"events", std::move(events)},
                 {"process", std::move(process)}};
     if (result.import_boundary)

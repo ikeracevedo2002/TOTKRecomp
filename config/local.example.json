@@ -1,4 +1,9 @@
 {
+  "execution": {
+    "budgets": {
+      "event_history_limit": 4096
+    }
+  },
   "target_manifest": "targets/totk/template/manifest.json",
   "modules": {
     "main": "/path/to/your/local/main.nso"

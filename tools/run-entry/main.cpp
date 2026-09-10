@@ -155,7 +155,8 @@ void help(std::ostream& output)
               "  --max-ir-operations N          Explicit global execution IR hard limit.\n"
               "  --max-function-transitions N   Global guest transition budget.\n"
               "  --max-call-depth N             Guest call-depth budget.\n"
-              "  --max-events N                 Trace event budget.\n"
+              "  --max-events N                 Explicit compatibility execution-event guard.\n"
+              "  --event-history-limit N        Bounded diagnostic event-history capacity.\n"
               "  --max-guest-blocks N           Guest block budget.\n";
 }
 
@@ -309,6 +310,8 @@ int main(int argc, char** argv)
     bool refinement_assessment_limit_cli_override = false;
     bool refinement_transaction_limit_cli_override = false;
     bool analysis_profile_cli_override = false;
+    bool event_limit_cli_override = false;
+    bool event_history_limit_cli_override = false;
 
     const auto apply_analysis_profile = [&](analysis::AnalysisBudgets profile,
                                             bool mark_as_cli_profile) {
@@ -496,6 +499,36 @@ int main(int argc, char** argv)
             continue;
         }
 
+        if (take_value(index, argc, argv, "--max-events", value))
+        {
+            std::uint64_t parsed = 0U;
+            if (!parse_u64(value, parsed) || parsed == 0U ||
+                parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+            {
+                std::cerr << "invalid numeric option\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
+            execution_options.budgets.max_events = static_cast<std::size_t>(parsed);
+            execution_options.budgets.event_execution_limit_provenance =
+                execution::EventExecutionLimitProvenance::ExplicitCli;
+            event_limit_cli_override = true;
+            continue;
+        }
+
+        if (take_value(index, argc, argv, "--event-history-limit", value))
+        {
+            std::uint64_t parsed = 0U;
+            if (!parse_u64(value, parsed) || parsed == 0U ||
+                parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+            {
+                std::cerr << "invalid numeric option\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
+            execution_options.budgets.event_history_limit = static_cast<std::size_t>(parsed);
+            event_history_limit_cli_override = true;
+            continue;
+        }
+
         if (take_value(index, argc, argv, "--refinement-max-assessments", value))
         {
             std::uint64_t parsed = 0U;
@@ -586,7 +619,6 @@ int main(int argc, char** argv)
                          refinement_budgets.analysis.max_invalidated_records) ||
             parse_number("--max-function-transitions", execution_options.budgets.max_function_transitions) ||
             parse_number("--max-call-depth", execution_options.budgets.max_call_depth) ||
-            parse_number("--max-events", execution_options.budgets.max_events) ||
             parse_number("--max-guest-blocks", execution_options.budgets.max_guest_blocks))
         {
             if (invalid_number)
@@ -775,6 +807,45 @@ int main(int argc, char** argv)
                               analysis::AnalysisBudgetDimension::BoundaryFinalizationPasses,
                               function_options.budgets.max_boundary_finalization_passes,
                               std::numeric_limits<std::size_t>::max());
+
+            if (root.contains("execution") && !root.at("execution").is_object())
+                throw std::runtime_error("execution configuration must be an object");
+            const auto execution_object = root.contains("execution")
+                                              ? root.at("execution")
+                                              : nlohmann::json::object();
+            const auto execution_budget_object = execution_object.contains("budgets")
+                                                     ? execution_object.at("budgets")
+                                                     : execution_object;
+            if (!execution_budget_object.is_object())
+                throw std::runtime_error("execution budgets configuration must be an object");
+            if (!event_limit_cli_override && execution_budget_object.contains("max_events"))
+            {
+                const auto& value = execution_budget_object.at("max_events");
+                if (!value.is_number_unsigned())
+                    throw std::runtime_error("execution event limit must be an unsigned integer");
+                const auto parsed = value.get<std::uint64_t>();
+                if (parsed == 0U ||
+                    parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+                    throw std::runtime_error(
+                        "execution event limit is zero or overflows its type");
+                execution_options.budgets.max_events = static_cast<std::size_t>(parsed);
+                execution_options.budgets.event_execution_limit_provenance =
+                    execution::EventExecutionLimitProvenance::ExplicitLocalConfiguration;
+            }
+            if (!event_history_limit_cli_override &&
+                execution_budget_object.contains("event_history_limit"))
+            {
+                const auto& value = execution_budget_object.at("event_history_limit");
+                if (!value.is_number_unsigned())
+                    throw std::runtime_error(
+                        "event history limit must be an unsigned integer");
+                const auto parsed = value.get<std::uint64_t>();
+                if (parsed == 0U ||
+                    parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+                    throw std::runtime_error(
+                        "event history limit is zero or overflows its type");
+                execution_options.budgets.event_history_limit = static_cast<std::size_t>(parsed);
+            }
 
             if (root.contains("refinement_analysis") &&
                 !root.at("refinement_analysis").is_object())
