@@ -397,7 +397,10 @@ struct IndirectTargetRefinementAnalysisBudgets
     memory::GuestSize max_bytes_analyzed = memory::GuestSize{256U} * 1024U * 1024U;
     std::size_t max_boundary_finalization_passes = 2'048U;
     std::size_t max_invalidated_records = 100'000U;
-    std::size_t max_transactions = 512U;
+    // Reusable-map transactions remain auditable accounting, but ordinary
+    // termination is provided by the semantic aggregate resources below.
+    // An engaged value is an explicit finite compatibility/debug ceiling.
+    std::optional<std::size_t> max_transactions = std::nullopt;
 
     AnalysisBudgetProvenance functions_analyzed_provenance{
         AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
@@ -416,7 +419,7 @@ struct IndirectTargetRefinementAnalysisBudgets
     AnalysisBudgetProvenance invalidated_records_provenance{
         AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
     AnalysisBudgetProvenance transactions_provenance{
-        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+        AnalysisBudgetProvenanceKind::LibraryDefault, "not_configured"};
 };
 
 struct IndirectTargetRefinementAnalysisWork

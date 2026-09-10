@@ -149,6 +149,10 @@ TEST_CASE("M32 ordinary semantic accounting crosses the former 512 assessment fr
 
     IndirectTargetRefinementBudgets budgets;
     budgets.candidate_universe = universe.value();
+    // Preserve the historical M32 compatibility-boundary assertion. M33's
+    // ordinary profile leaves this ceiling disengaged; the dedicated M33
+    // suite proves that the same production workload crosses 512.
+    budgets.analysis.max_transactions = 512U;
     IndirectTargetRefinementWorklist worklist(budgets);
     analysis::IndirectTargetDiscoveryOptions options;
 
@@ -201,7 +205,7 @@ TEST_CASE("M32 ordinary semantic accounting crosses the former 512 assessment fr
             IndirectTargetRefinementBudgetDimension::RefinementAnalysisTransactions);
     REQUIRE(summary.exhaustion.consumed == 512U);
     REQUIRE(summary.exhaustion.limit == 512U);
-    REQUIRE(summary.analysis.transactions <= summary.analysis.configured.max_transactions);
+    REQUIRE(summary.analysis.transactions <= summary.analysis.configured.max_transactions.value());
     REQUIRE(map.find_exact_entry(base + 512U * 4U) != nullptr);
     REQUIRE(map.find_exact_entry(base + 513U * 4U) == nullptr);
 }
@@ -441,7 +445,7 @@ TEST_CASE("M32 assessment reports are deterministic and expose the semantic mode
     const auto first_report = rendered_worklist(first);
     const auto second_report = rendered_worklist(second);
     REQUIRE(first_report == second_report);
-    REQUIRE(execution::ExecutionSessionResult::schema_version == 18U);
+    REQUIRE(execution::ExecutionSessionResult::schema_version == 19U);
     REQUIRE(first_report.find("\"schema_version\"") != std::string::npos);
     REQUIRE(first_report.find("\"assessment_accounting\"") != std::string::npos);
     REQUIRE(first_report.find("structural_candidate_generation_v1") != std::string::npos);

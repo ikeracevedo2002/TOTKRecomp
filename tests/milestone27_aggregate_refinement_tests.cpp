@@ -239,12 +239,12 @@ TEST_CASE("M27 newly introduced callable boundaries invalidate dependent ownersh
     REQUIRE(rebuilt.value().conflicts().empty());
 }
 
-TEST_CASE("M27 aggregate dimension names and finite defaults are deterministic")
+TEST_CASE("M27 aggregate dimension names and semantic defaults are deterministic")
 {
     const IndirectTargetRefinementBudgets budgets;
     REQUIRE(budgets.analysis.max_functions_analyzed != 0U);
     REQUIRE(budgets.analysis.max_functions_reanalyzed != 0U);
-    REQUIRE(budgets.analysis.max_transactions != 0U);
+    REQUIRE_FALSE(budgets.analysis.max_transactions.has_value());
     REQUIRE(analysis::indirect_target_refinement_analysis_dimension_name(
                 IndirectTargetRefinementAnalysisDimension::Instructions) == "instructions");
     REQUIRE(analysis::indirect_target_refinement_budget_dimension_name(

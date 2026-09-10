@@ -2057,6 +2057,12 @@ IndirectTargetRefinementWorklist::IndirectTargetRefinementWorklist(
         budgets_.candidate_assessment_limit_provenance = AnalysisBudgetProvenance{
             AnalysisBudgetProvenanceKind::ExplicitApiOverride, "library_api"};
     }
+    if (budgets_.analysis.max_transactions &&
+        budgets_.analysis.transactions_provenance.detail == "not_configured")
+    {
+        budgets_.analysis.transactions_provenance = AnalysisBudgetProvenance{
+            AnalysisBudgetProvenanceKind::ExplicitApiOverride, "library_api"};
+    }
     counters_.configured = budgets_;
     counters_.analysis.configured = budgets_.analysis;
 }
@@ -2557,9 +2563,11 @@ bool IndirectTargetRefinementWorklist::can_commit_refinement(
                 configured.max_invalidated_records))
         return fail(IndirectTargetRefinementBudgetDimension::RefinementAnalysisInvalidatedRecords,
                     consumed.invalidated_records, configured.max_invalidated_records);
-    if (exceeds(consumed.transactions, work.transactions, configured.max_transactions))
+    if (configured.max_transactions &&
+        exceeds(consumed.transactions, work.transactions,
+                configured.max_transactions.value()))
         return fail(IndirectTargetRefinementBudgetDimension::RefinementAnalysisTransactions,
-                    consumed.transactions, configured.max_transactions);
+                    consumed.transactions, configured.max_transactions.value());
     return true;
 }
 
@@ -2622,20 +2630,81 @@ void IndirectTargetRefinementWorklist::record_promotion(
         return;
     if (!can_promote()) return;
     if (!can_commit_refinement(candidate, work, module_maps_rebuilt, module_maps_reused)) return;
-    ++counters_.successful_promotions;
-    ++counters_.map_rebuilds;
-    counters_.module_maps_rebuilt += module_maps_rebuilt;
-    counters_.module_maps_reused += module_maps_reused;
-    counters_.analysis.functions_analyzed += work.functions_analyzed;
-    counters_.analysis.functions_reanalyzed += work.functions_reanalyzed;
-    counters_.analysis.functions_reused += work.functions_reused;
-    counters_.analysis.instructions += work.instructions;
-    counters_.analysis.blocks += work.blocks;
-    counters_.analysis.edges += work.edges;
-    counters_.analysis.bytes_analyzed += work.bytes_analyzed;
-    counters_.analysis.boundary_finalization_passes += work.boundary_finalization_passes;
-    counters_.analysis.invalidated_records += work.invalidated_records;
-    counters_.analysis.transactions += work.transactions;
+    const auto checked_add_size = [](std::size_t current, std::size_t delta,
+                                     std::size_t& next) noexcept {
+        if (delta > std::numeric_limits<std::size_t>::max() - current) return false;
+        next = current + delta;
+        return true;
+    };
+    const auto checked_add_guest_size = [](memory::GuestSize current,
+                                           memory::GuestSize delta,
+                                           memory::GuestSize& next) noexcept {
+        if (delta > std::numeric_limits<memory::GuestSize>::max() - current) return false;
+        next = current + delta;
+        return true;
+    };
+    std::size_t successful_promotions = 0U;
+    std::size_t map_rebuilds = 0U;
+    std::size_t module_maps_rebuilt_total = 0U;
+    std::size_t module_maps_reused_total = 0U;
+    std::size_t functions_analyzed = 0U;
+    std::size_t functions_reanalyzed = 0U;
+    std::size_t functions_reused = 0U;
+    std::size_t instructions = 0U;
+    std::size_t blocks = 0U;
+    std::size_t edges = 0U;
+    memory::GuestSize bytes_analyzed = 0U;
+    std::size_t boundary_finalization_passes = 0U;
+    std::size_t invalidated_records = 0U;
+    std::size_t transactions = 0U;
+    std::size_t next_generation = 0U;
+    if (!checked_add_size(counters_.successful_promotions, 1U, successful_promotions) ||
+        !checked_add_size(counters_.map_rebuilds, 1U, map_rebuilds) ||
+        !checked_add_size(map_generation_, 1U, next_generation) ||
+        !checked_add_size(counters_.module_maps_rebuilt, module_maps_rebuilt,
+                          module_maps_rebuilt_total) ||
+        !checked_add_size(counters_.module_maps_reused, module_maps_reused,
+                          module_maps_reused_total) ||
+        !checked_add_size(counters_.analysis.functions_analyzed, work.functions_analyzed,
+                          functions_analyzed) ||
+        !checked_add_size(counters_.analysis.functions_reanalyzed, work.functions_reanalyzed,
+                          functions_reanalyzed) ||
+        !checked_add_size(counters_.analysis.functions_reused, work.functions_reused,
+                          functions_reused) ||
+        !checked_add_size(counters_.analysis.instructions, work.instructions, instructions) ||
+        !checked_add_size(counters_.analysis.blocks, work.blocks, blocks) ||
+        !checked_add_size(counters_.analysis.edges, work.edges, edges) ||
+        !checked_add_guest_size(counters_.analysis.bytes_analyzed, work.bytes_analyzed,
+                                bytes_analyzed) ||
+        !checked_add_size(counters_.analysis.boundary_finalization_passes,
+                          work.boundary_finalization_passes, boundary_finalization_passes) ||
+        !checked_add_size(counters_.analysis.invalidated_records, work.invalidated_records,
+                          invalidated_records) ||
+        !checked_add_size(counters_.analysis.transactions, work.transactions, transactions))
+    {
+        counters_.exhaustion = IndirectTargetRefinementExhaustion{
+            IndirectTargetRefinementBudgetDimension::CounterOverflow,
+            counters_.successful_promotions,
+            std::numeric_limits<std::size_t>::max(),
+            work.module,
+            map_generation_,
+            candidate};
+        return;
+    }
+    counters_.successful_promotions = successful_promotions;
+    counters_.map_rebuilds = map_rebuilds;
+    counters_.module_maps_rebuilt = module_maps_rebuilt_total;
+    counters_.module_maps_reused = module_maps_reused_total;
+    counters_.analysis.functions_analyzed = functions_analyzed;
+    counters_.analysis.functions_reanalyzed = functions_reanalyzed;
+    counters_.analysis.functions_reused = functions_reused;
+    counters_.analysis.instructions = instructions;
+    counters_.analysis.blocks = blocks;
+    counters_.analysis.edges = edges;
+    counters_.analysis.bytes_analyzed = bytes_analyzed;
+    counters_.analysis.boundary_finalization_passes = boundary_finalization_passes;
+    counters_.analysis.invalidated_records = invalidated_records;
+    counters_.analysis.transactions = transactions;
     item->second.pending = false;
     item->second.processed = true;
     item->second.promoted = true;
@@ -2645,7 +2714,7 @@ void IndirectTargetRefinementWorklist::record_promotion(
     // reconsidered after a relevant map change.  Marking it with the new
     // generation here would erase that distinction and make the publication
     // itself indistinguishable from an assessment at the new generation.
-    ++map_generation_;
+    map_generation_ = next_generation;
     round_productive_ = round_active_ || round_productive_;
 }
 

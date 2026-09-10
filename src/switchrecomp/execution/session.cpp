@@ -705,6 +705,23 @@ using json = nlohmann::json;
     };
     const auto& analysis_budgets = budgets.analysis;
     const auto& analysis = summary.analysis;
+    const auto compatibility_exhaustion =
+        exhaustion.dimension ==
+                analysis::IndirectTargetRefinementBudgetDimension::RefinementAnalysisTransactions
+            ? json{{"consumed", exhaustion.consumed},
+                   {"limit", exhaustion.limit},
+                   {"module", exhaustion.module},
+                   {"generation", exhaustion.generation},
+                   {"next_work", refinement_candidate_identity_json(exhaustion.next_work)}}
+            : json(nullptr);
+    const auto counter_overflow_failure =
+        exhaustion.dimension == analysis::IndirectTargetRefinementBudgetDimension::CounterOverflow
+            ? json{{"consumed", exhaustion.consumed},
+                   {"limit", exhaustion.limit},
+                   {"module", exhaustion.module},
+                   {"generation", exhaustion.generation},
+                   {"next_work", refinement_candidate_identity_json(exhaustion.next_work)}}
+            : json(nullptr);
     return json{
         {"configured_limits",
          json{{"max_stagnant_rounds", budgets.max_stagnant_rounds},
@@ -742,7 +759,9 @@ using json = nlohmann::json;
               {"max_boundary_finalization_passes",
                analysis_budgets.max_boundary_finalization_passes},
               {"max_invalidated_records", analysis_budgets.max_invalidated_records},
-              {"max_transactions", analysis_budgets.max_transactions}}},
+              {"max_transactions", analysis_budgets.max_transactions
+                                       ? json(analysis_budgets.max_transactions.value())
+                                       : json(nullptr)}}},
         {"aggregate_analysis_provenance",
          json{{"functions_analyzed", provenance_json(analysis_budgets.functions_analyzed_provenance)},
               {"functions_reanalyzed", provenance_json(analysis_budgets.functions_reanalyzed_provenance)},
@@ -754,6 +773,19 @@ using json = nlohmann::json;
                provenance_json(analysis_budgets.boundary_finalization_provenance)},
               {"invalidated_records", provenance_json(analysis_budgets.invalidated_records_provenance)},
               {"transactions", provenance_json(analysis_budgets.transactions_provenance)}}},
+        {"transaction_resource",
+         json{{"ordinary_termination_mode", "semantic_aggregate_resources"},
+              {"transaction_ceiling_configured", analysis_budgets.max_transactions.has_value()},
+              {"configured_transaction_limit", analysis_budgets.max_transactions
+                                                    ? json(analysis_budgets.max_transactions.value())
+                                                    : json(nullptr)},
+              {"transaction_limit_provenance",
+               provenance_json(analysis_budgets.transactions_provenance)},
+              {"transactions_consumed", analysis.transactions},
+              {"dominating_resource", "boundary_finalization_passes"},
+              {"termination_invariant", "transactions <= boundary_finalization_passes"},
+              {"explicit_compatibility_exhaustion", std::move(compatibility_exhaustion)},
+              {"counter_overflow_failure", std::move(counter_overflow_failure)}}},
         {"aggregate_analysis_consumption",
          json{{"functions_analyzed", analysis.functions_analyzed},
               {"functions_reanalyzed", analysis.functions_reanalyzed},

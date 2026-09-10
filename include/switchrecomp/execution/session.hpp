@@ -427,8 +427,10 @@ struct SmulhFrontierEvidence
 struct ExecutionSessionResult
 {
     // M26 separates productive refinement progress from independently
-    // bounded no-progress retries while retaining deterministic evidence.
-    static constexpr std::uint32_t schema_version = 18U;
+    // bounded no-progress retries while retaining deterministic evidence;
+    // M33 keeps transaction accounting while making its ordinary ceiling
+    // semantic rather than a fixed event default.
+    static constexpr std::uint32_t schema_version = 19U;
 
     analysis::ModuleIdentity identity;
     EntrySelection entry;

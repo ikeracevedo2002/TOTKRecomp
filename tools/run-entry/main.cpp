@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -150,7 +151,7 @@ void help(std::ostream& output)
               "  --refinement-max-analysis-bytes N           Cumulative refinement byte work.\n"
               "  --refinement-max-analysis-boundary-passes N Cumulative boundary-finalization work.\n"
               "  --refinement-max-invalidated-records N      Cumulative invalidation work.\n"
-              "  --refinement-max-analysis-transactions N    Cumulative immutable transactions.\n"
+              "  --refinement-max-analysis-transactions N    Explicit finite transaction compatibility ceiling.\n"
               "  --max-ir-operations N          Explicit global execution IR hard limit.\n"
               "  --max-function-transitions N   Global guest transition budget.\n"
               "  --max-call-depth N             Guest call-depth budget.\n"
@@ -172,6 +173,28 @@ void print_error(const Error& error)
             std::cerr << " next=0x" << std::hex << context.next_work.value() << std::dec;
         std::cerr << '\n';
     }
+}
+
+[[nodiscard]] std::string refinement_exhaustion_diagnostic(
+    const analysis::IndirectTargetRefinementSummary& summary)
+{
+    const auto& exhaustion = summary.exhaustion;
+    std::string result =
+        "indirect target refinement " +
+        std::string(analysis::indirect_target_refinement_budget_dimension_name(
+            exhaustion.dimension)) +
+        " budget exhausted (" + std::to_string(exhaustion.consumed) + "/" +
+        std::to_string(exhaustion.limit) + ") module=" + exhaustion.module +
+        " generation=" + std::to_string(exhaustion.generation) +
+        " pending=" + std::to_string(summary.pending_candidate_count);
+    if (exhaustion.next_work)
+    {
+        std::ostringstream next;
+        next << " next_candidate=" << exhaustion.next_work->target_module << ":0x" << std::hex
+             << exhaustion.next_work->target << std::dec;
+        result += next.str();
+    }
+    return result;
 }
 
 [[nodiscard]] bool take_value(int& index, int argc, char** argv, std::string_view option,
@@ -284,6 +307,7 @@ int main(int argc, char** argv)
         refinement_analysis_cli_overrides;
     bool refinement_candidate_limit_cli_override = false;
     bool refinement_assessment_limit_cli_override = false;
+    bool refinement_transaction_limit_cli_override = false;
     bool analysis_profile_cli_override = false;
 
     const auto apply_analysis_profile = [&](analysis::AnalysisBudgets profile,
@@ -490,6 +514,26 @@ int main(int argc, char** argv)
             continue;
         }
 
+        if (take_value(index, argc, argv, "--refinement-max-analysis-transactions", value))
+        {
+            std::uint64_t parsed = 0U;
+            if (!parse_u64(value, parsed) || parsed == 0U ||
+                parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+            {
+                std::cerr << "invalid numeric option\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
+            refinement_budgets.analysis.max_transactions = static_cast<std::size_t>(parsed);
+            refinement_budgets.analysis.transactions_provenance =
+                analysis::AnalysisBudgetProvenance{
+                    analysis::AnalysisBudgetProvenanceKind::ExplicitCliOverride,
+                    "run_entry_cli"};
+            refinement_analysis_cli_overrides.insert(
+                analysis::IndirectTargetRefinementAnalysisDimension::Transactions);
+            refinement_transaction_limit_cli_override = true;
+            continue;
+        }
+
         bool invalid_number = false;
         const auto parse_number = [&]<typename T>(std::string_view name, T& destination) {
             if (argument != name) return false;
@@ -540,8 +584,6 @@ int main(int argc, char** argv)
                          refinement_budgets.analysis.max_boundary_finalization_passes) ||
             parse_number("--refinement-max-invalidated-records",
                          refinement_budgets.analysis.max_invalidated_records) ||
-            parse_number("--refinement-max-analysis-transactions",
-                         refinement_budgets.analysis.max_transactions) ||
             parse_number("--max-function-transitions", execution_options.budgets.max_function_transitions) ||
             parse_number("--max-call-depth", execution_options.budgets.max_call_depth) ||
             parse_number("--max-events", execution_options.budgets.max_events) ||
@@ -847,11 +889,25 @@ int main(int argc, char** argv)
                 refinement_budgets.analysis.invalidated_records_provenance,
                 std::numeric_limits<std::size_t>::max(),
                 analysis::IndirectTargetRefinementAnalysisDimension::InvalidatedRecords);
-            parse_local_refinement_budget(
-                "max_transactions", refinement_budgets.analysis.max_transactions,
-                refinement_budgets.analysis.transactions_provenance,
-                std::numeric_limits<std::size_t>::max(),
-                analysis::IndirectTargetRefinementAnalysisDimension::Transactions);
+            if (!refinement_transaction_limit_cli_override &&
+                refinement_budget_object.contains("max_transactions"))
+            {
+                const auto& value = refinement_budget_object.at("max_transactions");
+                if (!value.is_number_unsigned())
+                    throw std::runtime_error(
+                        "refinement transaction limit must be an unsigned integer");
+                const auto parsed = value.get<std::uint64_t>();
+                if (parsed == 0U ||
+                    parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+                    throw std::runtime_error(
+                        "refinement transaction limit is zero or overflows its type");
+                refinement_budgets.analysis.max_transactions =
+                    static_cast<std::size_t>(parsed);
+                refinement_budgets.analysis.transactions_provenance =
+                    analysis::AnalysisBudgetProvenance{
+                        analysis::AnalysisBudgetProvenanceKind::LocalConfigurationOverride,
+                        "run_entry_local_config"};
+            }
             const auto module_set = root.contains("module_set") && root.at("module_set").is_object()
                                         ? root.at("module_set") : nlohmann::json::object();
             const bool directory_source =
@@ -1284,12 +1340,7 @@ int main(int argc, char** argv)
                 final_result.stop_reason =
                     execution::ExecutionStopReason::IndirectTargetRefinementBudgetExceeded;
                 const auto summary = worklist.summary();
-                final_result.diagnostic =
-                    "indirect target refinement " +
-                    std::string(analysis::indirect_target_refinement_budget_dimension_name(
-                        summary.exhaustion.dimension)) +
-                    " budget exhausted (" + std::to_string(summary.exhaustion.consumed) +
-                    "/" + std::to_string(summary.exhaustion.limit) + ")";
+                final_result.diagnostic = refinement_exhaustion_diagnostic(summary);
                 break;
             }
             execution::ExecutionSession session(process.value().memory(), process_map,
@@ -1374,12 +1425,7 @@ int main(int argc, char** argv)
                 run_result.stop_reason =
                     execution::ExecutionStopReason::IndirectTargetRefinementBudgetExceeded;
                 const auto refinement = worklist.summary();
-                run_result.diagnostic =
-                    "indirect target refinement " +
-                    std::string(analysis::indirect_target_refinement_budget_dimension_name(
-                        refinement.exhaustion.dimension)) +
-                    " budget exhausted (" + std::to_string(refinement.exhaustion.consumed) +
-                    "/" + std::to_string(refinement.exhaustion.limit) + ")";
+                run_result.diagnostic = refinement_exhaustion_diagnostic(refinement);
             }
             run_result.indirect_target_refinement = worklist.summary();
             final_result = std::move(run_result);
