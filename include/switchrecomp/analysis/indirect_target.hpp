@@ -453,6 +453,7 @@ enum class IndirectTargetRefinementBudgetDimension : std::uint8_t
 {
     None,
     StagnantRounds,
+    CounterOverflow,
     UniqueCandidates,
     StructuralCandidateUniverse,
     CandidateAssessments,
@@ -486,7 +487,12 @@ struct IndirectTargetRefinementBudgets
     std::optional<std::size_t> max_unique_candidates;
     AnalysisBudgetProvenance candidate_limit_provenance{
         AnalysisBudgetProvenanceKind::LibraryDefault, "not_configured"};
-    std::size_t max_candidate_assessments = 512U;
+    // Optional pre-M32 compatibility guard. Ordinary operation accounts for
+    // first assessments and generation-dependent reassessments directly from
+    // candidate/generation state instead of using a historical event count.
+    std::optional<std::size_t> max_candidate_assessments;
+    AnalysisBudgetProvenance candidate_assessment_limit_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "not_configured"};
     // Retained only for explicit pre-M27 compatibility. Ordinary defaults do
     // not charge valid monotonic work to these successful-event counts.
     std::size_t max_promotions = 128U;
@@ -519,6 +525,11 @@ struct IndirectTargetRefinementSummary
     std::size_t candidate_records = 0U;
     std::size_t structurally_ineligible_candidates = 0U;
     std::size_t candidate_assessments = 0U;
+    std::size_t first_candidate_assessments = 0U;
+    std::size_t generation_reassessments = 0U;
+    std::size_t same_generation_assessment_attempts = 0U;
+    std::size_t failed_refinements = 0U;
+    std::size_t rollback_assessments = 0U;
     std::size_t terminal_resolutions = 0U;
     std::size_t successful_promotions = 0U;
     std::size_t existing_trusted_hits = 0U;
@@ -529,8 +540,11 @@ struct IndirectTargetRefinementSummary
     std::size_t module_maps_rebuilt = 0U;
     std::size_t module_maps_reused = 0U;
     std::size_t candidates_reconsidered_after_map_change = 0U;
+    std::size_t map_generation = 0U;
     std::size_t pending_candidate_count = 0U;
     IndirectTargetRefinementAnalysisSummary analysis;
+    std::optional<IndirectTargetCandidateIdentity> last_assessed_candidate;
+    std::optional<std::size_t> last_assessment_generation;
     std::optional<IndirectTargetCandidateIdentity> last_processed_candidate;
     std::optional<IndirectTargetCandidateIdentity> next_pending_candidate;
     IndirectTargetRefinementExhaustion exhaustion;
@@ -567,8 +581,12 @@ class IndirectTargetRefinementWorklist
     [[nodiscard]] bool can_promote() noexcept;
     [[nodiscard]] bool can_commit_refinement(
         const IndirectTargetCandidateIdentity& candidate,
-        const IndirectTargetRefinementAnalysisWork& work) noexcept;
+        const IndirectTargetRefinementAnalysisWork& work,
+        std::size_t module_maps_rebuilt = 0U,
+        std::size_t module_maps_reused = 0U) noexcept;
     void record_terminal_candidate(const IndirectTargetCandidateIdentity& candidate) noexcept;
+    void record_failed_refinement(const IndirectTargetCandidateIdentity& candidate) noexcept;
+    void record_rollback_assessment(const IndirectTargetCandidateIdentity& candidate) noexcept;
     void record_promotion(const IndirectTargetCandidateIdentity& candidate,
                           std::size_t module_maps_rebuilt = 0U,
                           std::size_t module_maps_reused = 0U,
@@ -586,11 +604,21 @@ class IndirectTargetRefinementWorklist
         bool processed = false;
         bool promoted = false;
         std::size_t processed_generation = 0U;
+        std::optional<std::size_t> last_assessed_generation;
     };
 
     using TargetIdentity = std::pair<std::string, memory::GuestAddress>;
 
     [[nodiscard]] std::size_t candidate_limit() const noexcept;
+    [[nodiscard]] bool increment_counter(
+        std::size_t& counter, IndirectTargetRefinementBudgetDimension dimension,
+        std::string module = {},
+        std::optional<IndirectTargetCandidateIdentity> next_work = std::nullopt) noexcept;
+    [[nodiscard]] bool add_counter(
+        std::size_t& counter, std::size_t delta,
+        IndirectTargetRefinementBudgetDimension dimension, std::string module = {},
+        std::optional<IndirectTargetCandidateIdentity> next_work = std::nullopt) noexcept;
+    [[nodiscard]] std::vector<ObservedIndirectTarget> all_pending_candidates() const;
 
     IndirectTargetRefinementBudgets budgets_;
     IndirectTargetRefinementSummary counters_;

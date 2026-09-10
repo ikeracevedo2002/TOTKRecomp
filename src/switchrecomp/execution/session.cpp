@@ -712,7 +712,11 @@ using json = nlohmann::json;
                                                        ? json(budgets.max_unique_candidates.value())
                                                        : json(nullptr)},
               {"candidate_limit_provenance", provenance_json(budgets.candidate_limit_provenance)},
-              {"max_candidate_assessments", budgets.max_candidate_assessments},
+              {"max_candidate_assessments", budgets.max_candidate_assessments
+                                                 ? json(budgets.max_candidate_assessments.value())
+                                                 : json(nullptr)},
+              {"candidate_assessment_limit_provenance",
+               provenance_json(budgets.candidate_assessment_limit_provenance)},
               {"max_promotions", budgets.max_promotions},
               {"max_map_rebuilds", budgets.max_map_rebuilds},
               {"legacy_event_limits", budgets.legacy_event_limits}}},
@@ -761,6 +765,37 @@ using json = nlohmann::json;
               {"boundary_finalization_passes", analysis.boundary_finalization_passes},
               {"invalidated_records", analysis.invalidated_records},
               {"transactions", analysis.transactions}}},
+        {"assessment_accounting",
+         json{{"model", "structural_candidate_generation_v1"},
+              {"first_time_assessments", summary.first_candidate_assessments},
+              {"generation_dependent_reassessments", summary.generation_reassessments},
+              {"total_assessments", summary.candidate_assessments},
+              {"same_generation_duplicate_attempts",
+               summary.same_generation_assessment_attempts},
+              {"legacy_assessment_limit_configured",
+               budgets.max_candidate_assessments.has_value()},
+              {"legacy_assessment_limit", budgets.max_candidate_assessments
+                                               ? json(budgets.max_candidate_assessments.value())
+                                               : json(nullptr)},
+              {"legacy_limit_provenance",
+               provenance_json(budgets.candidate_assessment_limit_provenance)},
+              {"ordinary_structural_bound",
+               budgets.candidate_universe.executable_instruction_slots},
+              {"termination_model",
+               "finite candidate records; at most one assessment per candidate per relevant "
+               "immutable map generation; map generations are finite published refinements"},
+              {"map_generation", summary.map_generation},
+              {"last_assessed_candidate",
+               refinement_candidate_identity_json(summary.last_assessed_candidate)},
+              {"last_assessment_generation",
+               summary.last_assessment_generation
+                   ? json(summary.last_assessment_generation.value())
+                   : json(nullptr)},
+              {"next_pending_candidate",
+               refinement_candidate_identity_json(summary.next_pending_candidate)},
+              {"typed_exhaustion_reason",
+               analysis::indirect_target_refinement_budget_dimension_name(
+                   exhaustion.dimension)}}},
         {"total_execution_attempts", summary.total_execution_attempts},
         {"productive_rounds", summary.productive_rounds},
         {"stagnant_rounds", summary.stagnant_rounds},
@@ -770,6 +805,11 @@ using json = nlohmann::json;
         {"candidate_records", summary.candidate_records},
         {"structurally_ineligible_candidates", summary.structurally_ineligible_candidates},
         {"candidate_assessments", summary.candidate_assessments},
+        {"first_candidate_assessments", summary.first_candidate_assessments},
+        {"generation_reassessments", summary.generation_reassessments},
+        {"same_generation_assessment_attempts", summary.same_generation_assessment_attempts},
+        {"failed_refinements", summary.failed_refinements},
+        {"rollback_assessments", summary.rollback_assessments},
         {"terminal_resolutions", summary.terminal_resolutions},
         {"successful_promotions", summary.successful_promotions},
         {"existing_trusted_hits", summary.existing_trusted_hits},
@@ -781,6 +821,7 @@ using json = nlohmann::json;
         {"module_maps_reused", summary.module_maps_reused},
         {"candidates_reconsidered_after_map_change",
          summary.candidates_reconsidered_after_map_change},
+        {"map_generation", summary.map_generation},
         {"exhausted_dimension",
          analysis::indirect_target_refinement_budget_dimension_name(exhaustion.dimension)},
         {"exhausted_consumed", exhaustion.consumed},
@@ -791,6 +832,8 @@ using json = nlohmann::json;
         {"pending_candidate_count", summary.pending_candidate_count},
         {"last_processed_candidate",
          refinement_candidate_identity_json(summary.last_processed_candidate)},
+        {"last_assessed_candidate",
+         refinement_candidate_identity_json(summary.last_assessed_candidate)},
         {"next_pending_candidate",
          refinement_candidate_identity_json(summary.next_pending_candidate)}};
 }

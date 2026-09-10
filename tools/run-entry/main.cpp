@@ -139,7 +139,7 @@ void help(std::ostream& output)
               "  --refinement-max-stagnant-rounds N No-progress refinement retry budget.\n"
               "  --refinement-max-rounds N      Deprecated alias for stagnant-round budget.\n"
               "  --refinement-max-candidates N  Explicit legacy unique-candidate ceiling.\n"
-              "  --refinement-max-assessments N Candidate-assessment budget.\n"
+              "  --refinement-max-assessments N Explicit legacy candidate-assessment ceiling.\n"
               "  --refinement-max-promotions N  Deprecated legacy event guard.\n"
               "  --refinement-max-rebuilds N    Deprecated legacy event guard.\n"
               "  --refinement-max-analysis-functions N       Cumulative refinement CFG-function work.\n"
@@ -283,6 +283,7 @@ int main(int argc, char** argv)
     std::set<analysis::IndirectTargetRefinementAnalysisDimension>
         refinement_analysis_cli_overrides;
     bool refinement_candidate_limit_cli_override = false;
+    bool refinement_assessment_limit_cli_override = false;
     bool analysis_profile_cli_override = false;
 
     const auto apply_analysis_profile = [&](analysis::AnalysisBudgets profile,
@@ -471,6 +472,24 @@ int main(int argc, char** argv)
             continue;
         }
 
+        if (take_value(index, argc, argv, "--refinement-max-assessments", value))
+        {
+            std::uint64_t parsed = 0U;
+            if (!parse_u64(value, parsed) || parsed == 0U ||
+                parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+            {
+                std::cerr << "invalid numeric option\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
+            refinement_budgets.max_candidate_assessments = static_cast<std::size_t>(parsed);
+            refinement_budgets.candidate_assessment_limit_provenance =
+                analysis::AnalysisBudgetProvenance{
+                    analysis::AnalysisBudgetProvenanceKind::ExplicitCliOverride,
+                    "run_entry_cli"};
+            refinement_assessment_limit_cli_override = true;
+            continue;
+        }
+
         bool invalid_number = false;
         const auto parse_number = [&]<typename T>(std::string_view name, T& destination) {
             if (argument != name) return false;
@@ -503,7 +522,6 @@ int main(int argc, char** argv)
             parse_number("--refinement-max-stagnant-rounds",
                          refinement_budgets.max_stagnant_rounds) ||
             parse_number("--refinement-max-rounds", refinement_budgets.max_stagnant_rounds) ||
-            parse_number("--refinement-max-assessments", refinement_budgets.max_candidate_assessments) ||
             parse_number("--refinement-max-promotions", refinement_budgets.max_promotions) ||
             parse_number("--refinement-max-rebuilds", refinement_budgets.max_map_rebuilds) ||
             parse_number("--refinement-max-analysis-functions",
@@ -744,6 +762,25 @@ int main(int argc, char** argv)
                         "legacy candidate limit is zero or overflows its type");
                 refinement_budgets.max_unique_candidates = static_cast<std::size_t>(parsed);
                 refinement_budgets.candidate_limit_provenance =
+                    analysis::AnalysisBudgetProvenance{
+                        analysis::AnalysisBudgetProvenanceKind::LocalConfigurationOverride,
+                    "run_entry_local_config"};
+            }
+            if (!refinement_assessment_limit_cli_override &&
+                refinement_budget_object.contains("max_candidate_assessments"))
+            {
+                const auto& value = refinement_budget_object.at("max_candidate_assessments");
+                if (!value.is_number_unsigned())
+                    throw std::runtime_error(
+                        "legacy candidate-assessment limit must be an unsigned integer");
+                const auto parsed = value.get<std::uint64_t>();
+                if (parsed == 0U ||
+                    parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+                    throw std::runtime_error(
+                        "legacy candidate-assessment limit is zero or overflows its type");
+                refinement_budgets.max_candidate_assessments =
+                    static_cast<std::size_t>(parsed);
+                refinement_budgets.candidate_assessment_limit_provenance =
                     analysis::AnalysisBudgetProvenance{
                         analysis::AnalysisBudgetProvenanceKind::LocalConfigurationOverride,
                         "run_entry_local_config"};
@@ -1291,7 +1328,7 @@ int main(int argc, char** argv)
             {
                 const auto identity = analysis::indirect_target_candidate_identity(candidate);
                 if (!worklist.begin_candidate_assessment(identity) || !worklist.can_promote()) break;
-                const auto map_generation_before = worklist.summary().map_rebuilds;
+                const auto map_generation_before = worklist.summary().map_generation;
                 auto expansion = analysis::refine_process_function_map(
                     process_map, process.value(), candidate, discovery_options);
                 if (!expansion)
@@ -1301,11 +1338,18 @@ int main(int argc, char** argv)
                 }
                 if (!expansion.value().assessment.decision.promoted)
                 {
-                    worklist.record_terminal_candidate(identity);
+                    if (expansion.value().assessment.validation.analysis_error)
+                        worklist.record_failed_refinement(identity);
+                    else
+                        worklist.record_terminal_candidate(identity);
                     continue;
                 }
-                if (!worklist.can_commit_refinement(identity, expansion.value().analysis_work))
+                if (!worklist.can_commit_refinement(
+                        identity, expansion.value().analysis_work,
+                        expansion.value().module_maps_rebuilt,
+                        expansion.value().module_maps_reused))
                 {
+                    worklist.record_rollback_assessment(identity);
                     break;
                 }
                 process_map = std::move(expansion.value().map);

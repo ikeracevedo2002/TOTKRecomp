@@ -428,7 +428,7 @@ struct ExecutionSessionResult
 {
     // M26 separates productive refinement progress from independently
     // bounded no-progress retries while retaining deterministic evidence.
-    static constexpr std::uint32_t schema_version = 17U;
+    static constexpr std::uint32_t schema_version = 18U;
 
     analysis::ModuleIdentity identity;
     EntrySelection entry;

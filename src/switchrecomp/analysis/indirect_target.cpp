@@ -1986,6 +1986,8 @@ std::string_view indirect_target_refinement_budget_dimension_name(
     case IndirectTargetRefinementBudgetDimension::None: return "none";
     case IndirectTargetRefinementBudgetDimension::StagnantRounds:
         return "stagnant_rounds";
+    case IndirectTargetRefinementBudgetDimension::CounterOverflow:
+        return "counter_overflow";
     case IndirectTargetRefinementBudgetDimension::UniqueCandidates:
         return "unique_candidates";
     case IndirectTargetRefinementBudgetDimension::StructuralCandidateUniverse:
@@ -2049,6 +2051,12 @@ IndirectTargetRefinementWorklist::IndirectTargetRefinementWorklist(
         budgets_.candidate_limit_provenance = AnalysisBudgetProvenance{
             AnalysisBudgetProvenanceKind::ExplicitApiOverride, "library_api"};
     }
+    if (budgets_.max_candidate_assessments &&
+        budgets_.candidate_assessment_limit_provenance.detail == "not_configured")
+    {
+        budgets_.candidate_assessment_limit_provenance = AnalysisBudgetProvenance{
+            AnalysisBudgetProvenanceKind::ExplicitApiOverride, "library_api"};
+    }
     counters_.configured = budgets_;
     counters_.analysis.configured = budgets_.analysis;
 }
@@ -2060,15 +2068,76 @@ std::size_t IndirectTargetRefinementWorklist::candidate_limit() const noexcept
     return std::min(structural, budgets_.max_unique_candidates.value());
 }
 
+bool IndirectTargetRefinementWorklist::increment_counter(
+    std::size_t& counter, IndirectTargetRefinementBudgetDimension dimension,
+    std::string module, std::optional<IndirectTargetCandidateIdentity> next_work) noexcept
+{
+    if (counter == std::numeric_limits<std::size_t>::max())
+    {
+        counters_.exhaustion = IndirectTargetRefinementExhaustion{
+            IndirectTargetRefinementBudgetDimension::CounterOverflow,
+            counter,
+            std::numeric_limits<std::size_t>::max(),
+            std::move(module),
+            map_generation_,
+            std::move(next_work)};
+        return false;
+    }
+    ++counter;
+    (void)dimension;
+    return true;
+}
+
+bool IndirectTargetRefinementWorklist::add_counter(
+    std::size_t& counter, std::size_t delta,
+    IndirectTargetRefinementBudgetDimension dimension, std::string module,
+    std::optional<IndirectTargetCandidateIdentity> next_work) noexcept
+{
+    if (delta > std::numeric_limits<std::size_t>::max() - counter)
+    {
+        counters_.exhaustion = IndirectTargetRefinementExhaustion{
+            IndirectTargetRefinementBudgetDimension::CounterOverflow,
+            counter,
+            std::numeric_limits<std::size_t>::max(),
+            std::move(module),
+            map_generation_,
+            std::move(next_work)};
+        return false;
+    }
+    counter += delta;
+    (void)dimension;
+    return true;
+}
+
 IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::observe(
     const IndirectTargetAssessment& assessment)
 {
     IndirectTargetRefinementObservationResult result;
+    if (exhausted())
+    {
+        result.accepted = false;
+        return result;
+    }
     const auto& observed = assessment.observed;
-    counters_.observations_received += observed.observation_count;
+    const auto identity = indirect_target_candidate_identity(observed);
+    if (!add_counter(counters_.observations_received, observed.observation_count,
+                     IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                     identity.target_module, identity))
+    {
+        result.accepted = false;
+        return result;
+    }
     if (assessment.validation.boundary_reconciliation.kind !=
         FunctionBoundaryReconciliationKind::None)
-        ++counters_.boundary_reconciliations;
+    {
+        if (!increment_counter(counters_.boundary_reconciliations,
+                               IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                               identity.target_module, identity))
+        {
+            result.accepted = false;
+            return result;
+        }
+    }
 
     auto normalized = observed;
     if (normalized.target_module.empty())
@@ -2076,10 +2145,28 @@ IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::obse
     result.newly_unique_observation =
         unique_observations_.emplace(observation_identity_key(normalized), true).second;
     if (result.newly_unique_observation)
-        ++counters_.unique_observations;
+    {
+        if (!increment_counter(counters_.unique_observations,
+                               IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                               normalized.target_module,
+                               indirect_target_candidate_identity(normalized)))
+        {
+            result.accepted = false;
+            return result;
+        }
+    }
     else
-        ++counters_.duplicate_coalesced_observations;
-    const auto identity = indirect_target_candidate_identity(normalized);
+    {
+        if (!increment_counter(counters_.duplicate_coalesced_observations,
+                               IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                               normalized.target_module,
+                               indirect_target_candidate_identity(normalized)))
+        {
+            result.accepted = false;
+            return result;
+        }
+    }
+    const auto normalized_identity = indirect_target_candidate_identity(normalized);
     const bool trusted_existing =
         assessment.decision.kind == IndirectTargetDecisionKind::TrustedExistingEntry ||
         assessment.decision.kind == IndirectTargetDecisionKind::AliasOfExistingEntry;
@@ -2087,7 +2174,31 @@ IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::obse
 
     if (!candidate_observation)
     {
-        ++counters_.existing_trusted_hits;
+        if (!increment_counter(counters_.existing_trusted_hits,
+                               IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                               normalized_identity.target_module, normalized_identity))
+        {
+            result.accepted = false;
+            return result;
+        }
+        const auto item = work_items_.find(
+            std::make_pair(normalized_identity.target_module, normalized_identity.target));
+        if (item != work_items_.end())
+        {
+            const bool was_unresolved = item->second.pending || !item->second.processed;
+            if (was_unresolved &&
+                !increment_counter(counters_.terminal_resolutions,
+                                   IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                                   normalized_identity.target_module, normalized_identity))
+            {
+                result.accepted = false;
+                return result;
+            }
+            item->second.pending = false;
+            item->second.processed = true;
+            item->second.processed_generation = map_generation_;
+            if (was_unresolved) round_productive_ = round_active_ || round_productive_;
+        }
         return result;
     }
 
@@ -2098,15 +2209,26 @@ IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::obse
         // candidate record or the structural target-slot universe.
         if (result.newly_unique_observation)
         {
-            ++counters_.structurally_ineligible_candidates;
-            ++counters_.rejected_candidates;
-            ++counters_.terminal_resolutions;
+            if (!increment_counter(counters_.structurally_ineligible_candidates,
+                                   IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                                   normalized_identity.target_module, normalized_identity) ||
+                !increment_counter(counters_.rejected_candidates,
+                                   IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                                   normalized_identity.target_module, normalized_identity) ||
+                !increment_counter(counters_.terminal_resolutions,
+                                   IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                                   normalized_identity.target_module, normalized_identity))
+            {
+                result.accepted = false;
+                return result;
+            }
             round_productive_ = round_active_ || round_productive_;
         }
         return result;
     }
 
-    const auto target_identity = std::make_pair(identity.target_module, identity.target);
+    const auto target_identity = std::make_pair(normalized_identity.target_module,
+                                                normalized_identity.target);
     auto item = work_items_.find(target_identity);
     if (item == work_items_.end())
     {
@@ -2118,13 +2240,19 @@ IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::obse
                                        ? IndirectTargetRefinementBudgetDimension::UniqueCandidates
                                        : IndirectTargetRefinementBudgetDimension::StructuralCandidateUniverse;
             counters_.exhaustion = IndirectTargetRefinementExhaustion{
-                dimension, counters_.unique_candidates, candidate_limit(), identity.target_module,
-                map_generation_, identity};
-            overflow_pending_ = identity;
+                dimension, counters_.unique_candidates, candidate_limit(),
+                normalized_identity.target_module, map_generation_, normalized_identity};
+            overflow_pending_ = normalized_identity;
             result.accepted = false;
             return result;
         }
-        ++counters_.unique_candidates;
+        if (!increment_counter(counters_.unique_candidates,
+                               IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                               normalized_identity.target_module, normalized_identity))
+        {
+            result.accepted = false;
+            return result;
+        }
         result.newly_unique_candidate = true;
         round_productive_ = round_active_ || round_productive_;
         WorkItem work;
@@ -2140,19 +2268,28 @@ IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::obse
         counters_.candidate_records = work_items_.size();
         if (!assessment.decision.eligible_for_promotion)
         {
-            ++counters_.rejected_candidates;
-            ++counters_.terminal_resolutions;
+            if (!increment_counter(counters_.rejected_candidates,
+                                   IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                                   normalized_identity.target_module, normalized_identity) ||
+                !increment_counter(counters_.terminal_resolutions,
+                                   IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                                   normalized_identity.target_module, normalized_identity))
+            {
+                result.accepted = false;
+                return result;
+            }
         }
         return result;
     }
 
     auto& work = item->second;
-    const auto prior_observation_count = work.observed.observation_count;
-    if (std::numeric_limits<std::size_t>::max() - prior_observation_count >=
-        observed.observation_count)
-        work.observed.observation_count += observed.observation_count;
-    else
-        work.observed.observation_count = std::numeric_limits<std::size_t>::max();
+    if (!add_counter(work.observed.observation_count, observed.observation_count,
+                     IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                     normalized_identity.target_module, normalized_identity))
+    {
+        result.accepted = false;
+        return result;
+    }
     for (const auto& evidence : observed.static_evidence)
         add_evidence(work.observed.static_evidence, evidence);
     for (const auto& evidence : observed.entry_evidence)
@@ -2176,50 +2313,55 @@ IndirectTargetRefinementObservationResult IndirectTargetRefinementWorklist::obse
         work.observed.observation_provenance = history;
     }
 
-    if (assessment.decision.kind == IndirectTargetDecisionKind::TrustedExistingEntry ||
-        assessment.decision.kind == IndirectTargetDecisionKind::AliasOfExistingEntry)
-    {
-        ++counters_.existing_trusted_hits;
-        if (work.pending || !work.processed)
-        {
-            ++counters_.terminal_resolutions;
-            round_productive_ = round_active_ || round_productive_;
-        }
-        work.pending = false;
-        work.processed = true;
-        work.processed_generation = map_generation_;
-        return result;
-    }
     if (assessment.decision.eligible_for_promotion &&
         assessment.decision.kind == IndirectTargetDecisionKind::TrustedNewEntry)
     {
-        if (!work.pending && work.processed &&
-            (!work.promoted || work.processed_generation < map_generation_))
+        if (!work.pending && !work.processed)
         {
             work.pending = true;
-            if (work.promoted && work.processed_generation < map_generation_)
-            {
-                result.reconsidered_after_map_change = true;
-                ++counters_.candidates_reconsidered_after_map_change;
-            }
             round_productive_ = round_active_ || round_productive_;
         }
-        else if (!work.processed)
+        else if (!work.pending && work.processed &&
+                 work.processed_generation < map_generation_)
         {
             work.pending = true;
+            if (work.last_assessed_generation &&
+                work.last_assessed_generation.value() < map_generation_)
+            {
+                result.reconsidered_after_map_change = true;
+                if (!increment_counter(counters_.candidates_reconsidered_after_map_change,
+                                       IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                                       normalized_identity.target_module, normalized_identity))
+                {
+                    result.accepted = false;
+                    return result;
+                }
+            }
             round_productive_ = round_active_ || round_productive_;
         }
     }
     else
     {
+        if (work.promoted) return result;
         const bool was_unresolved = work.pending || !work.processed;
-        if (work.pending || work.promoted) return result;
         if (was_unresolved)
         {
-            ++counters_.terminal_resolutions;
+            if (!increment_counter(counters_.terminal_resolutions,
+                                   IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                                   normalized_identity.target_module, normalized_identity))
+            {
+                result.accepted = false;
+                return result;
+            }
             round_productive_ = round_active_ || round_productive_;
         }
-        ++counters_.rejected_candidates;
+        if (!increment_counter(counters_.rejected_candidates,
+                               IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                               normalized_identity.target_module, normalized_identity))
+        {
+            result.accepted = false;
+            return result;
+        }
         work.pending = false;
         work.processed = true;
         work.processed_generation = map_generation_;
@@ -2232,7 +2374,9 @@ bool IndirectTargetRefinementWorklist::begin_round() noexcept
     if (counters_.exhaustion.dimension != IndirectTargetRefinementBudgetDimension::None)
         return false;
     if (round_active_) return false;
-    ++counters_.total_execution_attempts;
+    if (!increment_counter(counters_.total_execution_attempts,
+                           IndirectTargetRefinementBudgetDimension::CounterOverflow))
+        return false;
     round_active_ = true;
     round_productive_ = false;
     return true;
@@ -2243,12 +2387,24 @@ void IndirectTargetRefinementWorklist::end_round() noexcept
     if (!round_active_) return;
     if (round_productive_)
     {
-        ++counters_.productive_rounds;
+        if (!increment_counter(counters_.productive_rounds,
+                               IndirectTargetRefinementBudgetDimension::CounterOverflow))
+        {
+            round_active_ = false;
+            round_productive_ = false;
+            return;
+        }
         counters_.stagnant_rounds = 0U;
     }
     else
     {
-        ++counters_.stagnant_rounds;
+        if (!increment_counter(counters_.stagnant_rounds,
+                               IndirectTargetRefinementBudgetDimension::CounterOverflow))
+        {
+            round_active_ = false;
+            round_productive_ = false;
+            return;
+        }
         if (counters_.stagnant_rounds >= budgets_.max_stagnant_rounds &&
             counters_.exhaustion.dimension == IndirectTargetRefinementBudgetDimension::None)
         {
@@ -2266,16 +2422,52 @@ bool IndirectTargetRefinementWorklist::begin_candidate_assessment(
 {
     if (counters_.exhaustion.dimension != IndirectTargetRefinementBudgetDimension::None)
         return false;
-    if (counters_.candidate_assessments >= budgets_.max_candidate_assessments)
+    const auto item = work_items_.find(std::make_pair(candidate.target_module, candidate.target));
+    if (item == work_items_.end() || !item->second.pending) return false;
+    if (item->second.last_assessed_generation &&
+        item->second.last_assessed_generation.value() == map_generation_)
+    {
+        if (!increment_counter(counters_.same_generation_assessment_attempts,
+                               IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                               candidate.target_module, candidate))
+            return false;
+        return false;
+    }
+
+    if (budgets_.max_candidate_assessments &&
+        counters_.candidate_assessments >= budgets_.max_candidate_assessments.value())
     {
         counters_.exhaustion = IndirectTargetRefinementExhaustion{
             IndirectTargetRefinementBudgetDimension::CandidateAssessments,
-            counters_.candidate_assessments, budgets_.max_candidate_assessments, {}, 0U,
-            std::nullopt};
+            counters_.candidate_assessments,
+            budgets_.max_candidate_assessments.value(),
+            candidate.target_module,
+            map_generation_,
+            candidate};
         return false;
     }
-    ++counters_.candidate_assessments;
+    if (!increment_counter(counters_.candidate_assessments,
+                           IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                           candidate.target_module, candidate))
+        return false;
+    const bool reassessment = item->second.last_assessed_generation.has_value();
+    if (reassessment)
+    {
+        if (!increment_counter(counters_.generation_reassessments,
+                               IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                               candidate.target_module, candidate))
+            return false;
+    }
+    else if (!increment_counter(counters_.first_candidate_assessments,
+                                IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                                candidate.target_module, candidate))
+    {
+        return false;
+    }
+    item->second.last_assessed_generation = map_generation_;
     counters_.last_processed_candidate = candidate;
+    counters_.last_assessed_candidate = candidate;
+    counters_.last_assessment_generation = map_generation_;
     return true;
 }
 
@@ -2305,7 +2497,8 @@ bool IndirectTargetRefinementWorklist::can_promote() noexcept
 
 bool IndirectTargetRefinementWorklist::can_commit_refinement(
     const IndirectTargetCandidateIdentity& candidate,
-    const IndirectTargetRefinementAnalysisWork& work) noexcept
+    const IndirectTargetRefinementAnalysisWork& work, std::size_t module_maps_rebuilt,
+    std::size_t module_maps_reused) noexcept
 {
     if (counters_.exhaustion.dimension != IndirectTargetRefinementBudgetDimension::None)
         return false;
@@ -2317,9 +2510,21 @@ bool IndirectTargetRefinementWorklist::can_commit_refinement(
     const auto fail = [&](IndirectTargetRefinementBudgetDimension dimension, std::size_t consumed,
                           std::size_t limit) {
         counters_.exhaustion = IndirectTargetRefinementExhaustion{
-            dimension, consumed, limit, work.module, counters_.map_rebuilds, candidate};
+            dimension, consumed, limit, work.module, map_generation_, candidate};
         return false;
     };
+    const auto can_add = [](std::size_t consumed, std::size_t delta) {
+        return delta <= std::numeric_limits<std::size_t>::max() - consumed;
+    };
+    if (!can_add(counters_.successful_promotions, 1U) ||
+        !can_add(counters_.map_rebuilds, 1U) || !can_add(map_generation_, 1U) ||
+        !can_add(counters_.module_maps_rebuilt, module_maps_rebuilt) ||
+        !can_add(counters_.module_maps_reused, module_maps_reused) ||
+        !can_add(counters_.analysis.functions_reused, work.functions_reused))
+    {
+        return fail(IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                    counters_.successful_promotions, std::numeric_limits<std::size_t>::max());
+    }
     const auto& configured = budgets_.analysis;
     const auto& consumed = counters_.analysis;
     if (exceeds(consumed.functions_analyzed, work.functions_analyzed,
@@ -2364,14 +2569,45 @@ void IndirectTargetRefinementWorklist::record_terminal_candidate(
     const auto item = work_items_.find(std::make_pair(candidate.target_module, candidate.target));
     if (item == work_items_.end()) return;
     const bool was_unresolved = item->second.pending || !item->second.processed;
+    if (was_unresolved &&
+        !increment_counter(counters_.terminal_resolutions,
+                           IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                           candidate.target_module, candidate))
+        return;
     item->second.pending = false;
     item->second.processed = true;
     item->second.processed_generation = map_generation_;
     if (was_unresolved)
     {
-        ++counters_.terminal_resolutions;
         round_productive_ = round_active_ || round_productive_;
     }
+}
+
+void IndirectTargetRefinementWorklist::record_failed_refinement(
+    const IndirectTargetCandidateIdentity& candidate) noexcept
+{
+    const auto item = work_items_.find(std::make_pair(candidate.target_module, candidate.target));
+    if (item == work_items_.end()) return;
+    if (!increment_counter(counters_.failed_refinements,
+                           IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                           candidate.target_module, candidate))
+        return;
+    item->second.pending = false;
+    item->second.processed = true;
+    item->second.processed_generation = map_generation_;
+    round_productive_ = round_active_ || round_productive_;
+}
+
+void IndirectTargetRefinementWorklist::record_rollback_assessment(
+    const IndirectTargetCandidateIdentity& candidate) noexcept
+{
+    if (!increment_counter(counters_.rollback_assessments,
+                           IndirectTargetRefinementBudgetDimension::CounterOverflow,
+                           candidate.target_module, candidate))
+        return;
+    // The aggregate resource exhaustion is intentionally retained. The
+    // candidate remains pending as the exact next work item, but cannot be
+    // retried in this finite refinement driver.
 }
 
 void IndirectTargetRefinementWorklist::record_promotion(
@@ -2379,8 +2615,13 @@ void IndirectTargetRefinementWorklist::record_promotion(
     std::size_t module_maps_reused,
     const IndirectTargetRefinementAnalysisWork& work) noexcept
 {
+    const auto item = work_items_.find(std::make_pair(candidate.target_module, candidate.target));
+    if (item == work_items_.end() || !item->second.pending ||
+        !item->second.last_assessed_generation ||
+        item->second.last_assessed_generation.value() != map_generation_)
+        return;
     if (!can_promote()) return;
-    if (!can_commit_refinement(candidate, work)) return;
+    if (!can_commit_refinement(candidate, work, module_maps_rebuilt, module_maps_reused)) return;
     ++counters_.successful_promotions;
     ++counters_.map_rebuilds;
     counters_.module_maps_rebuilt += module_maps_rebuilt;
@@ -2395,19 +2636,35 @@ void IndirectTargetRefinementWorklist::record_promotion(
     counters_.analysis.boundary_finalization_passes += work.boundary_finalization_passes;
     counters_.analysis.invalidated_records += work.invalidated_records;
     counters_.analysis.transactions += work.transactions;
-    const auto item = work_items_.find(std::make_pair(candidate.target_module, candidate.target));
-    if (item != work_items_.end())
-    {
-        item->second.pending = false;
-        item->second.processed = true;
-        item->second.promoted = true;
-        item->second.processed_generation = map_generation_;
-    }
+    item->second.pending = false;
+    item->second.processed = true;
+    item->second.promoted = true;
+    // Keep the generation in which this candidate was processed.  The
+    // publication below advances the immutable map generation; a later
+    // observation can therefore explicitly prove that this record is being
+    // reconsidered after a relevant map change.  Marking it with the new
+    // generation here would erase that distinction and make the publication
+    // itself indistinguishable from an assessment at the new generation.
     ++map_generation_;
     round_productive_ = round_active_ || round_productive_;
 }
 
 std::vector<ObservedIndirectTarget> IndirectTargetRefinementWorklist::pending_candidates() const
+{
+    std::vector<ObservedIndirectTarget> result;
+    for (const auto& [unused, item] : work_items_)
+    {
+        (void)unused;
+        if (item.pending &&
+            (!item.last_assessed_generation ||
+             item.last_assessed_generation.value() != map_generation_))
+            result.push_back(item.observed);
+    }
+    std::sort(result.begin(), result.end(), observed_order_less);
+    return result;
+}
+
+std::vector<ObservedIndirectTarget> IndirectTargetRefinementWorklist::all_pending_candidates() const
 {
     std::vector<ObservedIndirectTarget> result;
     for (const auto& [unused, item] : work_items_)
@@ -2423,8 +2680,12 @@ IndirectTargetRefinementSummary IndirectTargetRefinementWorklist::summary() cons
 {
     auto result = counters_;
     result.candidate_records = work_items_.size();
-    const auto pending = pending_candidates();
-    result.pending_candidate_count = pending.size() + (overflow_pending_ ? 1U : 0U);
+    result.map_generation = map_generation_;
+    const auto pending = all_pending_candidates();
+    result.pending_candidate_count = pending.size();
+    if (overflow_pending_ && result.pending_candidate_count !=
+                                 std::numeric_limits<std::size_t>::max())
+        ++result.pending_candidate_count;
     if (!pending.empty()) result.next_pending_candidate = indirect_target_candidate_identity(pending.front());
     else if (overflow_pending_) result.next_pending_candidate = overflow_pending_;
     return result;
