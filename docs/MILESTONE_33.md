@@ -337,12 +337,13 @@ Local validation completed:
 - ordinary real run twice: byte-identical and SHA-identical;
 - `git diff --check`: clean.
 
-The local default compiler is AppleClang on macOS. GCC and LLVM 18 development
-toolchains are not installed on this host; MSVC is not available on macOS.
-ASan/UBSan and TSan are to be run with the repository's existing sanitizer
-workflow where supported, and GitHub Actions is authoritative for GCC, LLVM
-18, sanitizer jobs, and Windows/MSVC. No sanitizer suppression or dependency
-was added.
+The local default compiler is AppleClang 17 on macOS; `/usr/bin/gcc` is the
+AppleClang driver, not GNU GCC. LLVM 18 development tools are not installed on
+this host, and MSVC is not available on macOS. The repository's GitHub Actions
+run `34478394571` passed all five authoritative jobs: Linux/GCC, Linux/GCC /
+LLVM 18, Linux/GCC / ASan + UBSan, Linux/GCC / TSan, and Windows/MSVC. The
+workflow emitted only the existing GitHub Actions Node.js 20 deprecation
+annotation; no job failed. No sanitizer suppression or dependency was added.
 
 The reports are deterministic JSON: no timestamps, host addresses, PIDs,
 unordered iteration, or unbounded event history was introduced. The ignored
