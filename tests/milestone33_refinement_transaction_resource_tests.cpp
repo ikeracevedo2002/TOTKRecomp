@@ -317,6 +317,8 @@ TEST_CASE("M33 explicit transaction ceiling is exact and rollback is immutable")
         third, options);
     REQUIRE(speculative);
     REQUIRE(speculative.value().assessment.decision.promoted);
+    REQUIRE(speculative.value().analysis_work.transactions <=
+            speculative.value().analysis_work.boundary_finalization_passes);
     REQUIRE_FALSE(worklist.can_commit_refinement(third_identity,
                                                   speculative.value().analysis_work));
     worklist.record_rollback_assessment(third_identity);
