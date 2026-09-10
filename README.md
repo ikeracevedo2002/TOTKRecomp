@@ -67,6 +67,14 @@ four-module prepared set identifies an eligible `sdk` provider for
 and the focused run stops at an unsupported provider `umulh` instruction. No
 host replacement is used.
 
+Milestone 32 replaces the ordinary historical candidate-assessment event ceiling
+with generation-aware semantic accounting: first assessments are bounded by the
+finite structural candidate universe, while reassessment is permitted only after
+a relevant immutable map-generation change. An explicitly configured legacy
+ceiling remains available and typed. The real four-module workflow crosses the
+former `512` assessment frontier and reaches the next exact transaction frontier;
+see [Milestone 32](docs/MILESTONE_32.md).
+
 No supported TOTK build is committed. The repository contains no game binaries,
 keys, firmware, SDKs, or extracted game assets. The committed TOTK manifest is an
 explicit `template` and contains no real hashes or Build IDs.
@@ -153,6 +161,7 @@ On a multi-config generator, use `build/Debug/nso-inspect`.
 - [Milestone 29 resumable IR execution](docs/MILESTONE_29.md)
 - [Milestone 30 generation-scoped controlled stack memory](docs/MILESTONE_30.md)
 - [Milestone 31 semantic function-transition frontier](docs/MILESTONE_31.md)
+- [Milestone 32 semantic candidate-assessment resource](docs/MILESTONE_32.md)
 - [AArch64 support matrix and coverage workflow](docs/AARCH64_SUPPORT.md)
 - [Build notes](docs/BUILD.md)
 - [Dependency policy](docs/DEPENDENCIES.md)
