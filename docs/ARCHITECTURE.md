@@ -224,6 +224,17 @@ reports truncation if that derived diagnostic bound is reached. This model
 does not alter indirect-target certification, candidate ordering, or call and
 return contracts.
 
+Milestone 33 makes the immutable refinement transaction resource semantic. A
+transaction is charged only when a reusable prior module map is supplied to
+`FunctionMapBuilder::build`; the builder always executes at least one
+boundary-finalization pass for a successful new-entry refinement. Therefore
+ordinary accounting uses the checked invariant
+`cumulative_transactions <= cumulative_boundary_finalization_passes`. The
+transaction count remains in reports, while its fixed ordinary ceiling is
+absent. A positive finite explicit ceiling remains available for compatibility
+and debugging and is reported with its provenance; absence is represented as
+`null`/`not_configured`.
+
 This controlled entry execution consumes a single prepared main module and a
 metadata-selected `DT_INIT` candidate. It is not full process launch: no rtld,
 SDK, Horizon, service bring-up, multi-module image, or verified process-entry

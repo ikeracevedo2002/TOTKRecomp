@@ -99,8 +99,13 @@ slots in the loaded process image and is represented sparsely; it is not an
 eager address table. The M27 aggregate dimensions are configured by
 the `--refinement-max-analysis-*` options shown by `run-entry --help`:
 functions analyzed, functions reanalyzed, instructions, blocks, edges, bytes,
-boundary-finalization passes, invalidated records, and immutable transactions.
-Zero, overflowed, or otherwise unrepresentable values are rejected. The
+boundary-finalization passes, invalidated records, and transaction accounting.
+Ordinary termination does not configure a transaction ceiling: every
+successful reusable-map transaction performs at least one boundary-finalization
+pass, so `transactions <= boundary_finalization_passes`. Zero, overflowed, or
+otherwise unrepresentable explicitly configured values are rejected. The
+`--refinement-max-analysis-transactions` option remains an explicitly
+configured finite compatibility/debug ceiling when needed. The
 legacy `--refinement-max-candidates` option remains an explicit compatibility
 ceiling; it is not used by ordinary defaults.
 
@@ -123,17 +128,21 @@ paths or target data in the repository:
     "max_edges": 4000000,
     "max_bytes_analyzed": 268435456,
     "max_boundary_finalization_passes": 2048,
-    "max_invalidated_records": 100000,
-    "max_transactions": 512
+    "max_invalidated_records": 100000
   }
 }
 ```
 
+An intentional finite transaction compatibility ceiling can be added as
+`"max_transactions": N` (or supplied with
+`--refinement-max-analysis-transactions N`). Its report provenance is explicit;
+when absent, the typed limit is `null` and provenance is `not_configured`.
+
 Each configured value is finite and is reported with its provenance. Generated
-execution reports use schema 17 for the structural candidate bound,
+execution reports use schema 19 for the structural candidate bound,
 legacy-limit distinction, sparse-record accounting, aggregate limits,
 consumption, typed-exhaustion context, and immutable-generation accounting.
-Schema 17 also reports live versus cumulative guest-memory mapping activity,
+Schema 19 also reports live versus cumulative guest-memory mapping activity,
 generation-scoped controlled-stack ownership/reclamation, and the checked
 virtual stack allocation high-water mark. It additionally reports bounded
 function-transition forensics: all successful function entries are classified,
