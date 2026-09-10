@@ -215,7 +215,7 @@ deterministic next candidate when present.
 
 `tests/milestone33_refinement_transaction_resource_tests.cpp` is registered in
 the normal test target. It contains five production-path cases and passed as
-`6,250` assertions in `5` test cases:
+`6,251` assertions in `5` test cases:
 
 1. A real synthetic executable image with `514` executable slots performs
    `513` real structural assessments, CFG/function-map refinements, immutable
@@ -237,7 +237,7 @@ the normal test target. It contains five production-path cases and passed as
 5. A maximum-representable transaction increment is committed once and a
    second increment is rejected at the exact maximum without wrapping.
 
-The full post-change suite is `348/348` tests and `36,635` assertions. The M27,
+The full post-change suite is `348/348` tests and `36,636` assertions. The M27,
 M28, M31, and M32 suites remain green; the historical M32 transaction-boundary
 test explicitly enables `max_transactions=512` to retain its compatibility
 assertion, while the dedicated M33 ordinary test proves the architectural
@@ -331,8 +331,8 @@ change function transitions, or change stack lifetime behavior.
 
 Local validation completed:
 
-- complete standard suite: `348/348`, `36,635` assertions;
-- focused M33 suite: `5/5`, `6,250` assertions;
+- complete standard suite: `348/348`, `36,636` assertions;
+- focused M33 suite: `5/5`, `6,251` assertions;
 - M27/M28/M31/M32 regression filters: green;
 - ordinary real run twice: byte-identical and SHA-identical;
 - `git diff --check`: clean.
