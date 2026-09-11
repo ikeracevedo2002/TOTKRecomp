@@ -67,6 +67,30 @@ four-module prepared set identifies an eligible `sdk` provider for
 and the focused run stops at an unsupported provider `umulh` instruction. No
 host replacement is used.
 
+Milestone 32 replaces the ordinary historical candidate-assessment event ceiling
+with generation-aware semantic accounting: first assessments are bounded by the
+finite structural candidate universe, while reassessment is permitted only after
+a relevant immutable map-generation change. An explicitly configured legacy
+ceiling remains available and typed. The real four-module workflow crosses the
+former `512` assessment frontier and reaches the next exact transaction frontier;
+see [Milestone 32](docs/MILESTONE_32.md).
+
+Milestone 33 retains immutable refinement transactions as diagnostic accounting
+but removes their historical ordinary event ceiling. Production map construction
+proves that every successful reusable-map transaction consumes at least one
+boundary-finalization pass, so ordinary termination remains finite through the
+semantic aggregate resources. An explicit finite transaction ceiling remains
+available for compatibility/debugging, with typed `null`/`not_configured`
+reporting when absent; see [Milestone 33](docs/MILESTONE_33.md).
+
+Milestone 34 separates checked logical execution-event accounting from bounded
+diagnostic history. Ordinary execution crosses the former 4096-event frontier
+without a history-capacity stop; explicit `--max-events` remains a finite
+compatibility guard, and reports retain deterministic first-prefix/recent-window
+evidence with exact per-kind and omitted-event counts. The real run now reaches
+the unsupported `fp_simd` instruction frontier; see
+[Milestone 34](docs/MILESTONE_34.md).
+
 No supported TOTK build is committed. The repository contains no game binaries,
 keys, firmware, SDKs, or extracted game assets. The committed TOTK manifest is an
 explicit `template` and contains no real hashes or Build IDs.
@@ -150,6 +174,12 @@ On a multi-config generator, use `build/Debug/nso-inspect`.
 - [Milestone 14 complete executable-set ingestion and provider closure](docs/MILESTONE_14.md)
 - [Milestone 15 real executable-set closure and `__nnmusl_init_dso`](docs/MILESTONE_15.md)
 - [Milestone 19 move-wide semantics and real UMULH frontier](docs/MILESTONE_19.md)
+- [Milestone 29 resumable IR execution](docs/MILESTONE_29.md)
+- [Milestone 30 generation-scoped controlled stack memory](docs/MILESTONE_30.md)
+- [Milestone 31 semantic function-transition frontier](docs/MILESTONE_31.md)
+- [Milestone 32 semantic candidate-assessment resource](docs/MILESTONE_32.md)
+- [Milestone 33 semantic refinement-transaction resource](docs/MILESTONE_33.md)
+- [Milestone 34 execution observability and resource convergence](docs/MILESTONE_34.md)
 - [AArch64 support matrix and coverage workflow](docs/AARCH64_SUPPORT.md)
 - [Build notes](docs/BUILD.md)
 - [Dependency policy](docs/DEPENDENCIES.md)

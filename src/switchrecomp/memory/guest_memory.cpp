@@ -47,6 +47,16 @@ namespace
     return Result<std::size_t>::success(static_cast<std::size_t>(size));
 }
 
+[[nodiscard]] Result<GuestSize> guest_size_from_host(std::size_t size)
+{
+    if (size > static_cast<std::size_t>(std::numeric_limits<GuestSize>::max()))
+    {
+        return Result<GuestSize>::failure(make_error(
+            ErrorCode::ArithmeticOverflow, "host mapping size does not fit in the guest size type"));
+    }
+    return Result<GuestSize>::success(static_cast<GuestSize>(size));
+}
+
 } // namespace
 
 std::string_view guest_region_kind_name(GuestRegionKind kind) noexcept
@@ -67,10 +77,46 @@ std::string_view guest_region_kind_name(GuestRegionKind kind) noexcept
     return "unknown";
 }
 
-GuestMemory::GuestMemory(GuestMemoryLimits limits) : limits_(limits) {}
+GuestMemory::GuestMemory(GuestMemoryLimits limits)
+    : limits_(limits), ownership_domain_(std::make_shared<OwnershipDomain>())
+{
+}
 
-Result<void> GuestMemory::map(GuestAddress base, GuestSize size, GuestMemoryPermissions permissions,
-                              std::string_view name, GuestRegionKind kind)
+GuestMemory::GuestMemory(const GuestMemory& other)
+    : limits_(other.limits_), ownership_domain_(std::make_shared<OwnershipDomain>()),
+      total_mapped_size_(other.total_mapped_size_),
+      peak_live_mapped_size_(other.peak_live_mapped_size_),
+      cumulative_mapped_size_(other.cumulative_mapped_size_),
+      peak_region_count_(other.peak_region_count_),
+      owned_mappings_created_(other.owned_mappings_created_),
+      owned_mappings_reclaimed_(other.owned_mappings_reclaimed_),
+      live_owned_mappings_(other.live_owned_mappings_),
+      peak_live_owned_mappings_(other.peak_live_owned_mappings_),
+      live_owned_size_(other.live_owned_size_),
+      peak_live_owned_size_(other.peak_live_owned_size_),
+      cumulative_owned_size_(other.cumulative_owned_size_),
+      virtual_address_high_water_(other.virtual_address_high_water_), regions_(other.regions_)
+{
+    // Staging copies are used by the loader before controlled execution starts.
+    // A live dynamic mapping has an owner token tied to the source object and
+    // must never be copied into a second object without a corresponding token.
+    if (other.live_owned_mappings_ != 0U || other.live_owned_size_ != 0U)
+    {
+        throw std::logic_error("cannot copy GuestMemory with live owned mappings");
+    }
+}
+
+GuestMemory& GuestMemory::operator=(const GuestMemory& other)
+{
+    if (this == &other) return *this;
+    GuestMemory copy(other);
+    *this = std::move(copy);
+    return *this;
+}
+
+Result<void> GuestMemory::map(GuestAddress base, GuestSize size,
+                              GuestMemoryPermissions permissions, std::string_view name,
+                              GuestRegionKind kind)
 {
     return map_bytes(base, {}, size, permissions, name, kind);
 }
@@ -79,13 +125,84 @@ Result<void> GuestMemory::map(GuestAddress base, std::span<const std::byte> init
                               GuestMemoryPermissions permissions, std::string_view name,
                               GuestRegionKind kind)
 {
-    return map_bytes(base, initial_data, static_cast<GuestSize>(initial_data.size()), permissions,
-                     name, kind);
+    const auto size = guest_size_from_host(initial_data.size());
+    if (!size) return Result<void>::failure(size.error());
+    return map_bytes(base, initial_data, size.value(), permissions, name, kind);
+}
+
+Result<GuestMemoryMappingToken> GuestMemory::map_owned(
+    GuestAddress base, GuestSize size, GuestMemoryPermissions permissions, std::string_view name,
+    GuestRegionKind kind)
+{
+    if (size == 0U)
+    {
+        const auto validated = map_bytes(base, {}, size, permissions, name, kind);
+        if (!validated)
+        {
+            return Result<GuestMemoryMappingToken>::failure(validated.error());
+        }
+        return Result<GuestMemoryMappingToken>::success(GuestMemoryMappingToken{});
+    }
+    std::shared_ptr<const void> identity;
+    try
+    {
+        identity = std::make_shared<OwnedMappingIdentity>();
+    }
+    catch (const std::bad_alloc&)
+    {
+        return Result<GuestMemoryMappingToken>::failure(
+            mapping_error(ErrorCode::ResourceLimit, "owned mapping identity allocation failed"));
+    }
+    const auto mapped = map_bytes(base, {}, size, permissions, name, kind, identity);
+    if (!mapped)
+    {
+        return Result<GuestMemoryMappingToken>::failure(mapped.error());
+    }
+    return Result<GuestMemoryMappingToken>::success(
+        GuestMemoryMappingToken{ownership_domain_, std::move(identity), base, size});
+}
+
+Result<GuestMemoryMappingToken> GuestMemory::map_owned(
+    GuestAddress base, std::span<const std::byte> initial_data,
+    GuestMemoryPermissions permissions, std::string_view name, GuestRegionKind kind)
+{
+    if (initial_data.empty())
+    {
+        const auto size = guest_size_from_host(initial_data.size());
+        if (!size) return Result<GuestMemoryMappingToken>::failure(size.error());
+        const auto validated = map_bytes(base, initial_data, size.value(), permissions, name, kind);
+        if (!validated)
+        {
+            return Result<GuestMemoryMappingToken>::failure(validated.error());
+        }
+        return Result<GuestMemoryMappingToken>::success(GuestMemoryMappingToken{});
+    }
+    std::shared_ptr<const void> identity;
+    try
+    {
+        identity = std::make_shared<OwnedMappingIdentity>();
+    }
+    catch (const std::bad_alloc&)
+    {
+        return Result<GuestMemoryMappingToken>::failure(
+            mapping_error(ErrorCode::ResourceLimit, "owned mapping identity allocation failed"));
+    }
+    const auto size = guest_size_from_host(initial_data.size());
+    if (!size) return Result<GuestMemoryMappingToken>::failure(size.error());
+    const auto mapped = map_bytes(base, initial_data, size.value(), permissions, name, kind,
+                                  identity);
+    if (!mapped)
+    {
+        return Result<GuestMemoryMappingToken>::failure(mapped.error());
+    }
+    return Result<GuestMemoryMappingToken>::success(
+        GuestMemoryMappingToken{ownership_domain_, std::move(identity), base, size.value()});
 }
 
 Result<void> GuestMemory::map_bytes(GuestAddress base, std::span<const std::byte> initial_data,
                                     GuestSize size, GuestMemoryPermissions permissions,
-                                    std::string_view name, GuestRegionKind kind)
+                                    std::string_view name, GuestRegionKind kind,
+                                    std::shared_ptr<const void> owned_mapping)
 {
     if (!is_valid_permissions(permissions))
     {
@@ -103,9 +220,11 @@ Result<void> GuestMemory::map_bytes(GuestAddress base, std::span<const std::byte
     }
     if (size > limits_.max_region_size)
     {
-        return Result<void>::failure(
-            mapping_error(ErrorCode::ResourceLimit,
-                          "requested region size exceeds the configured maximum region size"));
+        return Result<void>::failure(mapping_error(
+            ErrorCode::ResourceLimit,
+            "requested region size exceeds the configured maximum region size (requested " +
+                std::to_string(size) + ", limit " +
+                std::to_string(limits_.max_region_size) + ")"));
     }
 
     const auto range = checked_guest_range(base, size);
@@ -130,12 +249,63 @@ Result<void> GuestMemory::map_bytes(GuestAddress base, std::span<const std::byte
     if (total.value() > limits_.max_total_size)
     {
         return Result<void>::failure(mapping_error(
-            ErrorCode::ResourceLimit, "total mapped guest size exceeds the configured maximum"));
+            ErrorCode::ResourceLimit,
+            "total mapped guest size exceeds the configured maximum (consumed " +
+                std::to_string(total.value()) + ", limit " +
+                std::to_string(limits_.max_total_size) + ")"));
     }
-    if (regions_.size() >= limits_.max_regions)
+    const auto next_region_count = checked_add(regions_.size(), 1U);
+    if (!next_region_count)
+    {
+        return Result<void>::failure(
+            mapping_error(ErrorCode::ArithmeticOverflow, "region count overflows"));
+    }
+    if (next_region_count.value() > limits_.max_regions)
     {
         return Result<void>::failure(mapping_error(
-            ErrorCode::ResourceLimit, "number of guest regions exceeds the configured maximum"));
+            ErrorCode::ResourceLimit,
+            "number of guest regions exceeds the configured maximum (consumed " +
+                std::to_string(next_region_count.value()) + ", limit " +
+                std::to_string(limits_.max_regions) + ")"));
+    }
+
+    const auto next_cumulative = checked_add_u64(cumulative_mapped_size_, size);
+    if (!next_cumulative)
+    {
+        return Result<void>::failure(
+            mapping_error(ErrorCode::ArithmeticOverflow, "cumulative mapped size overflows"));
+    }
+    const bool is_owned = owned_mapping != nullptr;
+    const auto next_created = checked_add(owned_mappings_created_, is_owned ? 1U : 0U);
+    if (!next_created)
+    {
+        return Result<void>::failure(
+            mapping_error(ErrorCode::ArithmeticOverflow, "owned mapping count overflows"));
+    }
+    const auto next_owned_size = is_owned
+                                     ? checked_add_u64(live_owned_size_, size)
+                                     : Result<GuestSize>::success(live_owned_size_);
+    if (!next_owned_size)
+    {
+        return Result<void>::failure(
+            mapping_error(ErrorCode::ArithmeticOverflow, "live owned mapping size overflows"));
+    }
+    const auto next_cumulative_owned = is_owned
+                                           ? checked_add_u64(cumulative_owned_size_, size)
+                                           : Result<GuestSize>::success(cumulative_owned_size_);
+    if (!next_cumulative_owned)
+    {
+        return Result<void>::failure(
+            mapping_error(ErrorCode::ArithmeticOverflow,
+                          "cumulative owned mapping size overflows"));
+    }
+    const auto next_live_owned_mappings = is_owned
+                                              ? checked_add(live_owned_mappings_, 1U)
+                                              : Result<std::size_t>::success(live_owned_mappings_);
+    if (!next_live_owned_mappings)
+    {
+        return Result<void>::failure(
+            mapping_error(ErrorCode::ArithmeticOverflow, "live owned mapping count overflows"));
     }
 
     const auto next = std::lower_bound(regions_.begin(), regions_.end(), base,
@@ -163,11 +333,12 @@ Result<void> GuestMemory::map_bytes(GuestAddress base, std::span<const std::byte
     try
     {
         GuestRegion region{GuestMemoryRegionInfo{base, size, permissions, kind, std::string(name)},
-                           std::vector<std::byte>(host_region_size.value(), std::byte{0})};
+                           std::vector<std::byte>(host_region_size.value(), std::byte{0}),
+                           std::move(owned_mapping)};
         std::copy(initial_data.begin(), initial_data.end(), region.bytes.begin());
 
         const auto insertion_index = static_cast<std::size_t>(next - regions_.begin());
-        regions_.reserve(regions_.size() + 1U);
+        regions_.reserve(next_region_count.value());
         regions_.insert(regions_.begin() + static_cast<std::ptrdiff_t>(insertion_index),
                         std::move(region));
     }
@@ -183,6 +354,61 @@ Result<void> GuestMemory::map_bytes(GuestAddress base, std::span<const std::byte
     }
 
     total_mapped_size_ = total.value();
+    cumulative_mapped_size_ = next_cumulative.value();
+    peak_live_mapped_size_ = std::max(peak_live_mapped_size_, total.value());
+    peak_region_count_ = std::max(peak_region_count_, next_region_count.value());
+    virtual_address_high_water_ = std::max(virtual_address_high_water_, range.value().end());
+    if (is_owned)
+    {
+        owned_mappings_created_ = next_created.value();
+        live_owned_mappings_ = next_live_owned_mappings.value();
+        live_owned_size_ = next_owned_size.value();
+        peak_live_owned_mappings_ =
+            std::max(peak_live_owned_mappings_, live_owned_mappings_);
+        peak_live_owned_size_ = std::max(peak_live_owned_size_, live_owned_size_);
+        cumulative_owned_size_ = next_cumulative_owned.value();
+    }
+    return Result<void>::success();
+}
+
+Result<void> GuestMemory::release_owned(const GuestMemoryMappingToken& token)
+{
+    if (token.memory_domain_ == nullptr || token.mapping_identity_ == nullptr ||
+        token.memory_domain_.get() != ownership_domain_.get())
+    {
+        return Result<void>::failure(mapping_error(
+            ErrorCode::InvalidArgument, "mapping ownership token is not from this memory"));
+    }
+
+    const auto found = std::lower_bound(
+        regions_.begin(), regions_.end(), token.base_,
+        [](const GuestRegion& region, GuestAddress value) { return region.info.base < value; });
+    if (found == regions_.end() || found->info.base != token.base_ ||
+        found->info.size != token.size_ || found->owned_mapping == nullptr ||
+        found->owned_mapping != token.mapping_identity_)
+    {
+        return Result<void>::failure(mapping_error(
+            ErrorCode::InvalidArgument, "mapping ownership token does not identify a live mapping"));
+    }
+
+    const auto next_total = checked_sub_u64(total_mapped_size_, found->info.size);
+    const auto next_owned_size = checked_sub_u64(live_owned_size_, found->info.size);
+    const auto next_regions = checked_sub(regions_.size(), 1U);
+    const auto next_live_owned = checked_sub(live_owned_mappings_, 1U);
+    const auto next_reclaimed = checked_add(owned_mappings_reclaimed_, 1U);
+    if (!next_total || !next_owned_size || !next_regions || !next_live_owned || !next_reclaimed ||
+        next_reclaimed.value() > owned_mappings_created_)
+    {
+        return Result<void>::failure(
+            mapping_error(ErrorCode::ArithmeticUnderflow,
+                          "owned mapping accounting would underflow during release"));
+    }
+
+    regions_.erase(found);
+    total_mapped_size_ = next_total.value();
+    live_owned_size_ = next_owned_size.value();
+    live_owned_mappings_ = next_live_owned.value();
+    owned_mappings_reclaimed_ = next_reclaimed.value();
     return Result<void>::success();
 }
 
@@ -428,6 +654,26 @@ std::size_t GuestMemory::region_count() const noexcept
 GuestSize GuestMemory::total_mapped_size() const noexcept
 {
     return total_mapped_size_;
+}
+
+GuestMemoryAccounting GuestMemory::accounting() const noexcept
+{
+    return GuestMemoryAccounting{limits_.max_region_size,
+                                 limits_.max_total_size,
+                                 limits_.max_regions,
+                                 total_mapped_size_,
+                                 peak_live_mapped_size_,
+                                 cumulative_mapped_size_,
+                                 regions_.size(),
+                                 peak_region_count_,
+                                 owned_mappings_created_,
+                                 owned_mappings_reclaimed_,
+                                 live_owned_mappings_,
+                                 peak_live_owned_mappings_,
+                                 live_owned_size_,
+                                 peak_live_owned_size_,
+                                 cumulative_owned_size_,
+                                 virtual_address_high_water_};
 }
 
 const GuestMemoryLimits& GuestMemory::limits() const noexcept

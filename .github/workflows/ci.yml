@@ -1,15 +1,59 @@
 name: CI
 
 on:
-  push:
   pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+  push:
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
+  pull-requests: read
+
+concurrency:
+  group: totkrecomp-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  classify:
+    name: Change classification
+    runs-on: ubuntu-24.04
+    outputs:
+      heavy_required: ${{ steps.decision.outputs.heavy_required }}
+      classification: ${{ steps.decision.outputs.classification }}
+      classification_ok: ${{ steps.decision.outputs.classification_ok }}
+      carry_forward_proven: ${{ steps.decision.outputs.carry_forward_proven }}
+      before: ${{ steps.decision.outputs.before }}
+      after: ${{ steps.decision.outputs.after }}
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Decide validation lane
+        id: decision
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_REF: ${{ github.ref }}
+        run: |
+          python3 scripts/ci/ci_decision.py \
+            --output "$GITHUB_OUTPUT" \
+            --summary "$GITHUB_STEP_SUMMARY"
+
   linux:
     name: Linux / GCC
+    needs: classify
+    if: ${{ always() && (needs.classify.result != 'success' || needs.classify.outputs.heavy_required == 'true') }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -30,8 +74,10 @@ jobs:
           build/translate-module --help
           build/aarch64-lift --hex 0000018bc0035fd6 --show-ir --execute-ir
 
-  linux-llvm:
+  linux_llvm:
     name: Linux / GCC / LLVM 18
+    needs: classify
+    if: ${{ always() && (needs.classify.result != 'success' || needs.classify.outputs.heavy_required == 'true') }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -50,8 +96,10 @@ jobs:
           build/translate-module --help
           build/aarch64-lift --hex 0000018bc0035fd6 --show-disassembly --show-ir --show-llvm --execute-ir --execute-native
 
-  linux-sanitizers:
+  linux_sanitizers:
     name: Linux / GCC / ASan + UBSan
+    needs: classify
+    if: ${{ always() && (needs.classify.result != 'success' || needs.classify.outputs.heavy_required == 'true') }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -64,8 +112,10 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
-  linux-thread-sanitizer:
+  linux_thread_sanitizer:
     name: Linux / GCC / TSan
+    needs: classify
+    if: ${{ always() && (needs.classify.result != 'success' || needs.classify.outputs.heavy_required == 'true') }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -80,6 +130,8 @@ jobs:
 
   windows:
     name: Windows / MSVC
+    needs: classify
+    if: ${{ always() && (needs.classify.result != 'success' || needs.classify.outputs.heavy_required == 'true') }}
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
@@ -97,3 +149,79 @@ jobs:
           build/Debug/aarch64-analyze.exe --version
           build/Debug/translate-module.exe --help
           build/Debug/aarch64-lift.exe --hex 0000018bc0035fd6 --show-ir --execute-ir
+
+  light:
+    name: Light / documentation validation
+    needs: classify
+    if: ${{ needs.classify.result == 'success' && needs.classify.outputs.heavy_required == 'false' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check documentation delta
+        env:
+          BEFORE_SHA: ${{ needs.classify.outputs.before }}
+          AFTER_SHA: ${{ needs.classify.outputs.after }}
+        run: git diff --check "$BEFORE_SHA" "$AFTER_SHA"
+      - name: Run classifier self-tests
+        run: python3 scripts/ci/test_classify_changes.py
+      - name: Check repository invariants
+        run: |
+          test -f AGENTS.md
+          test -f docs/ENGINEERING_WORKFLOW.md
+          test -f scripts/agents/run_pi_verifier.sh
+
+  gate:
+    name: CI Gate
+    needs:
+      - classify
+      - linux
+      - linux_llvm
+      - linux_sanitizers
+      - linux_thread_sanitizer
+      - windows
+      - light
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Evaluate validation results
+        env:
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          HEAVY_REQUIRED: ${{ needs.classify.outputs.heavy_required }}
+          CLASSIFICATION_OK: ${{ needs.classify.outputs.classification_ok }}
+          CARRY_FORWARD_PROVEN: ${{ needs.classify.outputs.carry_forward_proven }}
+          LINUX_RESULT: ${{ needs.linux.result }}
+          LLVM_RESULT: ${{ needs.linux_llvm.result }}
+          ASAN_RESULT: ${{ needs.linux_sanitizers.result }}
+          TSAN_RESULT: ${{ needs.linux_thread_sanitizer.result }}
+          MSVC_RESULT: ${{ needs.windows.result }}
+          LIGHT_RESULT: ${{ needs.light.result }}
+        run: |
+          set -u
+          if [[ "$CLASSIFY_RESULT" != "success" ]]; then
+            echo "Change classification did not complete successfully."
+            exit 1
+          fi
+
+          heavy_results=("$LINUX_RESULT" "$LLVM_RESULT" "$ASAN_RESULT" "$TSAN_RESULT" "$MSVC_RESULT")
+          if [[ "$HEAVY_REQUIRED" == "true" ]]; then
+            for result in "${heavy_results[@]}"; do
+              if [[ "$result" != "success" ]]; then
+                echo "Heavy validation result was $result; all five jobs must succeed."
+                exit 1
+              fi
+            done
+            exit 0
+          fi
+
+          if [[ "$HEAVY_REQUIRED" != "false" || "$CLASSIFICATION_OK" != "true" || "$CARRY_FORWARD_PROVEN" != "true" || "$LIGHT_RESULT" != "success" ]]; then
+            echo "Light validation lacks a complete classification or carry-forward proof."
+            exit 1
+          fi
+          for result in "${heavy_results[@]}"; do
+            if [[ "$result" != "skipped" ]]; then
+              echo "A heavy job was not skipped on the light path: $result"
+              exit 1
+            fi
+          done

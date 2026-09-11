@@ -15,8 +15,11 @@
 #include <map>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <set>
+#include <sstream>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace
@@ -132,21 +135,67 @@ void help(std::ostream& output)
               "  --analysis-max-edges N         Analysis edge budget.\n"
               "  --analysis-max-seeds N         Analysis seed budget.\n"
               "  --analysis-max-bytes N         Analysis byte budget.\n"
-              "  --refinement-max-rounds N      Indirect refinement-round budget.\n"
-              "  --refinement-max-candidates N  Unique indirect-candidate budget.\n"
-              "  --refinement-max-assessments N Candidate-assessment budget.\n"
-              "  --refinement-max-promotions N  Successful-promotion budget.\n"
-              "  --refinement-max-rebuilds N    Immutable map-rebuild budget.\n"
-              "  --max-ir-operations N          Global execution IR budget.\n"
+              "  --analysis-max-boundary-passes N Boundary-finalization budget.\n"
+              "  --analysis-profile NAME        whole_module or execution_closure.\n"
+              "  --refinement-max-stagnant-rounds N No-progress refinement retry budget.\n"
+              "  --refinement-max-rounds N      Deprecated alias for stagnant-round budget.\n"
+              "  --refinement-max-candidates N  Explicit legacy unique-candidate ceiling.\n"
+              "  --refinement-max-assessments N Explicit legacy candidate-assessment ceiling.\n"
+              "  --refinement-max-promotions N  Deprecated legacy event guard.\n"
+              "  --refinement-max-rebuilds N    Deprecated legacy event guard.\n"
+              "  --refinement-max-analysis-functions N       Cumulative refinement CFG-function work.\n"
+              "  --refinement-max-reanalysis-functions N     Cumulative refinement reanalysis work.\n"
+              "  --refinement-max-analysis-instructions N    Cumulative refinement instruction work.\n"
+              "  --refinement-max-analysis-blocks N          Cumulative refinement block work.\n"
+              "  --refinement-max-analysis-edges N           Cumulative refinement edge work.\n"
+              "  --refinement-max-analysis-bytes N           Cumulative refinement byte work.\n"
+              "  --refinement-max-analysis-boundary-passes N Cumulative boundary-finalization work.\n"
+              "  --refinement-max-invalidated-records N      Cumulative invalidation work.\n"
+              "  --refinement-max-analysis-transactions N    Explicit finite transaction compatibility ceiling.\n"
+              "  --max-ir-operations N          Explicit global execution IR hard limit.\n"
               "  --max-function-transitions N   Global guest transition budget.\n"
               "  --max-call-depth N             Guest call-depth budget.\n"
-              "  --max-events N                 Trace event budget.\n"
+              "  --max-events N                 Explicit compatibility execution-event guard.\n"
+              "  --event-history-limit N        Bounded diagnostic event-history capacity.\n"
               "  --max-guest-blocks N           Guest block budget.\n";
 }
 
 void print_error(const Error& error)
 {
     std::cerr << error_code_name(error.code) << ": " << error.message << '\n';
+    if (error.budget_context)
+    {
+        const auto& context = error.budget_context.value();
+        std::cerr << "analysis_budget_context: domain=" << context.domain
+                  << " dimension=" << context.dimension << " consumed=" << context.consumed
+                  << " limit=" << context.limit << " module=" << context.module
+                  << " phase=" << context.phase << " pending=" << context.pending_work;
+        if (context.next_work)
+            std::cerr << " next=0x" << std::hex << context.next_work.value() << std::dec;
+        std::cerr << '\n';
+    }
+}
+
+[[nodiscard]] std::string refinement_exhaustion_diagnostic(
+    const analysis::IndirectTargetRefinementSummary& summary)
+{
+    const auto& exhaustion = summary.exhaustion;
+    std::string result =
+        "indirect target refinement " +
+        std::string(analysis::indirect_target_refinement_budget_dimension_name(
+            exhaustion.dimension)) +
+        " budget exhausted (" + std::to_string(exhaustion.consumed) + "/" +
+        std::to_string(exhaustion.limit) + ") module=" + exhaustion.module +
+        " generation=" + std::to_string(exhaustion.generation) +
+        " pending=" + std::to_string(summary.pending_candidate_count);
+    if (exhaustion.next_work)
+    {
+        std::ostringstream next;
+        next << " next_candidate=" << exhaustion.next_work->target_module << ":0x" << std::hex
+             << exhaustion.next_work->target << std::dec;
+        result += next.str();
+    }
+    return result;
 }
 
 [[nodiscard]] bool take_value(int& index, int argc, char** argv, std::string_view option,
@@ -168,6 +217,58 @@ void print_error(const Error& error)
     left = text.substr(0U, separator);
     right = text.substr(separator + 1U);
     return !left.empty() && !right.empty();
+}
+
+[[nodiscard]] std::optional<analysis::AnalysisBudgetDimension> analysis_dimension_for_option(
+    std::string_view argument)
+{
+    if (argument == "--analysis-max-functions")
+        return analysis::AnalysisBudgetDimension::Functions;
+    if (argument == "--analysis-max-instructions")
+        return analysis::AnalysisBudgetDimension::Instructions;
+    if (argument == "--analysis-max-blocks") return analysis::AnalysisBudgetDimension::Blocks;
+    if (argument == "--analysis-max-edges") return analysis::AnalysisBudgetDimension::Edges;
+    if (argument == "--analysis-max-seeds") return analysis::AnalysisBudgetDimension::Seeds;
+    if (argument == "--analysis-max-bytes")
+        return analysis::AnalysisBudgetDimension::BytesAnalyzed;
+    if (argument == "--analysis-max-boundary-passes")
+        return analysis::AnalysisBudgetDimension::BoundaryFinalizationPasses;
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<analysis::IndirectTargetRefinementAnalysisDimension>
+refinement_analysis_dimension_for_option(std::string_view argument)
+{
+    if (argument == "--refinement-max-analysis-functions")
+        return analysis::IndirectTargetRefinementAnalysisDimension::FunctionsAnalyzed;
+    if (argument == "--refinement-max-reanalysis-functions")
+        return analysis::IndirectTargetRefinementAnalysisDimension::FunctionsReanalyzed;
+    if (argument == "--refinement-max-analysis-instructions")
+        return analysis::IndirectTargetRefinementAnalysisDimension::Instructions;
+    if (argument == "--refinement-max-analysis-blocks")
+        return analysis::IndirectTargetRefinementAnalysisDimension::Blocks;
+    if (argument == "--refinement-max-analysis-edges")
+        return analysis::IndirectTargetRefinementAnalysisDimension::Edges;
+    if (argument == "--refinement-max-analysis-bytes")
+        return analysis::IndirectTargetRefinementAnalysisDimension::BytesAnalyzed;
+    if (argument == "--refinement-max-analysis-boundary-passes")
+        return analysis::IndirectTargetRefinementAnalysisDimension::BoundaryFinalizationPasses;
+    if (argument == "--refinement-max-invalidated-records")
+        return analysis::IndirectTargetRefinementAnalysisDimension::InvalidatedRecords;
+    if (argument == "--refinement-max-analysis-transactions")
+        return analysis::IndirectTargetRefinementAnalysisDimension::Transactions;
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<execution::EntrySelectionKind> entry_kind_for_name(
+    std::string_view name)
+{
+    if (name == "dt-init") return execution::EntrySelectionKind::DynamicInit;
+    if (name == "dt-fini") return execution::EntrySelectionKind::DynamicFini;
+    if (name == "text-start") return execution::EntrySelectionKind::TextStartCandidate;
+    if (name == "process") return execution::EntrySelectionKind::VerifiedProcessEntry;
+    if (name == "analyst") return execution::EntrySelectionKind::AnalystAddress;
+    return std::nullopt;
 }
 
 } // namespace
@@ -201,12 +302,48 @@ int main(int argc, char** argv)
     execution::ExecutionSessionOptions execution_options;
     analysis::FunctionMapOptions function_options;
     analysis::IndirectTargetRefinementBudgets refinement_budgets;
-    function_options.budgets.max_functions = 5'000U;
-    function_options.budgets.max_instructions = 200'000U;
-    function_options.budgets.max_blocks = 50'000U;
-    function_options.budgets.max_edges = 100'000U;
-    function_options.budgets.max_seeds = 10'000U;
-    function_options.budgets.max_bytes_analyzed = 16U * 1024U * 1024U;
+    function_options.budgets = analysis::make_execution_closure_analysis_budgets();
+    std::set<analysis::AnalysisBudgetDimension> analysis_cli_overrides;
+    std::set<analysis::IndirectTargetRefinementAnalysisDimension>
+        refinement_analysis_cli_overrides;
+    bool refinement_candidate_limit_cli_override = false;
+    bool refinement_assessment_limit_cli_override = false;
+    bool refinement_transaction_limit_cli_override = false;
+    bool analysis_profile_cli_override = false;
+    bool event_limit_cli_override = false;
+    bool event_history_limit_cli_override = false;
+
+    const auto apply_analysis_profile = [&](analysis::AnalysisBudgets profile,
+                                            bool mark_as_cli_profile) {
+        function_options.budgets.strategy = profile.strategy;
+        const auto apply_dimension = [&](analysis::AnalysisBudgetDimension dimension,
+                                         auto& destination, const auto& source) {
+            if (analysis_cli_overrides.contains(dimension)) return;
+            destination = source;
+            if (mark_as_cli_profile)
+            {
+                analysis::mark_analysis_budget_override(
+                    function_options.budgets, dimension,
+                    analysis::AnalysisBudgetProvenanceKind::ExecutionToolProfile,
+                    "cli_selected_analysis_profile");
+            }
+        };
+        apply_dimension(analysis::AnalysisBudgetDimension::Functions,
+                        function_options.budgets.max_functions, profile.max_functions);
+        apply_dimension(analysis::AnalysisBudgetDimension::Instructions,
+                        function_options.budgets.max_instructions, profile.max_instructions);
+        apply_dimension(analysis::AnalysisBudgetDimension::Blocks,
+                        function_options.budgets.max_blocks, profile.max_blocks);
+        apply_dimension(analysis::AnalysisBudgetDimension::Edges,
+                        function_options.budgets.max_edges, profile.max_edges);
+        apply_dimension(analysis::AnalysisBudgetDimension::Seeds,
+                        function_options.budgets.max_seeds, profile.max_seeds);
+        apply_dimension(analysis::AnalysisBudgetDimension::BytesAnalyzed,
+                        function_options.budgets.max_bytes_analyzed, profile.max_bytes_analyzed);
+        apply_dimension(analysis::AnalysisBudgetDimension::BoundaryFinalizationPasses,
+                        function_options.budgets.max_boundary_finalization_passes,
+                        profile.max_boundary_finalization_passes);
+    };
 
     for (int index = 1; index < argc; ++index)
     {
@@ -291,6 +428,20 @@ int main(int argc, char** argv)
         {
             continue;
         }
+        if (take_value(index, argc, argv, "--analysis-profile", value))
+        {
+            if (value == "execution_closure")
+                apply_analysis_profile(analysis::make_execution_closure_analysis_budgets(), true);
+            else if (value == "whole_module")
+                apply_analysis_profile(analysis::AnalysisBudgets{}, true);
+            else
+            {
+                std::cerr << "invalid --analysis-profile\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
+            analysis_profile_cli_override = true;
+            continue;
+        }
         if (take_value(index, argc, argv, "--backend", value))
         {
             if (value != "interpreter")
@@ -316,6 +467,106 @@ int main(int argc, char** argv)
             continue;
         }
 
+        if (take_value(index, argc, argv, "--refinement-max-candidates", value))
+        {
+            std::uint64_t parsed = 0U;
+            if (!parse_u64(value, parsed) || parsed == 0U ||
+                parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+            {
+                std::cerr << "invalid numeric option\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
+            refinement_budgets.max_unique_candidates = static_cast<std::size_t>(parsed);
+            refinement_budgets.candidate_limit_provenance = analysis::AnalysisBudgetProvenance{
+                analysis::AnalysisBudgetProvenanceKind::ExplicitCliOverride,
+                "run_entry_cli"};
+            refinement_candidate_limit_cli_override = true;
+            continue;
+        }
+
+        if (take_value(index, argc, argv, "--max-ir-operations", value))
+        {
+            std::uint64_t parsed = 0U;
+            if (!parse_u64(value, parsed) || parsed == 0U ||
+                parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+            {
+                std::cerr << "invalid numeric option\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
+            execution_options.budgets.max_ir_operations = static_cast<std::size_t>(parsed);
+            execution_options.budgets.ir_operation_limit_provenance =
+                execution::IrOperationLimitProvenance::ExplicitCli;
+            continue;
+        }
+
+        if (take_value(index, argc, argv, "--max-events", value))
+        {
+            std::uint64_t parsed = 0U;
+            if (!parse_u64(value, parsed) || parsed == 0U ||
+                parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+            {
+                std::cerr << "invalid numeric option\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
+            execution_options.budgets.max_events = static_cast<std::size_t>(parsed);
+            execution_options.budgets.event_execution_limit_provenance =
+                execution::EventExecutionLimitProvenance::ExplicitCli;
+            event_limit_cli_override = true;
+            continue;
+        }
+
+        if (take_value(index, argc, argv, "--event-history-limit", value))
+        {
+            std::uint64_t parsed = 0U;
+            if (!parse_u64(value, parsed) || parsed == 0U ||
+                parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+            {
+                std::cerr << "invalid numeric option\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
+            execution_options.budgets.event_history_limit = static_cast<std::size_t>(parsed);
+            event_history_limit_cli_override = true;
+            continue;
+        }
+
+        if (take_value(index, argc, argv, "--refinement-max-assessments", value))
+        {
+            std::uint64_t parsed = 0U;
+            if (!parse_u64(value, parsed) || parsed == 0U ||
+                parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+            {
+                std::cerr << "invalid numeric option\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
+            refinement_budgets.max_candidate_assessments = static_cast<std::size_t>(parsed);
+            refinement_budgets.candidate_assessment_limit_provenance =
+                analysis::AnalysisBudgetProvenance{
+                    analysis::AnalysisBudgetProvenanceKind::ExplicitCliOverride,
+                    "run_entry_cli"};
+            refinement_assessment_limit_cli_override = true;
+            continue;
+        }
+
+        if (take_value(index, argc, argv, "--refinement-max-analysis-transactions", value))
+        {
+            std::uint64_t parsed = 0U;
+            if (!parse_u64(value, parsed) || parsed == 0U ||
+                parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+            {
+                std::cerr << "invalid numeric option\n";
+                return static_cast<int>(ExitCode::InvalidArguments);
+            }
+            refinement_budgets.analysis.max_transactions = static_cast<std::size_t>(parsed);
+            refinement_budgets.analysis.transactions_provenance =
+                analysis::AnalysisBudgetProvenance{
+                    analysis::AnalysisBudgetProvenanceKind::ExplicitCliOverride,
+                    "run_entry_cli"};
+            refinement_analysis_cli_overrides.insert(
+                analysis::IndirectTargetRefinementAnalysisDimension::Transactions);
+            refinement_transaction_limit_cli_override = true;
+            continue;
+        }
+
         bool invalid_number = false;
         const auto parse_number = [&]<typename T>(std::string_view name, T& destination) {
             if (argument != name) return false;
@@ -333,6 +584,8 @@ int main(int argc, char** argv)
                 return true;
             }
             destination = static_cast<T>(parsed);
+            if (refinement_analysis_dimension_for_option(argument) && parsed == 0U)
+                invalid_number = true;
             return true;
         };
         if (parse_number("--analysis-max-functions", function_options.budgets.max_functions) ||
@@ -341,21 +594,89 @@ int main(int argc, char** argv)
             parse_number("--analysis-max-edges", function_options.budgets.max_edges) ||
             parse_number("--analysis-max-seeds", function_options.budgets.max_seeds) ||
             parse_number("--analysis-max-bytes", function_options.budgets.max_bytes_analyzed) ||
-            parse_number("--refinement-max-rounds", refinement_budgets.max_rounds) ||
-            parse_number("--refinement-max-candidates", refinement_budgets.max_unique_candidates) ||
-            parse_number("--refinement-max-assessments", refinement_budgets.max_candidate_assessments) ||
+            parse_number("--analysis-max-boundary-passes",
+                         function_options.budgets.max_boundary_finalization_passes) ||
+            parse_number("--refinement-max-stagnant-rounds",
+                         refinement_budgets.max_stagnant_rounds) ||
+            parse_number("--refinement-max-rounds", refinement_budgets.max_stagnant_rounds) ||
             parse_number("--refinement-max-promotions", refinement_budgets.max_promotions) ||
             parse_number("--refinement-max-rebuilds", refinement_budgets.max_map_rebuilds) ||
-            parse_number("--max-ir-operations", execution_options.budgets.max_ir_operations) ||
+            parse_number("--refinement-max-analysis-functions",
+                         refinement_budgets.analysis.max_functions_analyzed) ||
+            parse_number("--refinement-max-reanalysis-functions",
+                         refinement_budgets.analysis.max_functions_reanalyzed) ||
+            parse_number("--refinement-max-analysis-instructions",
+                         refinement_budgets.analysis.max_instructions) ||
+            parse_number("--refinement-max-analysis-blocks",
+                         refinement_budgets.analysis.max_blocks) ||
+            parse_number("--refinement-max-analysis-edges",
+                         refinement_budgets.analysis.max_edges) ||
+            parse_number("--refinement-max-analysis-bytes",
+                         refinement_budgets.analysis.max_bytes_analyzed) ||
+            parse_number("--refinement-max-analysis-boundary-passes",
+                         refinement_budgets.analysis.max_boundary_finalization_passes) ||
+            parse_number("--refinement-max-invalidated-records",
+                         refinement_budgets.analysis.max_invalidated_records) ||
             parse_number("--max-function-transitions", execution_options.budgets.max_function_transitions) ||
             parse_number("--max-call-depth", execution_options.budgets.max_call_depth) ||
-            parse_number("--max-events", execution_options.budgets.max_events) ||
             parse_number("--max-guest-blocks", execution_options.budgets.max_guest_blocks))
         {
             if (invalid_number)
             {
                 std::cerr << "invalid numeric option\n";
                 return static_cast<int>(ExitCode::InvalidArguments);
+            }
+            if (const auto dimension = analysis_dimension_for_option(argument))
+            {
+                analysis_cli_overrides.insert(dimension.value());
+                analysis::mark_analysis_budget_override(
+                    function_options.budgets, dimension.value(),
+                    analysis::AnalysisBudgetProvenanceKind::ExplicitCliOverride,
+                    "run_entry_cli");
+            }
+            if (refinement_analysis_dimension_for_option(argument))
+            {
+                refinement_analysis_cli_overrides.insert(
+                    refinement_analysis_dimension_for_option(argument).value());
+                const auto provenance = analysis::AnalysisBudgetProvenance{
+                    analysis::AnalysisBudgetProvenanceKind::ExplicitCliOverride,
+                    "run_entry_cli"};
+                switch (refinement_analysis_dimension_for_option(argument).value())
+                {
+                case analysis::IndirectTargetRefinementAnalysisDimension::FunctionsAnalyzed:
+                    refinement_budgets.analysis.functions_analyzed_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::FunctionsReanalyzed:
+                    refinement_budgets.analysis.functions_reanalyzed_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::Instructions:
+                    refinement_budgets.analysis.instructions_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::Blocks:
+                    refinement_budgets.analysis.blocks_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::Edges:
+                    refinement_budgets.analysis.edges_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::BytesAnalyzed:
+                    refinement_budgets.analysis.bytes_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::BoundaryFinalizationPasses:
+                    refinement_budgets.analysis.boundary_finalization_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::InvalidatedRecords:
+                    refinement_budgets.analysis.invalidated_records_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::Transactions:
+                    refinement_budgets.analysis.transactions_provenance = provenance;
+                    break;
+                case analysis::IndirectTargetRefinementAnalysisDimension::None: break;
+                }
+            }
+            if (argument == "--refinement-max-promotions" ||
+                argument == "--refinement-max-rebuilds")
+            {
+                refinement_budgets.legacy_event_limits = true;
             }
             continue;
         }
@@ -381,6 +702,283 @@ int main(int argc, char** argv)
         {
             const auto root = nlohmann::json::parse(
                 std::string(reinterpret_cast<const char*>(config_bytes.data()), config_bytes.size()));
+            if (root.contains("analysis") && !root.at("analysis").is_object())
+                throw std::runtime_error("analysis configuration must be an object");
+            const auto analysis_object = root.contains("analysis")
+                                             ? root.at("analysis")
+                                             : nlohmann::json::object();
+            const auto budget_object = analysis_object.contains("budgets")
+                                           ? analysis_object.at("budgets")
+                                           : analysis_object;
+            if (!budget_object.is_object())
+                throw std::runtime_error("analysis budgets configuration must be an object");
+            std::optional<std::string> configured_profile;
+            if (analysis_object.contains("profile"))
+            {
+                if (!analysis_object.at("profile").is_string())
+                    throw std::runtime_error("analysis profile must be a string");
+                configured_profile = analysis_object.at("profile").get<std::string>();
+            }
+            if (analysis_object.contains("strategy"))
+            {
+                if (!analysis_object.at("strategy").is_string())
+                    throw std::runtime_error("analysis strategy must be a string");
+                configured_profile = analysis_object.at("strategy").get<std::string>();
+            }
+            if (configured_profile)
+            {
+                if (analysis_profile_cli_override)
+                {
+                    if (configured_profile.value() != "execution_closure" &&
+                        configured_profile.value() != "whole_module")
+                        throw std::runtime_error("invalid analysis profile");
+                }
+                else if (configured_profile.value() == "execution_closure")
+                {
+                    apply_analysis_profile(analysis::make_execution_closure_analysis_budgets(), false);
+                    function_options.budgets.strategy = analysis::AnalysisStrategy::ExecutionClosure;
+                }
+                else if (configured_profile.value() == "whole_module")
+                {
+                    apply_analysis_profile(analysis::AnalysisBudgets{}, false);
+                    function_options.budgets.strategy = analysis::AnalysisStrategy::WholeModule;
+                }
+                else
+                {
+                    throw std::runtime_error("invalid analysis profile");
+                }
+                if (!analysis_profile_cli_override)
+                {
+                    for (const auto dimension : {
+                             analysis::AnalysisBudgetDimension::Functions,
+                             analysis::AnalysisBudgetDimension::Instructions,
+                             analysis::AnalysisBudgetDimension::Blocks,
+                             analysis::AnalysisBudgetDimension::Edges,
+                             analysis::AnalysisBudgetDimension::Seeds,
+                             analysis::AnalysisBudgetDimension::BytesAnalyzed,
+                             analysis::AnalysisBudgetDimension::BoundaryFinalizationPasses})
+                    {
+                        if (!analysis_cli_overrides.contains(dimension))
+                            analysis::mark_analysis_budget_override(
+                                function_options.budgets, dimension,
+                                analysis::AnalysisBudgetProvenanceKind::LocalConfigurationOverride,
+                                "run_entry_local_config_profile");
+                    }
+                }
+            }
+            const auto parse_local_budget = [&](std::string_view key,
+                                                analysis::AnalysisBudgetDimension dimension,
+                                                auto& destination, std::uint64_t maximum) {
+                if (!budget_object.contains(key)) return;
+                const auto& value = budget_object.at(key);
+                if (!value.is_number_unsigned())
+                    throw std::runtime_error("analysis budget must be an unsigned integer");
+                const auto parsed = value.get<std::uint64_t>();
+                if (parsed == 0U || parsed > maximum)
+                    throw std::runtime_error("analysis budget is zero or overflows its type");
+                if (!analysis_cli_overrides.contains(dimension))
+                {
+                    destination = static_cast<std::remove_reference_t<decltype(destination)>>(parsed);
+                    analysis::mark_analysis_budget_override(
+                        function_options.budgets, dimension,
+                        analysis::AnalysisBudgetProvenanceKind::LocalConfigurationOverride,
+                        "run_entry_local_config");
+                }
+            };
+            parse_local_budget("max_functions", analysis::AnalysisBudgetDimension::Functions,
+                              function_options.budgets.max_functions,
+                              std::numeric_limits<std::size_t>::max());
+            parse_local_budget("max_instructions", analysis::AnalysisBudgetDimension::Instructions,
+                              function_options.budgets.max_instructions,
+                              std::numeric_limits<std::size_t>::max());
+            parse_local_budget("max_blocks", analysis::AnalysisBudgetDimension::Blocks,
+                              function_options.budgets.max_blocks,
+                              std::numeric_limits<std::size_t>::max());
+            parse_local_budget("max_edges", analysis::AnalysisBudgetDimension::Edges,
+                              function_options.budgets.max_edges,
+                              std::numeric_limits<std::size_t>::max());
+            parse_local_budget("max_seeds", analysis::AnalysisBudgetDimension::Seeds,
+                              function_options.budgets.max_seeds,
+                              std::numeric_limits<std::size_t>::max());
+            parse_local_budget("max_bytes_analyzed", analysis::AnalysisBudgetDimension::BytesAnalyzed,
+                              function_options.budgets.max_bytes_analyzed,
+                              std::numeric_limits<memory::GuestSize>::max());
+            parse_local_budget("max_boundary_finalization_passes",
+                              analysis::AnalysisBudgetDimension::BoundaryFinalizationPasses,
+                              function_options.budgets.max_boundary_finalization_passes,
+                              std::numeric_limits<std::size_t>::max());
+
+            if (root.contains("execution") && !root.at("execution").is_object())
+                throw std::runtime_error("execution configuration must be an object");
+            const auto execution_object = root.contains("execution")
+                                              ? root.at("execution")
+                                              : nlohmann::json::object();
+            const auto execution_budget_object = execution_object.contains("budgets")
+                                                     ? execution_object.at("budgets")
+                                                     : execution_object;
+            if (!execution_budget_object.is_object())
+                throw std::runtime_error("execution budgets configuration must be an object");
+            if (!event_limit_cli_override && execution_budget_object.contains("max_events"))
+            {
+                const auto& value = execution_budget_object.at("max_events");
+                if (!value.is_number_unsigned())
+                    throw std::runtime_error("execution event limit must be an unsigned integer");
+                const auto parsed = value.get<std::uint64_t>();
+                if (parsed == 0U ||
+                    parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+                    throw std::runtime_error(
+                        "execution event limit is zero or overflows its type");
+                execution_options.budgets.max_events = static_cast<std::size_t>(parsed);
+                execution_options.budgets.event_execution_limit_provenance =
+                    execution::EventExecutionLimitProvenance::ExplicitLocalConfiguration;
+            }
+            if (!event_history_limit_cli_override &&
+                execution_budget_object.contains("event_history_limit"))
+            {
+                const auto& value = execution_budget_object.at("event_history_limit");
+                if (!value.is_number_unsigned())
+                    throw std::runtime_error(
+                        "event history limit must be an unsigned integer");
+                const auto parsed = value.get<std::uint64_t>();
+                if (parsed == 0U ||
+                    parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+                    throw std::runtime_error(
+                        "event history limit is zero or overflows its type");
+                execution_options.budgets.event_history_limit = static_cast<std::size_t>(parsed);
+            }
+
+            if (root.contains("refinement_analysis") &&
+                !root.at("refinement_analysis").is_object())
+                throw std::runtime_error("refinement_analysis configuration must be an object");
+            const auto refinement_analysis_object =
+                root.contains("refinement_analysis")
+                    ? root.at("refinement_analysis")
+                    : nlohmann::json::object();
+            const auto refinement_budget_object =
+                refinement_analysis_object.contains("budgets")
+                    ? refinement_analysis_object.at("budgets")
+                    : refinement_analysis_object;
+            if (!refinement_budget_object.is_object())
+                throw std::runtime_error(
+                    "refinement_analysis budgets configuration must be an object");
+            if (!refinement_candidate_limit_cli_override &&
+                refinement_budget_object.contains("max_unique_candidates"))
+            {
+                const auto& value = refinement_budget_object.at("max_unique_candidates");
+                if (!value.is_number_unsigned())
+                    throw std::runtime_error(
+                        "legacy candidate limit must be an unsigned integer");
+                const auto parsed = value.get<std::uint64_t>();
+                if (parsed == 0U ||
+                    parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+                    throw std::runtime_error(
+                        "legacy candidate limit is zero or overflows its type");
+                refinement_budgets.max_unique_candidates = static_cast<std::size_t>(parsed);
+                refinement_budgets.candidate_limit_provenance =
+                    analysis::AnalysisBudgetProvenance{
+                        analysis::AnalysisBudgetProvenanceKind::LocalConfigurationOverride,
+                    "run_entry_local_config"};
+            }
+            if (!refinement_assessment_limit_cli_override &&
+                refinement_budget_object.contains("max_candidate_assessments"))
+            {
+                const auto& value = refinement_budget_object.at("max_candidate_assessments");
+                if (!value.is_number_unsigned())
+                    throw std::runtime_error(
+                        "legacy candidate-assessment limit must be an unsigned integer");
+                const auto parsed = value.get<std::uint64_t>();
+                if (parsed == 0U ||
+                    parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+                    throw std::runtime_error(
+                        "legacy candidate-assessment limit is zero or overflows its type");
+                refinement_budgets.max_candidate_assessments =
+                    static_cast<std::size_t>(parsed);
+                refinement_budgets.candidate_assessment_limit_provenance =
+                    analysis::AnalysisBudgetProvenance{
+                        analysis::AnalysisBudgetProvenanceKind::LocalConfigurationOverride,
+                        "run_entry_local_config"};
+            }
+            const auto parse_local_refinement_budget =
+                [&](std::string_view key, auto& destination,
+                    analysis::AnalysisBudgetProvenance& provenance,
+                    std::uint64_t maximum,
+                    analysis::IndirectTargetRefinementAnalysisDimension dimension) {
+                    if (!refinement_budget_object.contains(key) ||
+                        refinement_analysis_cli_overrides.contains(dimension))
+                        return;
+                    const auto& value = refinement_budget_object.at(key);
+                    if (!value.is_number_unsigned())
+                        throw std::runtime_error(
+                            "refinement analysis budget must be an unsigned integer");
+                    const auto parsed = value.get<std::uint64_t>();
+                    if (parsed == 0U || parsed > maximum)
+                        throw std::runtime_error(
+                            "refinement analysis budget is zero or overflows its type");
+                    destination = static_cast<std::remove_reference_t<decltype(destination)>>(parsed);
+                    provenance = analysis::AnalysisBudgetProvenance{
+                        analysis::AnalysisBudgetProvenanceKind::LocalConfigurationOverride,
+                        "run_entry_local_config"};
+                };
+            parse_local_refinement_budget(
+                "max_functions_analyzed", refinement_budgets.analysis.max_functions_analyzed,
+                refinement_budgets.analysis.functions_analyzed_provenance,
+                std::numeric_limits<std::size_t>::max(),
+                analysis::IndirectTargetRefinementAnalysisDimension::FunctionsAnalyzed);
+            parse_local_refinement_budget(
+                "max_functions_reanalyzed", refinement_budgets.analysis.max_functions_reanalyzed,
+                refinement_budgets.analysis.functions_reanalyzed_provenance,
+                std::numeric_limits<std::size_t>::max(),
+                analysis::IndirectTargetRefinementAnalysisDimension::FunctionsReanalyzed);
+            parse_local_refinement_budget(
+                "max_instructions", refinement_budgets.analysis.max_instructions,
+                refinement_budgets.analysis.instructions_provenance,
+                std::numeric_limits<std::size_t>::max(),
+                analysis::IndirectTargetRefinementAnalysisDimension::Instructions);
+            parse_local_refinement_budget(
+                "max_blocks", refinement_budgets.analysis.max_blocks,
+                refinement_budgets.analysis.blocks_provenance,
+                std::numeric_limits<std::size_t>::max(),
+                analysis::IndirectTargetRefinementAnalysisDimension::Blocks);
+            parse_local_refinement_budget(
+                "max_edges", refinement_budgets.analysis.max_edges,
+                refinement_budgets.analysis.edges_provenance,
+                std::numeric_limits<std::size_t>::max(),
+                analysis::IndirectTargetRefinementAnalysisDimension::Edges);
+            parse_local_refinement_budget(
+                "max_bytes_analyzed", refinement_budgets.analysis.max_bytes_analyzed,
+                refinement_budgets.analysis.bytes_provenance,
+                std::numeric_limits<memory::GuestSize>::max(),
+                analysis::IndirectTargetRefinementAnalysisDimension::BytesAnalyzed);
+            parse_local_refinement_budget(
+                "max_boundary_finalization_passes",
+                refinement_budgets.analysis.max_boundary_finalization_passes,
+                refinement_budgets.analysis.boundary_finalization_provenance,
+                std::numeric_limits<std::size_t>::max(),
+                analysis::IndirectTargetRefinementAnalysisDimension::BoundaryFinalizationPasses);
+            parse_local_refinement_budget(
+                "max_invalidated_records", refinement_budgets.analysis.max_invalidated_records,
+                refinement_budgets.analysis.invalidated_records_provenance,
+                std::numeric_limits<std::size_t>::max(),
+                analysis::IndirectTargetRefinementAnalysisDimension::InvalidatedRecords);
+            if (!refinement_transaction_limit_cli_override &&
+                refinement_budget_object.contains("max_transactions"))
+            {
+                const auto& value = refinement_budget_object.at("max_transactions");
+                if (!value.is_number_unsigned())
+                    throw std::runtime_error(
+                        "refinement transaction limit must be an unsigned integer");
+                const auto parsed = value.get<std::uint64_t>();
+                if (parsed == 0U ||
+                    parsed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+                    throw std::runtime_error(
+                        "refinement transaction limit is zero or overflows its type");
+                refinement_budgets.analysis.max_transactions =
+                    static_cast<std::size_t>(parsed);
+                refinement_budgets.analysis.transactions_provenance =
+                    analysis::AnalysisBudgetProvenance{
+                        analysis::AnalysisBudgetProvenanceKind::LocalConfigurationOverride,
+                        "run_entry_local_config"};
+            }
             const auto module_set = root.contains("module_set") && root.at("module_set").is_object()
                                         ? root.at("module_set") : nlohmann::json::object();
             const bool directory_source =
@@ -643,6 +1241,13 @@ int main(int argc, char** argv)
             std::cerr << "primary process module is not present in the ingested module set\n";
             return static_cast<int>(ExitCode::InvalidArguments);
         }
+        if (analyst_address && entry_name == "dt-init") entry_name = "analyst";
+        const auto selection_kind = entry_kind_for_name(entry_name);
+        if (!selection_kind)
+        {
+            std::cerr << "unknown --entry kind\n";
+            return static_cast<int>(ExitCode::InvalidArguments);
+        }
         analysis::ProcessImageOptions process_options;
         process_options.primary_module = configured_primary;
         process_options.provider_search_complete = provider_search_complete;
@@ -663,6 +1268,27 @@ int main(int argc, char** argv)
             print_error(process.error());
             return static_cast<int>(ExitCode::InfrastructureFailure);
         }
+        const auto candidate_universe =
+            analysis::derive_indirect_target_candidate_universe(process.value());
+        if (!candidate_universe)
+        {
+            print_error(candidate_universe.error());
+            return static_cast<int>(ExitCode::InfrastructureFailure);
+        }
+        refinement_budgets.candidate_universe = candidate_universe.value();
+        const auto* primary_process_module = process.value().module(configured_primary);
+        if (primary_process_module == nullptr)
+        {
+            std::cerr << "primary process module has no process-image identity\n";
+            return static_cast<int>(ExitCode::InfrastructureFailure);
+        }
+        const auto selected = execution::select_entry(
+            primary_process_module->identity, selection_kind.value(), analyst_address);
+        if (!selected)
+        {
+            print_error(selected.error());
+            return static_cast<int>(ExitCode::InfrastructureFailure);
+        }
         std::vector<analysis::FinalizedFunctionMap> maps;
         maps.reserve(process.value().modules().size());
         const auto focus_provider = analysis_focus_symbol.empty()
@@ -671,7 +1297,11 @@ int main(int argc, char** argv)
         for (const auto& module : process.value().modules())
         {
             std::vector<analysis::FunctionSeed> seeds = module.seeds;
-            if (!analysis_focus_symbol.empty())
+            analysis::FunctionMapOptions module_function_options = function_options;
+            const bool execution_closure =
+                module_function_options.budgets.strategy == analysis::AnalysisStrategy::ExecutionClosure ||
+                !analysis_focus_symbol.empty();
+            if (execution_closure)
             {
                 seeds.clear();
                 for (const auto& seed : module.seeds)
@@ -681,7 +1311,14 @@ int main(int argc, char** argv)
                     const bool is_primary_init = module.identity.module == configured_primary &&
                                                  seed.source == analysis::FunctionDiscoverySource::AnalystSeed &&
                                                  seed.note.find("DT_INIT") != std::string::npos;
-                    if (is_focus_symbol || is_primary_init) seeds.push_back(seed);
+                    const bool is_selected_entry = module.identity.module == configured_primary &&
+                                                   (seed.entry == selected.value().address ||
+                                                    seed.canonical_entry.value_or(seed.entry) ==
+                                                        selected.value().address);
+                    if ((!analysis_focus_symbol.empty() &&
+                         (is_focus_symbol || is_primary_init || is_selected_entry)) ||
+                        (analysis_focus_symbol.empty() && is_selected_entry))
+                        seeds.push_back(seed);
                 }
                 if (focus_provider.selected_candidate &&
                     focus_provider.selected_candidate.value() < focus_provider.candidates.size())
@@ -700,11 +1337,26 @@ int main(int argc, char** argv)
                             "M15 selected provider closure seed"});
                     }
                 }
+                if (module.identity.module == configured_primary && seeds.empty())
+                {
+                    seeds.push_back(analysis::FunctionSeed{
+                        selected.value().address, analysis::FunctionDiscoverySource::ManualOverride,
+                        analysis::FunctionConfidence::Manual, std::nullopt, std::nullopt,
+                        "selected execution entry closure root"});
+                }
                 if (seeds.empty()) continue;
+                module_function_options.execution_closure_roots.clear();
+                for (const auto& seed : seeds)
+                {
+                    module_function_options.execution_closure_roots.insert(seed.entry);
+                    module_function_options.execution_closure_roots.insert(
+                        seed.canonical_entry.value_or(seed.entry));
+                }
+                module_function_options.budgets.strategy = analysis::AnalysisStrategy::ExecutionClosure;
             }
             const auto map = analysis::FunctionMapBuilder::build(
                 analysis::ModuleAnalysisInput{module.identity, &process.value().memory(), std::move(seeds)},
-                function_options);
+                module_function_options);
             if (!map)
             {
                 print_error(map.error());
@@ -729,23 +1381,6 @@ int main(int argc, char** argv)
             std::cerr << "primary process module has no finalized function map\n";
             return static_cast<int>(ExitCode::InfrastructureFailure);
         }
-        execution::EntrySelectionKind selection_kind;
-        if (entry_name == "dt-init") selection_kind = execution::EntrySelectionKind::DynamicInit;
-        else if (entry_name == "dt-fini") selection_kind = execution::EntrySelectionKind::DynamicFini;
-        else if (entry_name == "text-start") selection_kind = execution::EntrySelectionKind::TextStartCandidate;
-        else if (entry_name == "process") selection_kind = execution::EntrySelectionKind::VerifiedProcessEntry;
-        else if (entry_name == "analyst") selection_kind = execution::EntrySelectionKind::AnalystAddress;
-        else
-        {
-            std::cerr << "unknown --entry kind\n";
-            return static_cast<int>(ExitCode::InvalidArguments);
-        }
-        const auto selected = execution::select_entry(primary_map->identity(), selection_kind, analyst_address);
-        if (!selected)
-        {
-            print_error(selected.error());
-            return static_cast<int>(ExitCode::InfrastructureFailure);
-        }
         runtime::RuntimeImportRegistry runtime_imports;
         const auto registered = runtime::register_m12_evidence_imports(runtime_imports);
         if (!registered)
@@ -765,21 +1400,18 @@ int main(int argc, char** argv)
         discovery_options.cfg = function_options.cfg;
         analysis::IndirectTargetRefinementWorklist worklist(refinement_budgets);
         std::vector<analysis::IndirectTargetAssessment> promoted_targets;
+        std::optional<execution::ExecutionSessionResult> last_run_result;
         execution::ExecutionSessionResult final_result;
         for (;;)
         {
             if (!worklist.begin_round())
             {
+                if (last_run_result) final_result = std::move(last_run_result.value());
                 final_result.indirect_target_refinement = worklist.summary();
                 final_result.stop_reason =
                     execution::ExecutionStopReason::IndirectTargetRefinementBudgetExceeded;
                 const auto summary = worklist.summary();
-                final_result.diagnostic =
-                    "indirect target refinement " +
-                    std::string(analysis::indirect_target_refinement_budget_dimension_name(
-                        summary.exhaustion.dimension)) +
-                    " budget exhausted (" + std::to_string(summary.exhaustion.consumed) +
-                    "/" + std::to_string(summary.exhaustion.limit) + ")";
+                final_result.diagnostic = refinement_exhaustion_diagnostic(summary);
                 break;
             }
             execution::ExecutionSession session(process.value().memory(), process_map,
@@ -792,6 +1424,20 @@ int main(int argc, char** argv)
                 return static_cast<int>(ExitCode::InfrastructureFailure);
             }
             auto run_result = std::move(run).value();
+            if (run_result.stop_reason == execution::ExecutionStopReason::GuestMemoryResourceLimitExceeded &&
+                last_run_result)
+            {
+                // A new refinement generation owns a fresh controlled stack.
+                // If the process-wide guest-memory resource prevents that
+                // generation from starting, retain the last complete
+                // execution evidence and attach the actual next blocker.
+                auto blocked_result = std::move(last_run_result.value());
+                blocked_result.stop_reason = run_result.stop_reason;
+                blocked_result.diagnostic = run_result.diagnostic;
+                blocked_result.indirect_target_refinement = worklist.summary();
+                final_result = std::move(blocked_result);
+                break;
+            }
             if (run_result.stop_reason == execution::ExecutionStopReason::UnknownGuestFunction)
             {
                 for (const auto& assessment : run_result.indirect_target_discovery)
@@ -804,6 +1450,7 @@ int main(int argc, char** argv)
             {
                 const auto identity = analysis::indirect_target_candidate_identity(candidate);
                 if (!worklist.begin_candidate_assessment(identity) || !worklist.can_promote()) break;
+                const auto map_generation_before = worklist.summary().map_generation;
                 auto expansion = analysis::refine_process_function_map(
                     process_map, process.value(), candidate, discovery_options);
                 if (!expansion)
@@ -813,28 +1460,43 @@ int main(int argc, char** argv)
                 }
                 if (!expansion.value().assessment.decision.promoted)
                 {
-                    worklist.record_terminal_candidate(identity);
+                    if (expansion.value().assessment.validation.analysis_error)
+                        worklist.record_failed_refinement(identity);
+                    else
+                        worklist.record_terminal_candidate(identity);
                     continue;
                 }
+                if (!worklist.can_commit_refinement(
+                        identity, expansion.value().analysis_work,
+                        expansion.value().module_maps_rebuilt,
+                        expansion.value().module_maps_reused))
+                {
+                    worklist.record_rollback_assessment(identity);
+                    break;
+                }
                 process_map = std::move(expansion.value().map);
+                expansion.value().assessment.map_generation_before = map_generation_before;
+                expansion.value().assessment.map_generation_after = map_generation_before + 1U;
                 promoted_targets.push_back(std::move(expansion.value().assessment));
-                worklist.record_promotion(identity);
+                worklist.record_promotion(identity, expansion.value().module_maps_rebuilt,
+                                           expansion.value().module_maps_reused,
+                                           expansion.value().analysis_work);
                 refined = true;
                 break;
             }
-            if (refined) continue;
+            worklist.end_round();
+            if (refined)
+            {
+                last_run_result = std::move(run_result);
+                continue;
+            }
 
             if (worklist.exhausted())
             {
                 run_result.stop_reason =
                     execution::ExecutionStopReason::IndirectTargetRefinementBudgetExceeded;
                 const auto refinement = worklist.summary();
-                run_result.diagnostic =
-                    "indirect target refinement " +
-                    std::string(analysis::indirect_target_refinement_budget_dimension_name(
-                        refinement.exhaustion.dimension)) +
-                    " budget exhausted (" + std::to_string(refinement.exhaustion.consumed) +
-                    "/" + std::to_string(refinement.exhaustion.limit) + ")";
+                run_result.diagnostic = refinement_exhaustion_diagnostic(refinement);
             }
             run_result.indirect_target_refinement = worklist.summary();
             final_result = std::move(run_result);
@@ -867,6 +1529,10 @@ int main(int argc, char** argv)
                 final_result.indirect_target_discovery.end());
             final_result.indirect_target_discovery.push_back(std::move(merged));
         }
+        // Every loop-local ExecutionSession has now been destroyed, including
+        // the terminal or failed generation. Capture post-lifetime accounting
+        // so the report distinguishes live storage from cumulative churn.
+        final_result.guest_memory = process.value().memory().accounting();
         const auto report = execution::render_execution_report_json(final_result);
         if (!report_path.empty())
         {
@@ -897,6 +1563,12 @@ int main(int argc, char** argv)
         return static_cast<int>(ExitCode::InvalidArguments);
     }
     if (analyst_address && entry_name == "dt-init") entry_name = "analyst";
+    const auto selection_kind = entry_kind_for_name(entry_name);
+    if (!selection_kind)
+    {
+        std::cerr << "unknown --entry kind\n";
+        return static_cast<int>(ExitCode::InvalidArguments);
+    }
     std::vector<std::byte> bytes;
     if (!read_file(input_path, 512U * 1024U * 1024U, bytes))
     {
@@ -909,33 +1581,49 @@ int main(int argc, char** argv)
         print_error(loaded.error());
         return static_cast<int>(ExitCode::InfrastructureFailure);
     }
+    const auto selected = execution::select_entry(
+        loaded.value().identity, selection_kind.value(), analyst_address);
+    if (!selected)
+    {
+        print_error(selected.error());
+        return static_cast<int>(ExitCode::InfrastructureFailure);
+    }
+    analysis::FunctionMapOptions module_function_options = function_options;
+    std::vector<analysis::FunctionSeed> seeds = loaded.value().seeds;
+    if (module_function_options.budgets.strategy == analysis::AnalysisStrategy::ExecutionClosure)
+    {
+        seeds.clear();
+        for (const auto& seed : loaded.value().seeds)
+        {
+            if (seed.entry == selected.value().address ||
+                seed.canonical_entry.value_or(seed.entry) == selected.value().address)
+                seeds.push_back(seed);
+        }
+        if (seeds.empty())
+        {
+            seeds.push_back(analysis::FunctionSeed{
+                selected.value().address, analysis::FunctionDiscoverySource::ManualOverride,
+                analysis::FunctionConfidence::Manual, std::nullopt, std::nullopt,
+                "selected execution entry closure root"});
+        }
+        module_function_options.execution_closure_roots.clear();
+        for (const auto& seed : seeds)
+        {
+            module_function_options.execution_closure_roots.insert(seed.entry);
+            module_function_options.execution_closure_roots.insert(
+                seed.canonical_entry.value_or(seed.entry));
+        }
+    }
     const auto map = analysis::FunctionMapBuilder::build(
         analysis::ModuleAnalysisInput{loaded.value().identity, &loaded.value().memory,
-                                      loaded.value().seeds},
-        function_options);
+                                      std::move(seeds)},
+        module_function_options);
     if (!map)
     {
         print_error(map.error());
         return static_cast<int>(ExitCode::InfrastructureFailure);
     }
 
-    execution::EntrySelectionKind selection_kind;
-    if (entry_name == "dt-init") selection_kind = execution::EntrySelectionKind::DynamicInit;
-    else if (entry_name == "dt-fini") selection_kind = execution::EntrySelectionKind::DynamicFini;
-    else if (entry_name == "text-start") selection_kind = execution::EntrySelectionKind::TextStartCandidate;
-    else if (entry_name == "process") selection_kind = execution::EntrySelectionKind::VerifiedProcessEntry;
-    else if (entry_name == "analyst") selection_kind = execution::EntrySelectionKind::AnalystAddress;
-    else
-    {
-        std::cerr << "unknown --entry kind\n";
-        return static_cast<int>(ExitCode::InvalidArguments);
-    }
-    const auto selected = execution::select_entry(map.value().identity(), selection_kind, analyst_address);
-    if (!selected)
-    {
-        print_error(selected.error());
-        return static_cast<int>(ExitCode::InfrastructureFailure);
-    }
     runtime::RuntimeImportRegistry runtime_imports;
     const auto registered = runtime::register_m12_evidence_imports(runtime_imports);
     if (!registered)
@@ -943,22 +1631,26 @@ int main(int argc, char** argv)
         print_error(registered.error());
         return static_cast<int>(ExitCode::InfrastructureFailure);
     }
-    execution::ExecutionSession session(loaded.value().memory, map.value(),
-                                        loaded.value().unresolved_relocations, execution_options,
-                                        execution::ExecutionLoadSummary{
-                                            loaded.value().relocations.size(),
-                                            loaded.value().applied_relocations,
-                                            loaded.value().unresolved_relocations.size()},
-                                        &runtime_imports, &loaded.value().metadata,
-                                        loaded.value().symbols ? &loaded.value().symbols.value()
-                                                               : nullptr);
-    const auto run = session.run(selected.value());
-    if (!run)
+    std::optional<execution::ExecutionSessionResult> single_run;
     {
-        print_error(run.error());
-        return static_cast<int>(ExitCode::InfrastructureFailure);
+        execution::ExecutionSession session(
+            loaded.value().memory, map.value(), loaded.value().unresolved_relocations,
+            execution_options,
+            execution::ExecutionLoadSummary{loaded.value().relocations.size(),
+                                             loaded.value().applied_relocations,
+                                             loaded.value().unresolved_relocations.size()},
+            &runtime_imports, &loaded.value().metadata,
+            loaded.value().symbols ? &loaded.value().symbols.value() : nullptr);
+        const auto run = session.run(selected.value());
+        if (!run)
+        {
+            print_error(run.error());
+            return static_cast<int>(ExitCode::InfrastructureFailure);
+        }
+        single_run = std::move(run).value();
     }
-    const auto report = execution::render_execution_report_json(run.value());
+    single_run->guest_memory = loaded.value().memory.accounting();
+    const auto report = execution::render_execution_report_json(single_run.value());
     if (!report_path.empty())
     {
         std::ofstream output(report_path, std::ios::binary);
@@ -980,8 +1672,9 @@ int main(int argc, char** argv)
     }
     else
     {
-        std::cout << "STOPPED: " << execution::execution_stop_reason_name(run.value().stop_reason)
-                  << " pc=" << std::hex << run.value().stop_pc << std::dec << '\n';
+        std::cout << "STOPPED: "
+                  << execution::execution_stop_reason_name(single_run->stop_reason)
+                  << " pc=" << std::hex << single_run->stop_pc << std::dec << '\n';
     }
     return static_cast<int>(ExitCode::Success);
 }

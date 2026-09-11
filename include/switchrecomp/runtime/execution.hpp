@@ -20,6 +20,7 @@ enum class ExecutionStatus
     Trapped,
     Fault,
     LimitExceeded,
+    Yielded,
 };
 
 enum class ExecutionBoundaryKind
@@ -33,6 +34,7 @@ enum class ExecutionBoundaryKind
     UnsupportedInstruction,
     Trap,
     BudgetExhaustion,
+    SliceExhaustion,
 };
 
 struct ExecutionBoundary
@@ -52,7 +54,14 @@ struct ExecutionBoundary
 
 struct ExecutionOptions
 {
-    std::size_t max_ir_operations = 100'000U;
+    // An optional hard budget belongs to the caller of one or more slices. A
+    // missing value means that the caller is using its separately bounded
+    // aggregate resources rather than a legacy global IR ceiling.
+    std::optional<std::size_t> max_ir_operations;
+    // This is a per-invocation scheduling quantum, never a termination
+    // resource. The interpreter yields with an exact frame cursor when it
+    // reaches the quantum.
+    std::size_t slice_ir_operations = 4'096U;
     std::span<const std::uint64_t> observed_guest_pcs;
     std::size_t max_observed_guest_pcs = 32U;
 };
@@ -72,6 +81,11 @@ struct ExecutionResult
     std::size_t executed_blocks = 0U;
     std::size_t executed_guest_instructions = 0U;
     std::uint64_t final_guest_pc = 0U;
+    // The next resumable position. It is valid for a yielded or hard-limited
+    // result and is intentionally guest/IR identity rather than a host
+    // pointer.
+    std::uint32_t resume_block = UINT32_MAX;
+    std::size_t resume_operation_index = 0U;
     std::vector<std::uint64_t> observed_guest_pcs;
     std::vector<ObservedInstructionExecution> observed_instruction_executions;
     // Internal execution trace used by the session to derive bounded counts;

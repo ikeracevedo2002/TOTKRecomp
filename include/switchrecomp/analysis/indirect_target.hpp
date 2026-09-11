@@ -6,8 +6,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -348,14 +350,127 @@ struct IndirectTargetCandidateIdentity
 [[nodiscard]] IndirectTargetCandidateIdentity indirect_target_candidate_identity(
     const ObservedIndirectTarget& observed);
 
+// The current outer worklist charges one persistent candidate record per
+// target-module/address pair.  This universe is the finite set of aligned
+// instruction slots in the immutable executable image.  The representation
+// is a count, not an eagerly materialized address set.
+struct IndirectTargetCandidateUniverse
+{
+    std::size_t executable_instruction_slots = std::numeric_limits<std::size_t>::max() / 4U;
+    AnalysisBudgetProvenance provenance{
+        AnalysisBudgetProvenanceKind::DerivedStructuralBound,
+        "aarch64_guest_address_domain"};
+};
+
+[[nodiscard]] Result<IndirectTargetCandidateUniverse>
+derive_indirect_target_candidate_universe(std::span<const ModuleIdentity> modules);
+
+[[nodiscard]] Result<IndirectTargetCandidateUniverse>
+derive_indirect_target_candidate_universe(const ProcessImage& process_image);
+
+enum class IndirectTargetRefinementAnalysisDimension : std::uint8_t
+{
+    None,
+    FunctionsAnalyzed,
+    FunctionsReanalyzed,
+    Instructions,
+    Blocks,
+    Edges,
+    BytesAnalyzed,
+    BoundaryFinalizationPasses,
+    InvalidatedRecords,
+    Transactions,
+};
+
+[[nodiscard]] std::string_view indirect_target_refinement_analysis_dimension_name(
+    IndirectTargetRefinementAnalysisDimension dimension) noexcept;
+
+struct IndirectTargetRefinementAnalysisBudgets
+{
+    // Cumulative immutable-generation work limits. These are not successful
+    // promotion or map-event quotas.
+    std::size_t max_functions_analyzed = 200'000U;
+    std::size_t max_functions_reanalyzed = 100'000U;
+    std::size_t max_instructions = 8'000'000U;
+    std::size_t max_blocks = 2'000'000U;
+    std::size_t max_edges = 4'000'000U;
+    memory::GuestSize max_bytes_analyzed = memory::GuestSize{256U} * 1024U * 1024U;
+    std::size_t max_boundary_finalization_passes = 2'048U;
+    std::size_t max_invalidated_records = 100'000U;
+    // Reusable-map transactions remain auditable accounting, but ordinary
+    // termination is provided by the semantic aggregate resources below.
+    // An engaged value is an explicit finite compatibility/debug ceiling.
+    std::optional<std::size_t> max_transactions = std::nullopt;
+
+    AnalysisBudgetProvenance functions_analyzed_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+    AnalysisBudgetProvenance functions_reanalyzed_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+    AnalysisBudgetProvenance instructions_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+    AnalysisBudgetProvenance blocks_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+    AnalysisBudgetProvenance edges_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+    AnalysisBudgetProvenance bytes_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+    AnalysisBudgetProvenance boundary_finalization_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+    AnalysisBudgetProvenance invalidated_records_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "refinement_analysis_default"};
+    AnalysisBudgetProvenance transactions_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "not_configured"};
+};
+
+struct IndirectTargetRefinementAnalysisWork
+{
+    std::string module;
+    std::size_t functions_analyzed = 0U;
+    std::size_t functions_reanalyzed = 0U;
+    std::size_t functions_reused = 0U;
+    std::size_t instructions = 0U;
+    std::size_t blocks = 0U;
+    std::size_t edges = 0U;
+    memory::GuestSize bytes_analyzed = 0U;
+    std::size_t boundary_finalization_passes = 0U;
+    std::size_t invalidated_records = 0U;
+    std::size_t transactions = 0U;
+};
+
+struct IndirectTargetRefinementAnalysisSummary
+{
+    IndirectTargetRefinementAnalysisBudgets configured;
+    std::size_t functions_analyzed = 0U;
+    std::size_t functions_reanalyzed = 0U;
+    std::size_t functions_reused = 0U;
+    std::size_t instructions = 0U;
+    std::size_t blocks = 0U;
+    std::size_t edges = 0U;
+    memory::GuestSize bytes_analyzed = 0U;
+    std::size_t boundary_finalization_passes = 0U;
+    std::size_t invalidated_records = 0U;
+    std::size_t transactions = 0U;
+};
+
 enum class IndirectTargetRefinementBudgetDimension : std::uint8_t
 {
     None,
-    Rounds,
+    StagnantRounds,
+    CounterOverflow,
     UniqueCandidates,
+    StructuralCandidateUniverse,
     CandidateAssessments,
     Promotions,
     MapRebuilds,
+    RefinementAnalysisFunctions,
+    RefinementAnalysisReanalyzedFunctions,
+    RefinementAnalysisInstructions,
+    RefinementAnalysisBlocks,
+    RefinementAnalysisEdges,
+    RefinementAnalysisBytes,
+    RefinementAnalysisBoundaryFinalizationPasses,
+    RefinementAnalysisInvalidatedRecords,
+    RefinementAnalysisTransactions,
 };
 
 [[nodiscard]] std::string_view indirect_target_refinement_budget_dimension_name(
@@ -366,11 +481,28 @@ struct IndirectTargetRefinementBudgets
     // These are outer discovery budgets.  CFG/function budgets remain owned
     // by AnalysisBudgets and are enforced independently for every immutable
     // map construction.
-    std::size_t max_rounds = 64U;
-    std::size_t max_unique_candidates = 256U;
-    std::size_t max_candidate_assessments = 512U;
+    // Productive execution attempts are bounded by the dimensions below.
+    // This budget applies only to consecutive attempts which make no
+    // monotonic worklist transition.
+    std::size_t max_stagnant_rounds = 64U;
+    // Optional pre-M28 compatibility guard. Ordinary operation derives the
+    // candidate bound from candidate_universe instead of using a fixed count.
+    std::optional<std::size_t> max_unique_candidates;
+    AnalysisBudgetProvenance candidate_limit_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "not_configured"};
+    // Optional pre-M32 compatibility guard. Ordinary operation accounts for
+    // first assessments and generation-dependent reassessments directly from
+    // candidate/generation state instead of using a historical event count.
+    std::optional<std::size_t> max_candidate_assessments;
+    AnalysisBudgetProvenance candidate_assessment_limit_provenance{
+        AnalysisBudgetProvenanceKind::LibraryDefault, "not_configured"};
+    // Retained only for explicit pre-M27 compatibility. Ordinary defaults do
+    // not charge valid monotonic work to these successful-event counts.
     std::size_t max_promotions = 128U;
     std::size_t max_map_rebuilds = 128U;
+    bool legacy_event_limits = false;
+    IndirectTargetCandidateUniverse candidate_universe;
+    IndirectTargetRefinementAnalysisBudgets analysis;
 };
 
 struct IndirectTargetRefinementExhaustion
@@ -379,24 +511,43 @@ struct IndirectTargetRefinementExhaustion
         IndirectTargetRefinementBudgetDimension::None;
     std::size_t consumed = 0U;
     std::size_t limit = 0U;
+    std::string module;
+    std::size_t generation = 0U;
+    std::optional<IndirectTargetCandidateIdentity> next_work;
 };
 
 struct IndirectTargetRefinementSummary
 {
     IndirectTargetRefinementBudgets configured;
-    std::size_t refinement_rounds = 0U;
+    std::size_t total_execution_attempts = 0U;
+    std::size_t productive_rounds = 0U;
+    std::size_t stagnant_rounds = 0U;
     std::size_t observations_received = 0U;
     std::size_t unique_observations = 0U;
     std::size_t unique_candidates = 0U;
+    std::size_t candidate_records = 0U;
+    std::size_t structurally_ineligible_candidates = 0U;
     std::size_t candidate_assessments = 0U;
+    std::size_t first_candidate_assessments = 0U;
+    std::size_t generation_reassessments = 0U;
+    std::size_t same_generation_assessment_attempts = 0U;
+    std::size_t failed_refinements = 0U;
+    std::size_t rollback_assessments = 0U;
+    std::size_t terminal_resolutions = 0U;
     std::size_t successful_promotions = 0U;
     std::size_t existing_trusted_hits = 0U;
     std::size_t duplicate_coalesced_observations = 0U;
     std::size_t rejected_candidates = 0U;
     std::size_t boundary_reconciliations = 0U;
     std::size_t map_rebuilds = 0U;
+    std::size_t module_maps_rebuilt = 0U;
+    std::size_t module_maps_reused = 0U;
     std::size_t candidates_reconsidered_after_map_change = 0U;
+    std::size_t map_generation = 0U;
     std::size_t pending_candidate_count = 0U;
+    IndirectTargetRefinementAnalysisSummary analysis;
+    std::optional<IndirectTargetCandidateIdentity> last_assessed_candidate;
+    std::optional<std::size_t> last_assessment_generation;
     std::optional<IndirectTargetCandidateIdentity> last_processed_candidate;
     std::optional<IndirectTargetCandidateIdentity> next_pending_candidate;
     IndirectTargetRefinementExhaustion exhaustion;
@@ -413,9 +564,11 @@ struct IndirectTargetRefinementObservationResult
 struct IndirectTargetAssessment;
 
 // Deterministic, finite outer-discovery accounting.  The worklist stores one
-// logical work item per target/provenance identity, while the unique-candidate
-// quota is charged once per target module/address.  Every distinct guest-side
-// observation provenance remains in its representative observation.
+// sparse logical work item per target module/address.  The full source,
+// control-flow, register, and pointer-provenance identity remains in the
+// representative observation/history, so coalescing records does not discard
+// guest-side evidence.  The structural candidate universe therefore bounds
+// both unique target records and persistent candidate storage.
 class IndirectTargetRefinementWorklist
 {
   public:
@@ -425,11 +578,22 @@ class IndirectTargetRefinementWorklist
     [[nodiscard]] IndirectTargetRefinementObservationResult observe(
         const IndirectTargetAssessment& assessment);
     [[nodiscard]] bool begin_round() noexcept;
+    void end_round() noexcept;
     [[nodiscard]] bool begin_candidate_assessment(
         const IndirectTargetCandidateIdentity& candidate) noexcept;
     [[nodiscard]] bool can_promote() noexcept;
+    [[nodiscard]] bool can_commit_refinement(
+        const IndirectTargetCandidateIdentity& candidate,
+        const IndirectTargetRefinementAnalysisWork& work,
+        std::size_t module_maps_rebuilt = 0U,
+        std::size_t module_maps_reused = 0U) noexcept;
     void record_terminal_candidate(const IndirectTargetCandidateIdentity& candidate) noexcept;
-    void record_promotion(const IndirectTargetCandidateIdentity& candidate) noexcept;
+    void record_failed_refinement(const IndirectTargetCandidateIdentity& candidate) noexcept;
+    void record_rollback_assessment(const IndirectTargetCandidateIdentity& candidate) noexcept;
+    void record_promotion(const IndirectTargetCandidateIdentity& candidate,
+                          std::size_t module_maps_rebuilt = 0U,
+                          std::size_t module_maps_reused = 0U,
+                          const IndirectTargetRefinementAnalysisWork& work = {}) noexcept;
 
     [[nodiscard]] std::vector<ObservedIndirectTarget> pending_candidates() const;
     [[nodiscard]] IndirectTargetRefinementSummary summary() const;
@@ -441,16 +605,32 @@ class IndirectTargetRefinementWorklist
         ObservedIndirectTarget observed;
         bool pending = false;
         bool processed = false;
+        bool promoted = false;
         std::size_t processed_generation = 0U;
+        std::optional<std::size_t> last_assessed_generation;
     };
+
+    using TargetIdentity = std::pair<std::string, memory::GuestAddress>;
+
+    [[nodiscard]] std::size_t candidate_limit() const noexcept;
+    [[nodiscard]] bool increment_counter(
+        std::size_t& counter, IndirectTargetRefinementBudgetDimension dimension,
+        std::string module = {},
+        std::optional<IndirectTargetCandidateIdentity> next_work = std::nullopt) noexcept;
+    [[nodiscard]] bool add_counter(
+        std::size_t& counter, std::size_t delta,
+        IndirectTargetRefinementBudgetDimension dimension, std::string module = {},
+        std::optional<IndirectTargetCandidateIdentity> next_work = std::nullopt) noexcept;
+    [[nodiscard]] std::vector<ObservedIndirectTarget> all_pending_candidates() const;
 
     IndirectTargetRefinementBudgets budgets_;
     IndirectTargetRefinementSummary counters_;
-    std::map<IndirectTargetCandidateIdentity, WorkItem> work_items_;
+    std::map<TargetIdentity, WorkItem> work_items_;
     std::map<std::string, bool> unique_observations_;
-    std::map<std::pair<std::string, memory::GuestAddress>, bool> unique_target_candidates_;
     std::size_t map_generation_ = 0U;
     std::optional<IndirectTargetCandidateIdentity> overflow_pending_;
+    bool round_active_ = false;
+    bool round_productive_ = false;
 };
 
 struct IndirectTargetValidation
@@ -460,6 +640,9 @@ struct IndirectTargetValidation
     bool mapped = false;
     bool executable = false;
     bool unique_module_owner = false;
+    // This is an immutable process-image eligibility result only. It is not
+    // certification and never authorizes promotion or guest dispatch.
+    bool structurally_eligible = false;
     std::string target_module;
     std::optional<memory::GuestAddress> target_module_base;
     IndirectTargetOwnership ownership = IndirectTargetOwnership::Unknown;
@@ -507,6 +690,10 @@ struct IndirectTargetAssessment
     std::optional<memory::GuestAddress> first_guest_pc;
     std::optional<std::uint32_t> first_guest_opcode;
     std::optional<memory::GuestAddress> next_guest_pc;
+    // Filled by the outer immutable refinement driver for a successful
+    // promotion.  Zero is the initial frozen process-map generation.
+    std::size_t map_generation_before = 0U;
+    std::size_t map_generation_after = 0U;
 };
 
 struct IndirectTargetDiscoveryOptions
@@ -521,12 +708,16 @@ struct FunctionMapRefinement
 {
     FinalizedFunctionMap map;
     IndirectTargetAssessment assessment;
+    IndirectTargetRefinementAnalysisWork analysis_work;
 };
 
 struct ProcessFunctionMapRefinement
 {
     ProcessFunctionMap map;
     IndirectTargetAssessment assessment;
+    std::size_t module_maps_rebuilt = 0U;
+    std::size_t module_maps_reused = 0U;
+    IndirectTargetRefinementAnalysisWork analysis_work;
 };
 
 [[nodiscard]] Result<IndirectTargetAssessment> assess_indirect_target(

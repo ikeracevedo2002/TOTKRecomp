@@ -297,6 +297,7 @@ const char* execution_status_name(ExecutionStatus status) noexcept
     case ExecutionStatus::Trapped: return "trapped";
     case ExecutionStatus::Fault: return "fault";
     case ExecutionStatus::LimitExceeded: return "limit_exceeded";
+    case ExecutionStatus::Yielded: return "yielded";
     }
     return "unknown";
 }
@@ -313,6 +314,7 @@ const char* execution_boundary_kind_name(ExecutionBoundaryKind kind) noexcept
     case ExecutionBoundaryKind::UnsupportedInstruction: return "unsupported_instruction";
     case ExecutionBoundaryKind::Trap: return "trap";
     case ExecutionBoundaryKind::BudgetExhaustion: return "budget_exhaustion";
+    case ExecutionBoundaryKind::SliceExhaustion: return "slice_exhaustion";
     }
     return "unknown";
 }

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -27,6 +28,59 @@ enum class FunctionDiscoverySource : std::uint8_t
     JumpTable,
     ObservedIndirectTarget,
     Heuristic,
+};
+
+enum class AnalysisStrategy : std::uint8_t
+{
+    WholeModule,
+    ExecutionClosure,
+};
+
+[[nodiscard]] std::string_view analysis_strategy_name(AnalysisStrategy strategy) noexcept;
+
+enum class AnalysisBudgetDimension : std::uint8_t
+{
+    None,
+    Functions,
+    Instructions,
+    Blocks,
+    Edges,
+    Seeds,
+    BytesAnalyzed,
+    BoundaryFinalizationPasses,
+};
+
+[[nodiscard]] std::string_view analysis_budget_dimension_name(
+    AnalysisBudgetDimension dimension) noexcept;
+
+enum class AnalysisBudgetProvenanceKind : std::uint8_t
+{
+    LibraryDefault,
+    ExecutionToolProfile,
+    ExplicitCliOverride,
+    ExplicitApiOverride,
+    LocalConfigurationOverride,
+    DerivedStructuralBound,
+};
+
+[[nodiscard]] std::string_view analysis_budget_provenance_kind_name(
+    AnalysisBudgetProvenanceKind kind) noexcept;
+
+struct AnalysisBudgetProvenance
+{
+    AnalysisBudgetProvenanceKind kind = AnalysisBudgetProvenanceKind::LibraryDefault;
+    std::string detail = "library_default";
+};
+
+struct AnalysisBudgetProvenanceSet
+{
+    AnalysisBudgetProvenance max_functions;
+    AnalysisBudgetProvenance max_instructions;
+    AnalysisBudgetProvenance max_blocks;
+    AnalysisBudgetProvenance max_edges;
+    AnalysisBudgetProvenance max_seeds;
+    AnalysisBudgetProvenance max_bytes_analyzed;
+    AnalysisBudgetProvenance max_boundary_finalization_passes;
 };
 
 enum class ModuleBaseProvenance : std::uint8_t
@@ -206,6 +260,11 @@ struct FunctionRecord
     // Exact normalized half-open spans made from decoded instruction PCs.
     // range_begin/range_end are only the encompassing display/search envelope.
     std::vector<GuestAddressRange> owned_code_ranges;
+    // Strong callable-entry boundaries that were in this function's precise
+    // ownership when its CFG was finalized. A later immutable generation may
+    // reuse the record only while none of these boundary dependencies is
+    // invalidated by a newly certified entry.
+    std::vector<memory::GuestAddress> boundary_dependencies;
     FunctionDiscoverySource primary_source = FunctionDiscoverySource::Heuristic;
     FunctionConfidence confidence = FunctionConfidence::Low;
     std::optional<std::string> name;
@@ -231,7 +290,92 @@ struct AnalysisBudgets
     // Final boundary-aware re-analysis is bounded explicitly and consumes the
     // same aggregate instruction/block/edge/byte budgets as discovery.
     std::size_t max_boundary_finalization_passes = 8U;
+    AnalysisStrategy strategy = AnalysisStrategy::WholeModule;
+    AnalysisBudgetProvenanceSet provenance;
 };
+
+// The execution tool uses this generic, finite profile as its starting point.
+// Callers may override individual dimensions, but the resulting provenance is
+// retained in the effective AnalysisBudgets passed to the builder.
+[[nodiscard]] AnalysisBudgets make_execution_closure_analysis_budgets();
+void mark_analysis_budget_override(AnalysisBudgets& budgets,
+                                   AnalysisBudgetDimension dimension,
+                                   AnalysisBudgetProvenanceKind kind,
+                                   std::string detail);
+
+struct AnalysisBudgetExhaustion
+{
+    AnalysisBudgetDimension dimension = AnalysisBudgetDimension::None;
+    std::size_t consumed = 0U;
+    std::size_t limit = 0U;
+    std::string module;
+    std::string phase;
+    std::size_t pending_work = 0U;
+    std::optional<memory::GuestAddress> next_work;
+};
+
+struct AnalysisPhaseAccounting
+{
+    std::size_t initial_seeding = 0U;
+    std::size_t cfg_discovery = 0U;
+    std::size_t direct_call_expansion = 0U;
+    std::size_t ownership_normalization = 0U;
+    std::size_t conflict_processing = 0U;
+    std::size_t boundary_finalization = 0U;
+    std::size_t immutable_map_reconstruction = 0U;
+};
+
+struct AnalysisSeedSourceAccounting
+{
+    FunctionDiscoverySource source = FunctionDiscoverySource::Heuristic;
+    std::size_t observed = 0U;
+    std::size_t included = 0U;
+    std::size_t excluded = 0U;
+    std::size_t new_canonical_entries = 0U;
+    std::size_t coalesced = 0U;
+};
+
+// Deterministic forensic accounting for one immutable module map. It is part
+// of the map so a finalized map and the evidence that produced it cannot drift
+// apart.
+struct AnalysisAccounting
+{
+    std::string module;
+    AnalysisStrategy strategy = AnalysisStrategy::WholeModule;
+    AnalysisBudgets budgets;
+    std::size_t initial_seed_count = 0U;
+    std::size_t normalized_unique_seed_count = 0U;
+    std::size_t duplicate_coalesced_seed_count = 0U;
+    std::size_t excluded_candidate_seed_count = 0U;
+    std::vector<AnalysisSeedSourceAccounting> seed_sources;
+    std::size_t discovered_canonical_functions = 0U;
+    std::size_t candidate_function_entries = 0U;
+    std::size_t trusted_function_entries = 0U;
+    std::size_t functions_cfg_analyzed = 0U;
+    std::size_t newly_analyzed_functions = 0U;
+    std::size_t reanalyzed_functions = 0U;
+    std::size_t reused_functions = 0U;
+    std::size_t invalidated_records = 0U;
+    std::size_t canonical_functions_with_cfg = 0U;
+    std::size_t direct_call_discoveries = 0U;
+    std::size_t new_seeds_generated = 0U;
+    std::size_t blocks_consumed = 0U;
+    std::size_t instructions_consumed = 0U;
+    std::size_t edges_consumed = 0U;
+    memory::GuestSize bytes_analyzed = 0U;
+    std::size_t boundary_finalization_passes = 0U;
+    std::size_t refinement_transactions = 0U;
+    std::size_t failed_functions = 0U;
+    std::size_t function_boundary_conflicts = 0U;
+    std::size_t work_remaining_at_exhaustion = 0U;
+    std::optional<AnalysisBudgetExhaustion> exhaustion;
+    AnalysisPhaseAccounting phases;
+};
+
+// Stable, path-free JSON for deterministic reports and diagnostics.  The
+// serializer deliberately contains only analysis evidence and finite budget
+// provenance; host timings and process-local details do not enter it.
+[[nodiscard]] std::string render_analysis_accounting_json(const AnalysisAccounting& accounting);
 
 struct ModuleAnalysisInput
 {
@@ -240,11 +384,22 @@ struct ModuleAnalysisInput
     std::vector<FunctionSeed> seeds;
 };
 
+class FinalizedFunctionMap;
+
 struct FunctionMapOptions
 {
     AnalysisBudgets budgets;
     AnalysisOptions cfg;
+    // In ExecutionClosure mode only seeds matching one of these roots are
+    // initial analysis work. Direct-call targets discovered from those roots
+    // are still expanded transitively and are never treated as speculative.
+    std::set<memory::GuestAddress> execution_closure_roots;
     bool continue_after_function_failure = true;
+    // Optional immutable analysis reuse. The builder copies validated records
+    // from this map and invalidates any record whose boundary dependencies are
+    // touched by newly introduced strong entries before publishing a new map.
+    const FinalizedFunctionMap* reuse_map = nullptr;
+    std::set<memory::GuestAddress> newly_introduced_function_entries;
 };
 
 // Normalize four-byte instruction spans into deterministic, half-open code
@@ -281,6 +436,7 @@ class FinalizedFunctionMap
     {
         return conflicts_;
     }
+    [[nodiscard]] const AnalysisAccounting& accounting() const noexcept { return accounting_; }
     // Exact callable-entry lookup includes explicitly accepted secondary
     // entries, but never infers callability from an ownership range.
     [[nodiscard]] const FunctionRecord* find_exact_entry(memory::GuestAddress entry) const noexcept;
@@ -301,6 +457,7 @@ class FinalizedFunctionMap
     ModuleIdentity identity_;
     std::vector<FunctionRecord> functions_;
     std::vector<FunctionBoundaryConflict> conflicts_;
+    AnalysisAccounting accounting_;
     bool frozen_ = false;
 };
 

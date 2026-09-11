@@ -272,6 +272,11 @@ using json = nlohmann::json;
     {
         owned_ranges.push_back(range_json(range));
     }
+    json boundary_dependencies = json::array();
+    for (const auto entry : function.boundary_dependencies)
+    {
+        boundary_dependencies.push_back(hex_address(entry));
+    }
     const auto ownership_bytes = precise_owned_byte_count(function.owned_code_ranges);
     json function_transfers = json::array();
     json blocks = json::array();
@@ -325,6 +330,7 @@ using json = nlohmann::json;
                {"envelope", json{{"begin", hex_address(function.range_begin)},
                                    {"end", hex_address(function.range_end)}}},
                {"owned_ranges", std::move(owned_ranges)},
+               {"boundary_dependencies", std::move(boundary_dependencies)},
                {"ownership_bytes", ownership_bytes ? ownership_bytes.value() : 0U},
                {"source", function_discovery_source_name(function.primary_source)},
                {"confidence", function_confidence_name(function.confidence)},
@@ -366,7 +372,8 @@ using json = nlohmann::json;
                            {"functions", item.functions},
                            {"example_pcs", std::move(examples)}});
     }
-    return json{{"budgets", json{{"max_functions", coverage.budgets.max_functions},
+    return json{{"analysis", json::parse(render_analysis_accounting_json(coverage.analysis))},
+                {"budgets", json{{"max_functions", coverage.budgets.max_functions},
                                   {"max_instructions", coverage.budgets.max_instructions},
                                   {"max_blocks", coverage.budgets.max_blocks},
                                   {"max_edges", coverage.budgets.max_edges},
@@ -462,7 +469,8 @@ using json = nlohmann::json;
     result.applied_relocations = applied_relocations;
     result.unresolved_relocations = std::move(unresolved_relocations);
     result.functions.reserve(map.functions().size());
-    result.coverage.budgets = options.function_map.budgets;
+    result.coverage.analysis = map.accounting();
+    result.coverage.budgets = result.coverage.analysis.budgets;
     result.coverage.executable_bytes = 0U;
     for (const auto& range : map.identity().executable_ranges)
     {

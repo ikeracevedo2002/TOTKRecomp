@@ -216,6 +216,12 @@ Result<void> load_nso(const format::NsoImage& image, memory::GuestMemory& guest_
         return Result<void>::failure(make_error(
             ErrorCode::ResourceLimit, "NSO guest memory load exceeds host container limits"));
     }
+    catch (const std::logic_error& error)
+    {
+        return Result<void>::failure(make_error(
+            ErrorCode::InvalidArgument, "NSO guest memory staging is not available: " +
+                                            std::string(error.what())));
+    }
 
     for (const auto& mapping : mappings)
     {
