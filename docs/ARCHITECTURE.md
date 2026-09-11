@@ -1,9 +1,9 @@
 # TotkRecomp Architecture and Implementation Plan
 
-> Status: Proposed architecture with Milestone 0 bootstrap implemented  
-> Repository snapshot: 2026-09-05  
+> Status: Proposed architecture with Milestones 0–13 implemented
+> Repository snapshot: 2026-09-07
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
-> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, and the `nso-inspect` CLI skeleton are committed; no supported game build has been committed.
+> Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, MOD0/dynamic/RELA metadata discovery, dynamic symbol/relocation application, expanded AArch64 Semantic IR and lifting, deterministic whole-module function discovery/translation reporting, synthetic tests, and deterministic inspection/coverage reports are committed; no supported game build has been committed.
 
 This document is the primary engineering RFC for TotkRecomp. It describes the intended architecture, the evidence behind the design, the work required to validate it, and the boundaries of what is currently known.
 
@@ -13,7 +13,35 @@ It is deliberately conservative. A proposed component is not evidence that the c
 
 ### Existing
 
-The repository now contains the initial Milestone 0 bootstrap: a C++20 source tree, CMake build, common safety utilities, manifest validation, tests, and CI. There is still no runtime, recompiler, metadata for a supported game version, symbol database, renderer, or supported game build to preserve.
+The repository contains the Milestone 0 bootstrap, Milestone 1 strict NSO0
+header parser, Milestone 2A image materializer, Milestone 2B guest loader,
+Milestone 3 MOD0/dynamic metadata parser, Milestone 4 decoder/CFG, Milestone 5
+dynamic linking, Milestone 6 Semantic IR/lifting, Milestone 7 expanded
+AArch64 semantics and coverage, Milestone 8 FP/SIMD state and semantics, and
+the controlled Milestone 9 thread/TLS/atomic runtime subset and Milestone 10
+whole-module translation layer:
+a C++20 source tree, CMake build, common safety utilities, manifest validation,
+tests, CI, strict NSO0 inspection, safe NSO image
+materialization, integrity verification, a checked guest-memory loader, and a
+deterministic `nso-inspect` report, an LLVM-independent typed Semantic IR, a
+verifier, a reference interpreter, and an optional LLVM lowering/JIT backend for
+synthetic standalone functions, normalized scalar memory/control-flow semantics,
+and a local whole-range coverage scanner. Milestone 8 adds shared V-register
+state, FPCR/FPSR, reference FP/NEON operations, and checked vector memory.
+Milestone 9 adds joinable native guest threads, per-thread CPU/TLS state,
+checked shared memory, exclusive reservations, acquire/release ordering, and
+barriers through a stable runtime ABI. There is still no game-specific runtime,
+metadata for a supported game version, renderer, or supported game build to
+preserve. Milestone 10 adds bounded function discovery from module metadata and
+validated direct-call targets, precise non-contiguous function ownership, exact
+ownership conflicts, boundary-aware function transfers, a deterministic
+finalized function map, per-function CFG/lift/verify orchestration, explicit
+strict/diagnostic translation states, guest-address dispatch validation, and
+  versioned module coverage reports. Milestone 11 adds a reference interpreter
+  boundary API, resumable function frames, an explicit guest call stack, exact
+  guest call/return and function-transfer orchestration, bounded synthetic
+  launch state, and deterministic controlled-entry reports. This remains a
+  single-module controlled execution path rather than a process launch.
 
 ### Proposed
 
@@ -150,6 +178,106 @@ TotkRecomp should own:
 
 A game-specific patch must not be added to SwitchRecomp merely because it makes TOTK boot.
 
+### 4.3 Controlled entry execution and runtime imports (Milestones 11–12)
+
+The M11 execution path is intentionally smaller than a Switch process launch:
+
+```text
+Semantic IR function
+        ↓
+interpreter boundary
+        ↓
+ExecutionSession
+        ↓
+guest call / return / FunctionTransfer
+        ↓
+GuestFunctionRegistry / precise FunctionMap
+        ↓
+RuntimeImportRegistry / import boundary
+```
+
+The interpreter owns one resumable function frame. `ExecutionSession` owns the
+explicit guest call stack, global budgets, one generation-scoped synthetic
+stack mapping, exact-entry dispatch, tail-transfer return contracts, and
+deterministic events. `BL`/`BLR`
+are calls with X30=`PC+4`; `B`/`BR` function transfers preserve X30 and do not
+push a call frame. Unresolved imports remain boundaries and are never replaced
+with host stubs. Milestone 12 adds a session-local ordered runtime-import
+registry, the reusable AArch64 guest-call ABI adapter, relocation-backed import
+provenance, typed support/outcome states, and checked guest-memory access for
+handlers. `BL`/`BLR` imports resume their explicit guest continuation;
+`B`/`BR` imports inherit the existing guest return contract. Guest addresses
+are never cast to host function pointers. A recognized import can therefore
+remain an explicit unimplemented boundary when its contract is not established.
+
+Milestone 31 makes the function-transition resource semantic and auditable.
+The schema-17 `execution.transition_accounting` record classifies each
+successful function entry as an initial entry, direct call, indirect call,
+non-call function transfer, or other typed category. Resumable IR slices,
+mid-block resumes, and return restoration do not create fresh entries. The
+unchanged default `max_function_transitions=1,000` charges only successful
+cross-function `B`/`BR` transfers, which bounds non-returning transfer churn;
+ordinary `BL`/`BLR` activity remains bounded by call depth, guest blocks,
+refinement, and the other finite execution resources. The transition
+accounting history is separately capped at `max_guest_blocks + 1` entries and
+reports truncation if that derived diagnostic bound is reached. This model
+does not alter indirect-target certification, candidate ordering, or call and
+return contracts.
+
+Milestone 33 makes the immutable refinement transaction resource semantic. A
+transaction is charged only when a reusable prior module map is supplied to
+`FunctionMapBuilder::build`; the builder always executes at least one
+boundary-finalization pass for a successful new-entry refinement. Therefore
+ordinary accounting uses the checked invariant
+`cumulative_transactions <= cumulative_boundary_finalization_passes`. The
+transaction count remains in reports, while its fixed ordinary ceiling is
+absent. A positive finite explicit ceiling remains available for compatibility
+and debugging and is reported with its provenance; absence is represented as
+`null`/`not_configured`.
+
+Milestone 34 separates execution progress from event observability. The
+session maintains a checked `total_generated` logical event count and assigns
+sequences from that count; it never uses the retained vector length as a guest
+execution guard. Ordinary `max_events` is absent (`null`/`not_configured`). An
+explicit `--max-events N`, local configuration value, or library option remains
+a positive finite compatibility/debug execution guard with typed provenance.
+The diagnostic event vector uses a deterministic first-prefix plus recent
+window policy, bounded by `event_history_limit`; omitted events remain counted
+and per-kind totals are retained. Terminal execution state is structured in the
+report, and an event that would hit an explicit guard is represented as a
+terminal attempt rather than silently dropping the stop evidence. Sequence and
+counter overflow fails closed with `arithmetic_overflow`. Event generation is
+finite because each production emission is attached to session setup, a guest
+block boundary, a function entry/call/return/transfer, or a runtime-import
+boundary; the finite guest-block, call-depth, transition, memory, refinement,
+and explicit hard resources therefore dominate ordinary execution.
+
+This controlled entry execution consumes a single prepared main module and a
+metadata-selected `DT_INIT` candidate. It is not full process launch: no rtld,
+SDK, Horizon, service bring-up, multi-module image, or verified process-entry
+model is constructed.
+
+Milestone 13 adds the missing process-level layer without changing that
+boundary model. `ProcessImage` owns deterministic multi-module layout and
+module-specific metadata; `ProcessSymbolNamespace` discovers guest providers;
+the transactional relocation planner writes guest addresses only after all
+modules and candidates validate; and `ProcessFunctionMap`/`ExecutionSession`
+resolve exact function ownership across module boundaries. The precedence is
+now:
+
+```text
+consumer undefined symbol
+        ↓
+process guest-provider lookup
+        ├─ resolved → guest relocation → module-aware execution
+        └─ unresolved/ambiguous/incomplete → RuntimeImportRegistry boundary
+```
+
+Resolved guest bindings are linker accounting, not runtime-import accounting.
+Analysis-selected bases remain explicitly distinct from externally observed or
+runtime-verified bases. The local M13 executable set is incomplete, so the
+real `__nnmusl_init_dso` run remains at the existing M12 boundary.
+
 ## 5. Why static recompilation is viable, and why this target is difficult
 
 Static recompilation can be effective when a program's code can be analyzed ahead of time and its platform-dependent behavior can be supplied by a compatible runtime. Existing projects demonstrate several useful patterns:
@@ -256,42 +384,80 @@ NSO
 
 The exact target build may contain additional loader metadata or module-specific structures. **Needs verification.**
 
-### 7.2 Parser responsibilities
+### 7.2 Parser and image-materialization responsibilities
 
-The first parser must:
+The implemented NSO0 stages must:
 
 1. Read little-endian fields with checked bounds and overflow-safe arithmetic.
-2. Validate the magic, supported header version, file ranges, alignments, and non-overlap rules.
-3. Decode compression flags and decompress only into bounded buffers.
-4. Verify hashes when the header requests them.
-5. Record both file offsets and guest memory offsets.
-6. Preserve raw bytes for diagnostics without embedding them in the repository.
-7. Locate and parse MOD0-related metadata only when its location is validated.
-8. Expose unknown flags and fields instead of ignoring them.
-9. Produce a stable module report suitable for diffing in Git.
-10. Reject malformed or ambiguous inputs rather than guessing.
+2. Validate the magic, supported header version, file ranges, and non-overlap rules.
+3. Record both file offsets and guest memory offsets without treating guest values as host pointers.
+4. Decode compression and hash flags while preserving the metadata/header distinction.
+5. Materialize uncompressed sections by exact-size copy and compressed sections through bounded raw LZ4.
+6. Verify requested SHA-256 hashes over the materialized bytes and reject mismatches.
+7. Represent BSS as an owned, explicitly zero-filled buffer with its guest offset.
+8. Enforce configurable per-segment and total materialization limits before allocation.
+9. Expose ZBIC as an explicit unsupported-compression error; it is not a standard zstd stream.
+10. Produce a stable module report suitable for diffing in Git.
 
-A report should contain at least:
+The current report contains at least:
 
 ```
 module name
 NSO header version and flags
 module identifier/build id
 .text/.rodata/.data file and guest ranges
-compressed and decompressed sizes
+compressed and materialized sizes
 BSS range
 hash status
-MOD0 location and parsed fields
-dynamic table location and size
-string/symbol table ranges
-relocation ranges
-entry/init/fini candidates
-warnings and unknown fields
+compression and materialization status
+BSS size and zero-initialization status
 ```
 
-### 7.3 MOD0 and dynamic information
+MOD0, dynamic tables, string/symbol tables, relocations, and entry/init/fini
+candidates remain future work. The materializer intentionally returns an owned
+host-side `NsoImage`; `NsoGuestLoader` consumes that image in the next layer and
+does not make the parser or materializer aware of guest mappings.
 
-MOD0 is a module metadata structure used by the Switch loader ecosystem and is described in public Switch research as a replacement for a conventional `PT_DYNAMIC` program header. TotkRecomp should treat the MOD0 layout as a versioned parser schema, not as an unchecked collection of fixed offsets.
+The implementation records the format decisions against public references:
+[Switchbrew's NSO0 description](https://switchbrew.org/wiki/NSO0),
+[hactool's NSO0 implementation](https://github.com/SciresM/hactool/blob/master/nso.c),
+and [upstream LZ4 v1.9.4's block API](https://github.com/lz4/lz4/blob/v1.9.4/lib/lz4.h).
+
+### 7.2.1 Guest memory loader
+
+Milestone 2B adds a portable logical guest memory layer. `GuestMemory` stores
+sorted, non-overlapping half-open ranges in owned host-side byte vectors. A guest
+address is a `uint64_t` value in the guest address domain; it is never converted
+to a host pointer and no fixed host virtual address is reserved.
+
+`load_nso` accepts an explicit module base and maps the materialized image as:
+
+| Region | Guest base | Permissions | Backing |
+| --- | --- | --- | --- |
+| `.text` | module base + NSO text offset | `R-X` | materialized bytes |
+| `.rodata` | module base + NSO rodata offset | `R--` | materialized bytes |
+| `.data` | module base + NSO data offset | `RW-` | materialized bytes |
+| `.bss` | module base + data end | `RW-` | zero-filled bytes |
+
+All base-plus-offset and range calculations use checked 64-bit arithmetic.
+Zero-sized segments are explicit no-ops. Reads and writes must be fully
+contained in one mapping; adjacent mappings are valid but a single operation
+does not cross their boundary. Writes enforce permissions, while executable
+state and mapping metadata are queryable. The loader stages all four mappings
+before committing them, so overlap, limit, and allocation failures leave an
+existing `GuestMemory` unchanged.
+
+The current implementation is intentionally not a page table, MMU, native
+address mirror, or CPU memory subsystem. M30 adds exact opaque ownership tokens
+for dynamic whole-region mappings; controlled stacks use those tokens and
+retain only a checked virtual high-water cursor after release. Static loader
+mappings remain permanent process-image state. Milestone 5 adds an explicit
+loader-time privileged write path for relocation application while preserving
+normal guest write permission checks.
+
+### 7.3 MOD0 and dynamic information — Milestone 3
+
+MOD0 is a module metadata structure used by the Switch loader ecosystem and is described in public Switch research as a replacement for a conventional `PT_DYNAMIC` program header. The implementation treats the MOD0 layout as a versioned parser schema, not as an unchecked collection of fixed offsets.
 
 The loader should resolve the chain in this order:
 
@@ -303,9 +469,96 @@ NSO header
   → strings, symbols, relocations, init/fini/TLS metadata
 ```
 
-The actual MOD0 fields, pointer bases, dynamic tags, and loader conventions for the selected TOTK build are **Needs verification**. A module report must state exactly which fields were parsed and which were ignored.
+Milestone 3 implements the normal loaded-image chain. It reads the 8-byte
+module-start slot at the loaded text base, derives the MOD0 address from its
+`magic_offset`, validates the `MOD0` signature, and resolves the base MOD0
+fields relative to the MOD0 header with checked signed arithmetic. The base
+header records dynamic, BSS, exception-info, and runtime module-object
+addresses. Later system-version extension ranges are opt-in because the public
+layout uses the same post-header space for version-dependent data.
 
-### 7.4 Multiple modules
+Dynamic entries are read explicitly as little-endian ELF64 records. The parser
+requires `DT_NULL` within a configurable limit, preserves every raw entry,
+allows repeated `DT_NEEDED`, rejects duplicate singleton tags, and retains
+unknown tags for forward-compatible inspection. Switch NSO dynamic pointer
+values remain module-relative until resolved into `GuestAddress` values.
+`DT_STRTAB`, `DT_SYMTAB`, RELA, REL, and JMPREL metadata are range-checked
+against `GuestMemory`; `Elf64_Rela` records preserve signed addends and expose
+the ELF64 symbol/type split. No parser in this milestone writes guest memory.
+
+The actual MOD0 fields, pointer bases, dynamic tags, and loader conventions for
+the selected TOTK build remain **Needs verification** where the exact target
+build could differ. A module report states which optional metadata is present.
+
+### 7.4 Dynamic symbols and relocations — Milestone 5
+
+The dynamic linking layer owns `DT_STRTAB`/`DT_STRSZ`, ELF64 `dynsym`, and RELA
+metadata independently from the NSO parser. Symbol-table size is derived only
+from validated `DT_HASH` or `DT_GNU_HASH` metadata and bounded by configured
+limits. Symbol values remain module-relative until a resolver adds the guest
+module base. Undefined imports are explicit and can be satisfied by a generic
+external registry.
+
+Relocation handling has two typed stages. `plan_relocations()` validates and
+classifies the complete table into resolved writes, unresolved external
+bindings, or hard errors; `apply_relocation_plan()` commits only the resolved
+writes after planning succeeds. Valid undefined global/weak symbols used by
+supported symbol-backed relocation types remain diagnostic boundaries with
+their symbol and relocation metadata. They never produce a zero, synthetic
+guest address, or host pointer. The strict `apply_relocations()` facade still
+rejects unresolved bindings, while whole-module diagnostic loading carries them
+into the report. RELA and JMPREL source identity is retained for deterministic
+reporting.
+
+Finalized function-map conflicts use the same freeze point as the canonical
+function records. A function owns only the decoded instruction spans in its
+CFG. Each instruction contributes the checked half-open interval `[pc, pc +
+4)`. Sorted duplicate spans are removed, and only overlapping or exactly
+adjacent spans are merged. Disconnected CFG regions remain separate ownership
+ranges. The legacy `[range_begin, range_end)` value is only a convex
+display/conservative-search envelope; it is never ownership authority.
+
+After boundary-aware ownership finalization, exact interval intersections are
+computed with a deterministic sweep in canonical-entry order. Adjacent ranges
+(`end == begin`) are not overlaps. Each normalized function pair produces one
+conflict record containing every normalized overlap island. Conflict pairs are
+validated against the precise ranges in both directions, so discovery order
+cannot change conflict identity or ordering. Conflicting records retain their
+discovery evidence while receiving explicit conflict confidence/status.
+
+The semantic relocation pipeline supports the AArch64 ABI types `NONE`,
+`ABS64`, `GLOB_DAT`, `JUMP_SLOT`, and `RELATIVE`. It uses checked `S + A` / `B + A`
+arithmetic, writes little-endian guest values through
+`GuestMemory::loader_write`, and stages all writes so a failed relocation does
+not partially modify the image. REL, lazy binding, symbol versioning,
+multi-module link order, and Horizon resolution remain future layers. See
+[`RELOCATIONS.md`](RELOCATIONS.md).
+
+### 7.5 Semantic IR and expanded AArch64 lifting — Milestones 6–8
+
+Milestones 6, 7, and 8 provide the executable recompilation path without making
+LLVM the architectural contract:
+
+```
+AArch64 → decoder/CFG → SwitchRecomp Semantic IR
+                              ├── verifier/interpreter
+                              └── LLVM lowering → native JIT
+```
+
+The IR is typed, deterministic, source-mapped, explicitly terminated, and
+independent of LLVM at its public interface. `runtime::CpuState` models X0–X30,
+SP, PC, NZCV, FPCR, FPSR, and the shared V0–V31 register file with correct W/X,
+S/D/Q, and XZR/WZR semantics. Guest loads/stores go through checked
+`GuestMemory` helpers and never reinterpret a guest address as a host pointer.
+The lifter supports documented integer, NZCV, bitfield, conditional-select,
+scalar-memory, pair-memory, PC-relative, FP, NEON, and internal-branch forms.
+It rejects unsupported operand forms, divide instructions, fused FP multiply-
+add, atomics, and system instructions explicitly. The interpreter and
+optional LLVM backend execute synthetic standalone functions through the same
+ABI, and `aarch64-analyze` provides deterministic whole-range coverage reports;
+this does not execute TOTK.
+
+### 7.6 Multiple modules
 
 The architecture supports a module graph such as:
 
@@ -426,6 +679,12 @@ Host ASLR must be treated as normal behavior. A fixed reservation can fail becau
 
 Start with a page-aware memory manager and a clear translation API. Add a fixed-offset or rebased fast path only after tests prove that guest addresses, protections, and diagnostics remain correct.
 
+Milestone 2B implements the first portable slice of that plan as a logical
+sorted vector of host-backed regions. It validates half-open ranges, owns every
+backing buffer, enforces R/W/X permissions, and deliberately does not expose a
+guest-to-host pointer translation API. Page tables, page protections, sparse
+backing, and native fast paths remain future runtime work.
+
 The memory manager should support:
 
 - Segment mapping from NSO metadata.
@@ -481,7 +740,7 @@ struct CpuState {
     uint32_t nzcv;
     uint32_t fpcr;
     uint32_t fpsr;
-    Vector128 v[32];
+    Vector128 vreg[32];
 };
 ```
 
@@ -607,7 +866,60 @@ For each seed:
 
 A function may have multiple valid entry points or local labels. The metadata model must represent entry blocks separately from the canonical function name.
 
-### 12.2 Hybrid analyst workflow
+The analyzer receives a deterministic set of strong known function entries.
+Confirmed/high-confidence explicit symbol, export, relocation, analyst,
+manual, module-entry, and validated direct-`BL` evidence can define a boundary;
+weak heuristic-only evidence and a main `.text` start candidate cannot. An
+unconditional `B` to another strong known entry ends the caller CFG with an
+external `function_transfer` edge. It does not set the link register and is not
+represented as a call. A `B` to an ordinary local label and a self-branch remain
+internal control flow. Conditional branch fallthrough/taken behavior remains
+explicit and is not reclassified automatically. Register-indirect `BR` targets
+remain unresolved unless independent reviewed evidence resolves them. A runtime
+observation is retained as typed evidence, not as a function record. The
+analysis layer may perform a bounded immutable refinement when the target is
+mapped executable code with a unique module owner, a non-conflicting bounded
+CFG, and a configured evidence policy that permits promotion. The refinement
+returns a new frozen map; it never mutates a finalized map in place. Existing
+exact and secondary entries are reported as such, precise owned-range overlaps
+are rejected, and convex display envelopes are not treated as ownership.
+
+Function discovery first reaches a bounded direct-call fixed point. It then
+freezes the strong-entry set and performs bounded boundary-aware re-analysis;
+the aggregate analysis budgets cover both phases. If finalization reveals a new
+strong direct-call entry, another bounded pass is allowed, and failure to reach
+stability is reported rather than converging without a limit.
+
+Execution tools may select the generic `execution_closure` strategy. This
+strategy retains process-wide symbol/provider indexing, but initially analyzes
+only the verified selected entry, trusted provider entries, and seeds explicitly
+required by the selected focus. Direct guest calls expand that set
+transitively; runtime indirect targets enter it only through the existing
+certification and immutable-map refinement path. Whole-module analysis remains
+available for translation and forensic use. Both strategies carry one effective
+finite budget record with library/tool/CLI/local/derived provenance, and the
+builder emits deterministic seed-source, phase, consumption, and exhaustion
+accounting. Structural ceilings derive from executable AArch64 instruction
+capacity and the finite boundary-finalization pass count; they bound work but
+do not turn the entire executable range into function work. Provider lookup is
+still process-wide and completeness-gated, so closure pruning cannot authorize
+an incomplete provider fallback. Rebuilding a closure after a promotion may
+add the target module, but every externally visible function map remains a new
+frozen immutable map.
+
+### 12.2 Startup entry provenance
+
+The beginning of `main.text` is not a verified process entry merely because it
+is the first executable segment. Standard retail Switch startup is `rtld`-led:
+the `rtld` `.text` entry is the first program-owned executable code and its
+launch model establishes module state, relocations, symbols, runtime/SDK state,
+module initialization, and eventual `main()` invocation. Single-main analysis
+therefore reports no verified process entry unless an external launch model
+supplies one. `DT_INIT` and `DT_FINI` are module initialization/finalization
+candidates, not process-entry evidence. Multi-module `rtld` startup remains
+deferred to execution architecture work.
+
+### 12.3 Hybrid analyst workflow
 
 Automatic analysis is required for scale, but a hybrid workflow is more realistic:
 
@@ -636,7 +948,7 @@ Example shape:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "game": "totk",
   "build": {
     "version": "TBD",
@@ -656,9 +968,12 @@ Example shape:
 The schema must support at least:
 
 - Module name, build ID, hash, guest ranges, and protections.
-- Function guest start/end and additional entries.
+- Function convex envelope, precise owned ranges, and additional entries.
 - Name, source, confidence, and analysis notes.
 - Basic blocks and control-flow edges.
+- External function-transfer edges distinct from direct `BL` calls.
+- Exact normalized conflict-overlap ranges.
+- Entry candidates with kind, provenance, confidence, and runtime-verification status.
 - Direct call targets and unresolved indirect-call sites.
 - Jump tables and default targets.
 - Symbols, aliases, vtables, RTTI observations, and globals.
@@ -1388,7 +1703,8 @@ Examples:
 
 ## 29. Build and generated-artifact strategy
 
-The repository is empty, so no current build-system claim can be made.
+The current repository uses CMake with pinned FetchContent dependencies for the
+core toolchain. LLVM is an optional host-provided backend dependency.
 
 ### Proposal
 
@@ -1396,22 +1712,31 @@ The repository is empty, so no current build-system claim can be made.
 - Ninja for reproducible local/CI builds.
 - Clang as the primary compiler for the first implementation.
 - C++20 for core/runtime code unless a specific dependency forces another standard.
-- LLVM pinned to a tested release and found through a reproducible mechanism.
+- LLVM 18.1.3 is the tested backend release (Ubuntu Noble package
+  `1:18.1.3-1ubuntu1`) and is found through its pinned CMake package directory;
+  it is not built through FetchContent.
 - Optional SDL, Vulkan headers/loader, and analysis tools kept behind clear feature flags.
 - CI initially validates formatting, unit tests, analyzer fixtures, strict translation tests, and at least one host build.
 
-The minimum versions must be selected during Milestone 0 and written into the build files. This RFC intentionally does not claim that any of these dependencies are already configured.
+The minimum versions are recorded in `docs/DEPENDENCIES.md` and enforced by
+the current CMake configuration where the dependency is host-provided.
 
 Proposed targets:
 
 ```
-switchrecomp-core
-switchrecomp-analyze
-switchrecomp-lift
-switchrecomp-build
+switchrecomp-common
+switchrecomp-format
+switchrecomp-memory
+switchrecomp-aarch64
+switchrecomp-analysis
+switchrecomp-ir
+switchrecomp-lifter
+switchrecomp-runtime-core
+switchrecomp-interpreter
+switchrecomp-codegen-llvm (optional)
 nso-inspect
-totkrecomp-runtime
-totkrecomp
+aarch64-analyze
+aarch64-lift
 ```
 
 The names are proposed. Repository naming should be settled once the first build exists.
@@ -1525,7 +1850,7 @@ Rules:
 | [RecompOne](https://github.com/BlackLabelHQ/RecompOne) | PS1 MIPS | C# | Recompiler and runtime are separate .NET projects | A runtime can replace console services without vendor components |
 | [SymphonyRecomp](https://github.com/BlackLabelHQ/SymphonyRecomp) | PS1 MIPS | RecompOne-based | Project-specific wrapper/config/patch workflow | Recompilation, decompilation, and patching are distinct activities |
 | [skate3recomp](https://github.com/mchughalex/skate3recomp) | Xbox 360 PowerPC | Recompiled code plus extensive native code | Build manifests, title-update metadata, native D3D12/Vulkan rendering | Native renderer work can dominate game-specific engineering |
-| TotkRecomp | AArch64 | Semantic IR lowered to LLVM (proposed) | SwitchRecomp plus on-demand Horizon/runtime services (proposed) | Prefer a verified high-level boundary, Vulkan first |
+| TotkRecomp | AArch64 | Expanded Semantic IR lowered to optional LLVM backend (Milestone 7) | SwitchRecomp plus on-demand Horizon/runtime services (future) | Prefer a verified high-level boundary, Vulkan first |
 
 This table records architectural patterns observed in public repository documentation and layouts. It does not claim that their internal implementations are portable to AArch64 or legally reusable.
 
@@ -1566,11 +1891,17 @@ The milestones below are gates. Do not skip a gate because the next one appears 
 
 **Success:** A clean build and deterministic test command on at least one supported development platform.
 
-### Milestone 1 — NSO inspection
+### Milestone 1 — Strict NSO0 header inspection
 
-**Goal:** Implement `nso-inspect` for a legally supplied NSO.
+**Goal:** Implement a bounds-safe parser for the fixed `0x100`-byte NSO0
+header and expose it through `nso-inspect` for a legally supplied NSO.
 
-**Output:** Header, segments, offsets, virtual ranges, compression/hash status, BSS, MOD0/module metadata, dynamic data, symbols, and relocations.
+**Implemented:** Header fields, three segment descriptors, offsets, virtual
+ranges, compression/hash status, build/module ID, BSS, file and memory overlap
+checks, and contained RoData-relative embedded/DynStr/DynSym ranges.
+
+**Still not implemented at this layer:** ZBIC decoding. MOD0 discovery,
+dynamic symbols, and relocations are implemented by later milestones.
 
 **Success:**
 
@@ -1578,117 +1909,373 @@ The milestones below are gates. Do not skip a gate because the next one appears 
 nso-inspect <user-provided-main>
 ```
 
-produces a trustworthy, diffable report and rejects malformed input.
+produces a trustworthy, diffable report and rejects malformed input without
+attempting decompression or execution.
 
-### Milestone 2 — Guest memory loader
+### Milestone 2A — NSO image materialization and integrity
 
-**Goal:** Implement guest ranges, segment mapping, protections, BSS, module registration, and the first relocation cases.
+**Implemented:** Materialize `.text`, `.rodata`, and `.data` with exact-size
+copy/decompression checks, verify requested SHA-256 hashes over materialized
+bytes, and expose explicit zero-filled BSS under configurable allocation limits.
+ZBIC is intentionally unsupported.
 
-**Success:** A synthetic module and a target module fixture produce the expected relocated guest memory state.
+### Milestone 2B — Guest memory loader
 
-### Milestone 3 — AArch64 decoding
+**Implemented:** Consume `NsoImage` using an explicit module base and create
+checked, owned, non-overlapping guest mappings for `.text`, `.rodata`, `.data`,
+and zero-filled BSS with R/W/X permission checks.
 
-**Goal:** Decode instructions and traverse control flow.
+**Success:** Synthetic NSO bytes pass through parsing, materialization, guest
+loading, MOD0/dynamic discovery, and checked address-based reads/writes. The
+metadata parser does not apply relocations.
 
-**Success:** Known synthetic AArch64 test binaries analyze without silent unknown control flow; unsupported instructions are reported.
+### Milestone 3 — MOD0 and dynamic metadata discovery
 
-### Milestone 4 — Minimal lifting
+**Implemented:** Locate and report validated MOD0 and dynamic metadata from the
+guest image without applying relocations. Synthetic fixtures cover malformed
+headers, signed offsets, bounded dynamic termination, unknown/duplicate tags,
+range validation, RELA decoding, and transactionality.
+
+### Milestone 4 — AArch64 decoding and control-flow analysis
+
+**Implemented:** Decode executable guest bytes through the pinned Capstone
+backend behind a SwitchRecomp-owned AArch64 representation. The layer preserves
+guest addresses, opcodes, normalized operands/register identities, conditions,
+memory operands, PC-relative values, disassembly, and explicit decoder status.
+The CFG analyzer performs bounded intraprocedural traversal with deterministic
+basic blocks, typed edges, direct call candidates, unresolved indirect flow,
+checked target arithmetic, executable-memory validation, range limits, and
+block splitting.
+
+**Success:** Synthetic AArch64 fixtures cover representative scalar, memory,
+FP/SIMD, atomic, system, branch, trap, malformed, and CFG cases without
+silently treating unknown control flow as fallthrough. Semantic lifting and
+execution remain separate milestones; relocation application is implemented in
+Milestone 5.
+
+### Milestone 5 — Dynamic symbols and relocations
+
+**Implemented:** Bounded dynamic strings/symbols, imports and defined symbols,
+generic symbol resolution, and transactional AArch64 `NONE`, `ABS64`,
+`RELATIVE`, `GLOB_DAT`, and `JUMP_SLOT` relocation application.
+
+**Success:** Loaded synthetic modules can resolve supported symbols and apply
+checked relocations without partially modifying guest memory.
+
+### Milestone 6 — Semantic IR and minimal AArch64 lifting
 
 **Goal:** Lift simple standalone functions such as add/return, loads/stores, and branches.
 
 **Success:** Native results match the AArch64 reference harness.
 
-### Milestone 5 — Differential instruction suite
+**Implemented:** An LLVM-independent typed Semantic IR, deterministic printer,
+structured verifier, explicit CPU state, initial scalar AArch64 lifter,
+reference interpreter, checked guest-memory runtime boundary, and optional LLVM
+lowering/JIT execution for synthetic standalone functions.
 
-**Goal:** Validate integer, memory, flag, branch, and address-formation families.
+### Milestone 7 — Expanded AArch64 semantics and coverage
 
-**Success:** The tested subset passes state, memory, and exception comparisons across generated cases.
+**Goal:** Expand integer, memory, flag, branch, address-formation, and
+conditional-select families, then measure normalized opcode coverage over a
+locally supplied executable range.
 
-### Milestone 6 — Function calls
+**Success:** The tested subset passes deterministic state and memory fixtures;
+the interpreter and optional LLVM backend lower the same typed IR; coverage
+reports are deterministic and never include private input paths or game data.
 
-**Goal:** Support `BL`, `RET`, stack frames, direct calls, and the internal generated ABI.
+### Milestone 8 — AArch64 FP/SIMD — implemented
 
-**Success:** Multi-function AArch64 programs execute correctly after recompilation.
+**Implemented:** A shared V0–V31 `Vector128` register file, FPCR/FPSR state,
+project-owned scalar FP and NEON IR, checked S/D/Q vector memory, reference
+interpreter semantics, and LLVM runtime-helper lowering. The support boundary is
+documented in `docs/MILESTONE_8.md`.
 
-### Milestone 7 — Indirect calls
+**Success:** Synthetic scalar and vector fixtures agree across the interpreter
+and optional LLVM backend, including raw IEEE edge cases and checked memory.
 
-**Goal:** Support `BLR`, guest function maps, vtables, callbacks, and function-pointer identity.
+### Milestone 9 — Threads and atomics — implemented
 
-**Success:** Indirect guest targets reach the correct native function with correct state.
+**Implemented:** Joinable native guest threads with stable project-owned IDs,
+per-thread `CpuState`/TLS and exclusive monitors, checked synchronized shared
+memory, acquire/release order, deterministic 64-byte exclusive reservations,
+barriers, runtime ABI helpers, normalized M9 Semantic IR, reference interpreter
+execution, and optional LLVM 18 helper lowering. Pair-exclusive/LSE forms,
+WFE/WFI and Horizon services remain explicit future boundaries; function-map
+dispatch is implemented in Milestone 10.
 
-### Milestone 8 — FP/SIMD
-
-**Goal:** Add scalar FP, NEON, vector loads/stores, FP status, and required rounding behavior.
-
-**Success:** Representative vector/FP differential tests pass.
-
-### Milestone 9 — Threads and atomics
-
-**Goal:** Add native thread mapping, TLS, synchronization, barriers, exclusive operations, and required memory order.
-
-**Success:** Controlled multi-threaded workloads pass deterministic tests.
+**Success:** Controlled multi-threaded workloads pass deterministic tests with
+structured failures for unsupported synchronization patterns.
 
 ### Milestone 10 — Whole-main translation
 
-**Goal:** Analyze and translate the targeted `main` module. Unresolved imports may remain.
+**Implemented:** A prepared NSO can be loaded through the existing parser,
+materializer, guest-memory loader, MOD0/dynamic metadata, symbol, import, and
+relocation layers. A bounded fixed-point analyzer builds a deterministic
+function map from module metadata, symbol, relocation, analyst, and direct-call
+evidence. Each discovered function owns precise normalized instruction ranges;
+the analyzer finalizes those ranges with strong-entry-aware CFG transfers and
+reports exact ownership conflicts. Functions are then lifted through the
+existing Semantic IR, verified, and optionally lowered with the LLVM 18 backend.
+The `translate-module` CLI emits human-readable or schema-versioned JSON
+reports, including module identity, entry provenance, per-function ownership
+and status, unsupported records, call/transfer edges, imports, runtime
+boundaries, and coverage by semantic family.
 
-**Success:** The whole target module can be statically analyzed, generated, and linked with a complete unresolved-dependency report. It does not need to boot.
+The frozen guest-address dispatcher validates alignment, executable ownership,
+registered function entries, and ambiguity before allowing concurrent read-only
+lookups or an ABI-compatible call. Unknown targets and unresolved imports are
+structured failures; they are never converted to host pointers or fake success.
 
-### Milestone 11 — Enter game initialization
+**Success:** The synthetic whole-module corpus passes end-to-end from NSO
+parsing through deterministic reporting, and all discovered functions that are
+reported as translated have passed Semantic IR verification.
 
-**Goal:** Execute the recompiled entry path.
+**Deferred:** Real TOTK `main` analysis is a local workflow only and its reports
+are never committed. The main `.text` start is not a verified process entry.
+Full native startup is rtld-led and requires the ExeFS module order and `rtld`
+launch model; M13 now models supplied modules and guest linking without
+claiming the retail startup order. Game boot, Horizon/runtime bring-up, filesystem,
+graphics, audio, input, renderer, full exception behavior, complete AArch64
+coverage, pair-exclusive/LSE atomics, WFE/WFI, and final executable linking
+remain future work. M10.2 prepares trustworthy ownership data for controlled
+M11 initialization-path work; M13 adds the process-level layer but does not
+execute the game entry path beyond the first evidence-backed boundary.
 
-**Success:** Execution reaches initialization and stops at a known unsupported dependency, with a useful diagnostic.
+**Roadmap numbering correction:** The future roadmap previously contained a numbering gap after Milestone 10. The affected future milestones have been renumbered to restore the intended continuous sequence from Milestone 11 through Milestone 21. M13 is now the multi-module process/linking milestone; no filesystem or renderer scope was removed.
+
+### Milestone 11 — Controlled entry-path execution
+
+**Goal:** Execute a metadata-selected main-module initialization candidate
+through supported Semantic IR guest function calls and transfers.
+
+**Success:** The bounded session resumes callers correctly and stops at the
+first genuine import, indirect-flow, runtime, memory, or semantic boundary
+with a deterministic auditable report. This is not game boot or full process
+startup.
 
 ### Milestone 12 — Runtime bring-up
 
-**Goal:** Add required memory, timing, threading, filesystem, handle, and service behavior incrementally.
+**Implemented:** Establish the evidence-driven runtime import boundary, the
+reusable AArch64 ABI adapter, relocation/provenance-backed registry, typed
+runtime outcomes, checked guest-memory handler context, and transactional
+generic DSO/TLS descriptor validation. The first real dependency,
+`__nnmusl_init_dso`, is recognized from the measured `JMPREL`/`JUMP_SLOT`
+provenance and import trampoline but remains deliberately unimplemented because
+its formal ABI, return contract, side effects, and provider identity are not
+established.
 
-**Success:** Initialization progresses consistently between runs.
+**Success:** Additional execution is only admitted through an auditable,
+deterministic, ABI-aware boundary. The real M11 frontier remains the real M12
+frontier until evidence justifies a faithful implementation. DSO/TLS
+registration, when used by a future handler, is validate-then-commit.
 
-### Milestone 13 — Filesystem and asset loading
+**Deferred:** Nintendo loader semantics, provider/module selection, full TLS,
+multi-module startup, Horizon/services, and speculative compatibility returns.
+
+### Milestone 13 — Multi-module guest linking and provider resolution
+
+**Implemented:** `analysis::ProcessImage` loads arbitrary prepared NSO modules
+into one checked, deterministic guest address space with explicit base
+provenance, per-module metadata/symbol/relocation provenance, and transactional
+process-wide relocation planning. `ProcessSymbolNamespace` discovers eligible
+guest providers without treating filenames as proof; unique providers resolve,
+ambiguous providers remain ambiguous, and incomplete searches remain explicit.
+`ProcessFunctionMap` and `ExecutionSession` preserve module ownership across
+guest calls and tail transfers. Schema-3 execution reports retain consumer →
+relocation → provider records separately from runtime/HLE accounting.
+
+**Real result:** The local executable set contains only `main`, so the search
+for `__nnmusl_init_dso` is incomplete and finds no provider candidate. The
+single-module run remains at M12's `runtime_import_unimplemented` boundary;
+no guessed host handler was added. See [MILESTONE_13.md](MILESTONE_13.md) for
+the inventory, public evidence, synthetic coverage, and exact blocker.
+
+### Milestone 14 — Complete executable-set ingestion and provider closure
+
+**Implemented:** `analysis::ModuleSetInventory` provides bounded explicit-file
+and non-recursive prepared-directory ingestion, NSO identity/materialization
+validation, duplicate/collision rejection, target-coherence evidence, and
+typed completeness provenance. `process-inspect` reports schema-4 module-set
+inventory and process-wide dynamic-symbol evidence without execution. The
+existing `ProcessImage`, audited `ProcessSymbolNamespace`, transactional
+relocation planner, provider-base address calculation, dynamic-symbol function
+seeding, and process-aware execution remain the sole process pipeline.
+
+Directory discovery is not a completeness attestation. Manifest-verified
+completeness requires exact logical names, SHA-256 values, and Build IDs.
+The M14 directory-only real-input state was incomplete; M15 keeps that state
+typed while allowing an explicit local assertion to drive a controlled
+experiment. See [MILESTONE_14.md](MILESTONE_14.md).
+
+### Milestone 15 — Real executable-set closure and `__nnmusl_init_dso`
+
+**Implemented:** M15 retains every parsed focus-symbol occurrence, refuses to
+select a provider from an incomplete search, records public ExeFS load-order
+evidence without using filenames as lookup precedence, and records checked
+provider-base arithmetic plus relocation-slot readback. Runtime fallback is
+eligible only for an explicit complete no-provider result. The supplied local
+four-module set identifies `sdk` dynamic symbol 8767 as the eligible guest
+provider, and both observed JUMP_SLOTs resolve to its guest address. The
+controlled `DT_INIT` experiment reaches the resolved guest target but stops at
+an unsupported `umulh` in the provider's owning function; no host replacement
+is added. Exact-build manifest verification and faithful rtld/process bootstrap
+remain open.
+
+See [MILESTONE_15.md](MILESTONE_15.md) for the inventory, public-source
+evidence, report hashes, execution frontier, and exact next blocker.
+
+### Milestone 16 — Provider execution frontier
+
+M16 adds project-owned scalar A64 `UMULH` decoding, lifting, verification,
+portable interpreter semantics, and LLVM lowering. Synthetic process fixtures
+cover guest-provider relocation, indirect transfer, provider entry, UMULH
+execution, return continuation, and the no-runtime-fallback invariant. The
+real four-module M15 executable set remains an external local input; M16 does
+not invent bootstrap state or relabel the metadata-selected `main` `DT_INIT`
+candidate as a verified process entry. See [MILESTONE_16.md](MILESTONE_16.md)
+for the real-input availability and execution-frontier status.
+
+### Milestone 18 — Evidence-backed indirect guest target discovery
+
+**Implemented:** Execution sessions now retain source PC, control-flow kind,
+target register, guest-load provenance, target module, and observation count
+for runtime indirect targets. `analysis::assess_indirect_target` validates
+alignment, checked guest mapping and permissions, unique process ownership,
+precise function ownership, bounded CFG structure, overlap, static symbol and
+relocation evidence, and explicit resource limits. A separate immutable
+refinement operation rebuilds a new frozen `FinalizedFunctionMap` or
+`ProcessFunctionMap` and records `ObservedIndirectTarget` evidence only after
+validation. The execution-frontier driver retries deterministically with hard
+pass and candidate limits, while preserving BR, BLR, and RET semantics.
+
+The controlled M18 run promotes a real `sdk` target because it is independently
+identified by a defined dynamic `STT_FUNC` symbol and a `R_AARCH64_JUMP_SLOT`
+relocation-backed guest pointer slot, and its bounded CFG has no precise
+ownership conflict. The observation triggers refinement; the static ELF/NSO
+evidence is what raises confidence to confirmed. See
+[MILESTONE_18.md](MILESTONE_18.md) for the private-input evidence ledger and
+the exact next execution boundary.
+
+The outer refinement driver uses a deterministic pending worklist rather than
+rescanning all historical observations as new discoveries. Its typed finite
+limits separately bound stagnant retries, target candidates, candidate
+assessments, successful promotions, and immutable map rebuilds. A work item includes the
+target module/address and source/control-flow/pointer provenance; repeated
+unchanged observations are coalesced while their guest-side provenance and
+observation count remain auditable. A promotion changes the immutable map and
+advances a generation; only a later observation whose certification result can
+have changed is reconsidered. Exhaustion is reported with the exact dimension,
+consumed value, limit, and pending work, and never authorizes uncertified guest
+execution. See [MILESTONE_23.md](MILESTONE_23.md).
+
+### Milestone 26 — Progress-aware indirect refinement closure
+
+The indirect-refinement driver distinguishes total execution attempts from
+monotonic work. `total_execution_attempts` is accounting only. A productive
+round records a newly admitted candidate, a terminal candidate resolution, a
+generation-dependent reconsideration, or a successful promotion. A round that
+does none of these transitions increments the consecutive `stagnant_rounds`
+counter and is bounded by `max_stagnant_rounds`; productive work does not
+consume that retry allowance. The report schema is 12 because the former
+`max_rounds` field represented a total-attempt ceiling and would be misleading
+under this model. The CLI retains `--refinement-max-rounds` only as an
+explicitly deprecated alias for the stagnation budget.
+
+The finite-state argument is explicit: newly admitted target identities,
+candidate assessments, successful promotions, immutable map generations, and
+terminal resolutions are each bounded by their configured finite dimensions.
+Equivalent observations coalesce by stable guest-side identity and cannot
+create new work. A pending candidate is either promoted, becomes trusted, or
+becomes terminally rejected; only an attempt that makes none of those
+transitions consumes the finite stagnation allowance. Therefore a refinement
+driver cannot retry forever, while a sequence of independently certified
+promotions is not mistaken for stagnation.
+
+Process refinement remains transactional and immutable. The target module is
+rebuilt and fully revalidated from its deterministic seeds; unchanged frozen
+module maps are carried into the new process-map generation without another
+CFG/function reconstruction. Process-wide static function-target and
+relocation-slot indexes are built once when the process image is loaded. They
+preserve module/index provenance and relocation readback checks while avoiding
+repeated full metadata scans for duplicate runtime observations. The former
+M25 target was consequently assessed, certified, promoted, and entered through
+normal guest dispatch. See [MILESTONE_26.md](MILESTONE_26.md).
+
+### Milestone 27 — Proof-preserving aggregate refinement scaling
+
+M27 replaces the ordinary productive-event charge from successful promotions
+and target-module map rebuilds with a finite aggregate ledger of actual
+immutable refinement work. The ledger reuses M24 accounting dimensions where
+they have the same meaning: newly CFG-analyzed functions, reanalyzed
+functions, instructions, blocks, edges, analyzed bytes,
+boundary-finalization passes, invalidated records, and immutable refinement
+transactions. Each dimension has a finite default, explicit provenance, stable
+serialization, and typed exhaustion context containing the module, generation,
+and deterministic next candidate when one exists.
+
+Persistent reuse is copy-on-publish, not mutation. A refinement starts from a
+frozen prior module map, copies validated records into candidate state, and
+introduces only the newly certified callable boundary and its validated direct
+call targets. A copied record is reusable only when its stable module identity
+and executable layout match and the new boundary cannot intersect its precise
+owned ranges or recorded boundary dependencies. An affected record is cleared,
+reanalyzed, and revalidated before the candidate map can be published. The
+old generation remains dispatchable if any assessment, ownership check,
+provider check, CFG analysis, or budget check fails.
+
+The former `max_promotions` and `max_map_rebuilds` fields remain visible for
+intentional legacy CLI/library compatibility. They are disabled by the
+ordinary default profile and are enabled when an old event limit is explicitly
+selected; M27 does not silently reinterpret a larger event count as an
+analysis limit. Finite candidate identities, assessment work, terminal
+resolution, stagnation handling, and the aggregate ledger together provide the
+termination proof. See [MILESTONE_27.md](MILESTONE_27.md) for measured
+full-rebuild versus reuse work, synthetic invalidation/transaction tests, the
+real executable frontier, and schema-13 report evidence.
+
+### Future milestone — Filesystem and asset loading
 
 **Goal:** Mount user-provided game data and implement the required streaming path.
 
 **Success:** TOTK opens required resources and begins loading without missing-path or handle-semantics failures.
 
-### Milestone 14 — Graphics initialization
+### Future milestone — Graphics initialization
 
 **Goal:** Trace and intercept the selected graphics boundary and create logical native resources.
 
 **Success:** Recompiled code creates the required native device/resources through the canonical render interface.
 
-### Milestone 15 — First present
+### Milestone 17 — First present
 
 **Goal:** Produce a window, swapchain, render target, and present path.
 
 **Success:** A frame initiated by recompiled code reaches the display. A cleared framebuffer counts.
 
-### Milestone 16 — First visible game output
+### Milestone 18 — First visible game output
 
 **Goal:** Render actual TOTK graphics, even if incomplete.
 
 **Success:** Game-generated geometry or UI is visible through the native renderer.
 
-### Milestone 17 — Menu boot
+### Milestone 19 — Menu boot
 
 **Goal:** Reach an interactable title screen or early menu.
 
 **Success:** Input works and the menu remains stable across repeated runs.
 
-### Milestone 18 — In-game
+### Milestone 20 — In-game
 
 **Goal:** Reach a playable scene.
 
 **Success:** Gameplay begins with known limitations documented.
 
-### Milestone 19 — Correctness
+### Milestone 21 — Correctness
 
 **Focus:** Crashes, memory, synchronization, graphics, audio, saves, streaming, input, timing, and gameplay behavior.
 
 **Success:** A repeatable validation suite covers representative flows and regressions.
 
-### Milestone 20 — Performance
+### Milestone 22 — Performance
 
 **Focus:** Direct-call lowering, dispatcher locality, LLVM optimization, SSA/register improvements, guest-memory fast paths, allocation, renderer batching, shader/pipeline caches, and asynchronous compilation.
 
@@ -1777,6 +2364,8 @@ These are the first practical engineering tasks. They intentionally stop before 
 
 ### 4. Implement bounded section decompression and hash checks
 
+**Completed in Milestone 2A.**
+
 - **Goal:** Reconstruct decompressed `.text`, `.rodata`, and `.data` when required.
 - **Inputs:** Compression flags and synthetic compressed fixtures.
 - **Output:** Decompression utility with hash verification.
@@ -1784,6 +2373,8 @@ These are the first practical engineering tasks. They intentionally stop before 
 - **Dependencies:** NSO parser; reviewed compression dependency.
 
 ### 5. Parse MOD0 and dynamic metadata
+
+**Future Milestone 3.**
 
 - **Goal:** Locate and report module/dynamic metadata using a versioned schema.
 - **Inputs:** Target module and public format research.
@@ -1809,7 +2400,9 @@ These are the first practical engineering tasks. They intentionally stop before 
 
 ### 8. Implement guest memory abstraction
 
-- **Goal:** Model guest ranges, protections, BSS, and address translation.
+**Completed in Milestone 2B.**
+
+- **Goal:** Model guest ranges, protections, BSS, and checked address-based access.
 - **Inputs:** Module report and synthetic memory layouts.
 - **Output:** `GuestAddress`, `GuestMemory`, mapping/protection tests.
 - **Success:** Valid reads/writes work; invalid/unmapped/protected accesses fail with guest diagnostics.
@@ -1817,19 +2410,23 @@ These are the first practical engineering tasks. They intentionally stop before 
 
 ### 9. Load a module and apply initial relocations
 
+**Implemented in Milestone 5.**
+
 - **Goal:** Reconstruct a test module in guest memory.
 - **Inputs:** Synthetic module and supported relocation records.
 - **Output:** Loader state and relocation log.
 - **Success:** Expected guest-visible pointers and instruction fields are present before execution.
 - **Dependencies:** Guest memory and relocation parser.
 
-### 10. Integrate an AArch64 decoder
+### 10. Integrate an AArch64 decoder — implemented in Milestone 4
 
 - **Goal:** Decode aligned instructions behind the internal decoder interface.
-- **Inputs:** LLVM MC or another reviewed candidate.
-- **Output:** Decoded instruction objects preserving address/opcode/disassembly.
-- **Success:** Coverage and unknown-instruction reports are deterministic.
-- **Dependencies:** Build foundation; dependency/license review.
+- **Inputs:** Executable `GuestMemory` bytes and synthetic raw opcodes.
+- **Output:** SwitchRecomp-owned decoded instructions preserving address,
+  opcode, normalized operands, PC-relative values, and explicit flow status.
+- **Backend:** Capstone v5.0.3, pinned and isolated behind the public wrapper.
+- **Success:** Representative decoder and CFG tests are deterministic; unknown
+  control flow is never silently treated as fallthrough.
 
 ### 11. Define canonical function metadata
 
@@ -1839,13 +2436,14 @@ These are the first practical engineering tasks. They intentionally stop before 
 - **Success:** Metadata can be reviewed, diffed, and rejected when hashes do not match.
 - **Dependencies:** NSO reports and decoder.
 
-### 12. Build the smallest CFG analyzer
+### 12. Build the smallest CFG analyzer — implemented in Milestone 4
 
 - **Goal:** Analyze synthetic functions seeded by known entry points and direct branches.
-- **Inputs:** AArch64 decoder and synthetic binaries.
-- **Output:** Basic blocks, edges, call targets, and unsupported-edge diagnostics.
-- **Success:** Known synthetic CFGs match expected metadata.
-- **Dependencies:** Decoder and metadata schema.
+- **Inputs:** AArch64 decoder and executable synthetic guest mappings.
+- **Output:** Basic blocks, typed edges, call candidates, unresolved indirect
+  flow, deterministic diagnostics, and bounded traversal results.
+- **Success:** Known synthetic CFGs match expected metadata and graph invariants.
+- **Dependencies:** Decoder and guest memory; function metadata remains future work.
 
 ### 13. Export analyst metadata
 
@@ -1855,23 +2453,23 @@ These are the first practical engineering tasks. They intentionally stop before 
 - **Success:** Import/export round trips preserve addresses and review annotations.
 - **Dependencies:** Metadata schema.
 
-### 14. Lift one trivial function
+### 14. Lift one trivial function — implemented in Milestone 6
 
-- **Goal:** Prove the semantic IR and LLVM lowering path.
 - **Inputs:** Functions such as `add x0, x0, x1; ret`.
-- **Output:** Generated native object and guest/native address map.
-- **Success:** Native execution matches the reference harness.
-- **Dependencies:** Decoder, IR, runtime context, differential harness.
+- **Output:** Verified Semantic IR and optional native JIT execution.
+- **Success:** Interpreter and native execution match the reference harness.
+- **Dependencies:** Decoder, IR, and runtime context.
 
-### 15. Expand only under differential coverage
+### 15. Expand only under differential coverage — Milestones 7, 8, and 9 implemented
 
-- **Goal:** Add loads/stores, branches, flags, calls, then FP/SIMD/atomics in gated groups.
+- **Goal:** Add each architectural group only after differential coverage is available. FP/SIMD is implemented in Milestone 8, the controlled native-thread/atomic subset is implemented in Milestone 9, and deterministic function-map dispatch/whole-module reporting is implemented in Milestone 10; pair-exclusive/LSE semantics and Horizon services remain gated future work.
 - **Inputs:** Differential tests and failure corpus.
-- **Output:** Increasingly capable semantic IR/code generator.
+- **Output:** Increasingly capable semantic IR/code generator and versioned coverage corpus.
 - **Success:** Each group passes tests before it is enabled for larger analysis.
 - **Dependencies:** All prior test infrastructure.
 
-Only after these steps should whole-module TOTK translation be attempted. The first implementation task is therefore **exact-build manifest plus NSO inspection**, not a game boot attempt.
+Only after these steps should whole-module TOTK translation be attempted. The
+repository remains intentionally synthetic and does not claim game execution.
 
 ## 38. Reference sources
 
@@ -1914,6 +2512,35 @@ This RFC is complete when:
 - Existing, proposed, future, and verification-needed items are distinguishable.
 - The architecture explicitly avoids becoming a full Switch emulator.
 - NSO, MOD0, dynamic data, relocations, guest memory, CPU state, function discovery, indirect calls, jump tables, runtime services, files, threads, atomics, exceptions, graphics, shaders, input, audio, timing, testing, debugging, build, licensing, risks, milestones, open questions, and immediate tasks are covered.
-- The first implementation task is obvious and does not involve attempting to boot TOTK.
+- The next implementation task follows the current milestone roadmap and does not involve attempting to boot TOTK.
 - Every target-specific unknown remains marked as **Needs verification**.
 - Any future implementation claiming progress points back to a test, report, or exact-build artifact.
+
+## Resumable Semantic IR execution
+
+Milestone 29 separates interpreter scheduling from execution termination. A
+finite internal IR-operation slice yields an `InterpreterFrame` with an exact
+block and operation cursor; it does not create a guest boundary, function
+transition, refinement attempt, or candidate observation. The frame also owns
+the SSA/provenance and pending-observation state needed to continue without
+replaying side effects. Ordinary session termination remains governed by the
+finite guest-block, transition, call-depth, event, and refinement resources.
+An explicitly configured `--max-ir-operations N` remains an exact global hard
+guard and is reported separately from the slice quantum.
+
+## Generation-scoped controlled stack memory
+
+Milestone 30 gives dynamic controlled stacks an exact whole-region ownership
+token. `ExecutionSession` keeps the token for the lifetime of one logical
+execution generation, including candidate assessment and immutable refinement
+work performed by `run-entry`, then releases it on scope destruction. A
+release authenticates the memory domain, mapping identity, base, and size
+before removing exactly one region. Static loader mappings use the existing
+permanent mapping API and cannot be released by a controlled-stack token.
+
+Live mapped bytes remain the finite guest-memory resource. Cumulative mapping
+activity is diagnostic churn, and a checked virtual high-water cursor preserves
+the deterministic guest-visible stack-address sequence after backing storage
+is reclaimed. Every new stack is explicitly zero-filled. M30 does not provide
+a general heap, page table, snapshot, or escaped-stack-pointer lifetime model;
+those require separate ownership contracts.

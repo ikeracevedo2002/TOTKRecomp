@@ -48,6 +48,71 @@ paths locally. `config/local.json` is ignored by Git. Local configuration may
 point to `main`, `subsdk*`, RomFS, cache, and analysis directories, but it is not
 part of target identity.
 
+## Multi-module process configuration
+
+Milestone 13 extends the local-only configuration with an arbitrary `modules`
+object, an explicit `primary_module`, optional `module_bases`, and a
+`provider_search_complete` assertion. For example:
+
+```json
+{
+  "modules": {
+    "main": "/local/path/main.nso",
+    "sdk": "/local/path/sdk.nso"
+  },
+  "primary_module": "main",
+  "module_bases": {
+    "main": "0x7100000000"
+  },
+  "provider_search_complete": false
+}
+```
+
+Logical names and parsed NSO identity, not host paths, identify modules in
+reports. Explicit bases are analysis-only unless separately verified. When the
+executable set is incomplete, leave `provider_search_complete` false so an
+unresolved symbol is reported as an incomplete search rather than as proof of
+an external runtime service.
+
+M14 also accepts a structured module-set section. The `modules` and
+`module_bases` objects may be nested there, and `source: "directory"` selects a
+bounded non-recursive scan of a prepared local directory:
+
+```json
+{
+  "module_set": {
+    "source": "directory",
+    "directory": "/path/to/prepared-exefs",
+    "completeness": "incomplete",
+    "basis": "directory_scan_only",
+    "coherence": "unverified"
+  },
+  "primary_module": "main"
+}
+```
+
+Finding several files does not establish completeness. For an exact local
+manifest, use `target_manifest` or explicit `expected_modules` records with
+`name`, `sha256`, and `build_id` (and optionally `expected_size`). A
+`manifest_verified_complete` set is rejected unless these identities match
+exactly. The directory scanner does not infer provider precedence from
+filenames and reports non-NSO entries as ignored evidence.
+
+## M14 inspection
+
+Use `process-inspect` to inventory and search all supplied modules without
+executing guest code:
+
+```bash
+./build/process-inspect --local-config config/local.json --json \
+  --report build/reports/m14-process-inventory.json
+```
+
+The report uses schema 4 and includes completeness basis, target coherence,
+module identities, parsed dynamic-symbol occurrences, provider candidates, and
+the focused `__nnmusl_init_dso` outcome. `run-entry` remains the controlled
+execution command after the inventory is independently reviewed.
+
 ## File matching
 
 The bootstrap validator compares a local module against its manifest using file

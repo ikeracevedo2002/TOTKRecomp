@@ -1,5 +1,6 @@
 # Build output
 /build/
+/build-*/
 /out/
 /.cache/
 
@@ -12,6 +13,15 @@
 /local-game-data/
 /targets/totk/local/
 /analysis-local/
+
+# Proprietary local game/container material; never add these to the repository.
+*.xci
+*.nsp
+*.nca
+*.nso
+prod.keys
+title.keys
+*.keys
 
 # Generated reports and logs
 *.log

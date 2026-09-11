@@ -7,6 +7,12 @@ include(FetchContent)
 option(TOTKRECOMP_BUILD_TESTS "Build the TOTKRecomp test suite" ON)
 option(TOTKRECOMP_ENABLE_WARNINGS "Enable warnings for project-owned targets" ON)
 option(TOTKRECOMP_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(TOTKRECOMP_ENABLE_THREAD_SANITIZER "Enable ThreadSanitizer for project-owned targets" OFF)
+option(TOTKRECOMP_ENABLE_LLVM "Build the optional LLVM lowering and JIT backend" OFF)
+
+if(TOTKRECOMP_ENABLE_SANITIZERS AND TOTKRECOMP_ENABLE_THREAD_SANITIZER)
+    message(FATAL_ERROR "AddressSanitizer/UBSan and ThreadSanitizer cannot be enabled together")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,6 +25,53 @@ FetchContent_Declare(
     GIT_TAG v3.11.3
 )
 FetchContent_MakeAvailable(nlohmann_json)
+
+set(LZ4_BUILD_CLI OFF CACHE BOOL "Disable the LZ4 command-line tool" FORCE)
+set(LZ4_BUILD_LEGACY_LZ4C OFF CACHE BOOL "Disable the legacy LZ4 command-line tool" FORCE)
+set(LZ4_BUNDLED_MODE ON CACHE BOOL "Build LZ4 as a bundled dependency" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build bundled dependencies as static libraries" FORCE)
+set(BUILD_STATIC_LIBS ON CACHE BOOL "Build the bundled LZ4 static library" FORCE)
+FetchContent_Declare(
+    lz4
+    GIT_REPOSITORY https://github.com/lz4/lz4.git
+    GIT_TAG 5ff839680134437dbf4678f3d0c7b371d84f4964
+    GIT_SHALLOW FALSE
+)
+FetchContent_MakeAvailable(lz4)
+if(NOT TARGET lz4_static)
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+    add_subdirectory(${lz4_SOURCE_DIR}/build/cmake ${lz4_BINARY_DIR} EXCLUDE_FROM_ALL)
+endif()
+
+set(CAPSTONE_BUILD_SHARED_LIBS OFF CACHE BOOL "Build Capstone as a static library" FORCE)
+set(CAPSTONE_BUILD_TESTS OFF CACHE BOOL "Disable Capstone tests" FORCE)
+set(CAPSTONE_BUILD_CSTOOL OFF CACHE BOOL "Disable the Capstone command-line tool" FORCE)
+set(CAPSTONE_ARCHITECTURE_DEFAULT OFF CACHE BOOL "Disable unused Capstone architectures" FORCE)
+set(CAPSTONE_ARM_SUPPORT OFF CACHE BOOL "Disable Capstone ARM support" FORCE)
+set(CAPSTONE_ARM64_SUPPORT ON CACHE BOOL "Enable Capstone AArch64 support" FORCE)
+set(CAPSTONE_M68K_SUPPORT OFF CACHE BOOL "Disable Capstone M68K support" FORCE)
+set(CAPSTONE_MIPS_SUPPORT OFF CACHE BOOL "Disable Capstone MIPS support" FORCE)
+set(CAPSTONE_PPC_SUPPORT OFF CACHE BOOL "Disable Capstone PPC support" FORCE)
+set(CAPSTONE_SPARC_SUPPORT OFF CACHE BOOL "Disable Capstone SPARC support" FORCE)
+set(CAPSTONE_SYSZ_SUPPORT OFF CACHE BOOL "Disable Capstone SystemZ support" FORCE)
+set(CAPSTONE_XCORE_SUPPORT OFF CACHE BOOL "Disable Capstone XCore support" FORCE)
+set(CAPSTONE_X86_SUPPORT OFF CACHE BOOL "Disable Capstone X86 support" FORCE)
+set(CAPSTONE_TMS320C64X_SUPPORT OFF CACHE BOOL "Disable Capstone TMS320C64x support" FORCE)
+set(CAPSTONE_M680X_SUPPORT OFF CACHE BOOL "Disable Capstone M680X support" FORCE)
+set(CAPSTONE_EVM_SUPPORT OFF CACHE BOOL "Disable Capstone EVM support" FORCE)
+set(CAPSTONE_WASM_SUPPORT OFF CACHE BOOL "Disable Capstone WebAssembly support" FORCE)
+set(CAPSTONE_MOS65XX_SUPPORT OFF CACHE BOOL "Disable Capstone MOS65XX support" FORCE)
+set(CAPSTONE_BPF_SUPPORT OFF CACHE BOOL "Disable Capstone BPF support" FORCE)
+set(CAPSTONE_RISCV_SUPPORT OFF CACHE BOOL "Disable Capstone RISC-V support" FORCE)
+set(CAPSTONE_SH_SUPPORT OFF CACHE BOOL "Disable Capstone SH support" FORCE)
+set(CAPSTONE_TRICORE_SUPPORT OFF CACHE BOOL "Disable Capstone TriCore support" FORCE)
+FetchContent_Declare(
+    capstone
+    GIT_REPOSITORY https://github.com/capstone-engine/capstone.git
+    GIT_TAG 5cca00533dadfe53181f1de3525f859769f69b65
+    GIT_SHALLOW FALSE
+)
+FetchContent_MakeAvailable(capstone)
 
 if(TOTKRECOMP_BUILD_TESTS)
     enable_testing()
@@ -50,15 +103,20 @@ function(totkrecomp_enable_project_warnings target)
 endfunction()
 
 function(totkrecomp_enable_sanitizers target)
-    if(NOT TOTKRECOMP_ENABLE_SANITIZERS)
+    if(NOT TOTKRECOMP_ENABLE_SANITIZERS AND NOT TOTKRECOMP_ENABLE_THREAD_SANITIZER)
         return()
     endif()
 
     if(MSVC)
-        message(WARNING "TOTKRECOMP_ENABLE_SANITIZERS is not supported by this project on MSVC")
+        message(WARNING "Sanitizers are not supported by this project on MSVC")
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-        target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+        if(TOTKRECOMP_ENABLE_THREAD_SANITIZER)
+            target_compile_options(${target} PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
+            target_link_options(${target} PRIVATE -fsanitize=thread)
+        else()
+            target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+            target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+        endif()
     endif()
 endfunction()
 
@@ -97,39 +155,346 @@ totkrecomp_enable_project_warnings(switchrecomp-target)
 totkrecomp_enable_sanitizers(switchrecomp-target)
 
 add_library(switchrecomp-format
+    src/switchrecomp/format/nso.cpp
     src/switchrecomp/format/nso_magic.cpp
 )
 target_include_directories(switchrecomp-format
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-target_link_libraries(switchrecomp-format PUBLIC switchrecomp-common)
+target_link_libraries(switchrecomp-format
+    PUBLIC switchrecomp-common
+    PRIVATE lz4_static
+)
 totkrecomp_enable_project_warnings(switchrecomp-format)
 totkrecomp_enable_sanitizers(switchrecomp-format)
 
+add_library(switchrecomp-memory
+    src/switchrecomp/memory/guest_memory.cpp
+    src/switchrecomp/loader/nso_guest_loader.cpp
+    # Metadata parsers consume GuestMemory, so they live in this layer while
+    # retaining their public format headers under include/.../format.
+    src/switchrecomp/format/module_metadata.cpp
+    src/switchrecomp/format/mod0.cpp
+    src/switchrecomp/format/elf_dynamic.cpp
+    src/switchrecomp/format/elf_rela.cpp
+    src/switchrecomp/format/dynamic_symbols.cpp
+    src/switchrecomp/loader/symbol_resolver.cpp
+    src/switchrecomp/loader/relocation_processor.cpp
+)
+target_include_directories(switchrecomp-memory
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-memory
+    PUBLIC switchrecomp-common switchrecomp-format
+)
+totkrecomp_enable_project_warnings(switchrecomp-memory)
+totkrecomp_enable_sanitizers(switchrecomp-memory)
+
+add_library(switchrecomp-aarch64
+    src/switchrecomp/aarch64/register.cpp
+    src/switchrecomp/aarch64/instruction.cpp
+    src/switchrecomp/aarch64/decoder.cpp
+    src/switchrecomp/aarch64/decoder_m9.cpp
+)
+set_source_files_properties(src/switchrecomp/aarch64/decoder.cpp PROPERTIES
+    COMPILE_DEFINITIONS "SWITCHRECOMP_LEGACY_DECODER_IMPL;decode=decode_legacy;fetch_and_decode=fetch_and_decode_legacy"
+)
+target_include_directories(switchrecomp-aarch64
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-aarch64
+    PUBLIC switchrecomp-common switchrecomp-memory
+    PRIVATE capstone
+)
+totkrecomp_enable_project_warnings(switchrecomp-aarch64)
+totkrecomp_enable_sanitizers(switchrecomp-aarch64)
+
+add_library(switchrecomp-analysis
+    src/switchrecomp/analysis/control_flow_graph.cpp
+    src/switchrecomp/analysis/cfg_analyzer.cpp
+    src/switchrecomp/analysis/coverage.cpp
+    src/switchrecomp/analysis/function_map.cpp
+    src/switchrecomp/analysis/indirect_target.cpp
+    src/switchrecomp/analysis/module_set.cpp
+    src/switchrecomp/analysis/process_image.cpp
+)
+target_include_directories(switchrecomp-analysis
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-analysis
+    PUBLIC switchrecomp-common switchrecomp-memory switchrecomp-aarch64
+           nlohmann_json::nlohmann_json
+)
+totkrecomp_enable_project_warnings(switchrecomp-analysis)
+totkrecomp_enable_sanitizers(switchrecomp-analysis)
+
+add_library(switchrecomp-ir
+    src/switchrecomp/ir/type.cpp
+    src/switchrecomp/ir/opcode.cpp
+    src/switchrecomp/ir/register.cpp
+    src/switchrecomp/ir/function.cpp
+    src/switchrecomp/ir/builder.cpp
+    src/switchrecomp/ir/verifier.cpp
+    src/switchrecomp/ir/verifier_m9.cpp
+    src/switchrecomp/ir/printer.cpp
+)
+set_source_files_properties(src/switchrecomp/ir/verifier.cpp PROPERTIES
+    COMPILE_DEFINITIONS "SWITCHRECOMP_LEGACY_VERIFIER_IMPL;verify=verify_legacy"
+)
+target_include_directories(switchrecomp-ir
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-ir
+    PUBLIC switchrecomp-common
+)
+totkrecomp_enable_project_warnings(switchrecomp-ir)
+totkrecomp_enable_sanitizers(switchrecomp-ir)
+
+add_library(switchrecomp-runtime-core
+    src/switchrecomp/runtime/cpu_state.cpp
+    src/switchrecomp/runtime/context.cpp
+    src/switchrecomp/runtime/fp.cpp
+    src/switchrecomp/runtime/atomic_memory.cpp
+    src/switchrecomp/runtime/thread.cpp
+    src/switchrecomp/runtime/dispatcher.cpp
+    src/switchrecomp/runtime/imports.cpp
+)
+target_include_directories(switchrecomp-runtime-core
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-runtime-core
+    PUBLIC switchrecomp-common switchrecomp-memory switchrecomp-ir
+)
+totkrecomp_enable_project_warnings(switchrecomp-runtime-core)
+totkrecomp_enable_sanitizers(switchrecomp-runtime-core)
+
+add_library(switchrecomp-lifter
+    src/switchrecomp/lifter/lifter.cpp
+    src/switchrecomp/lifter/lifter_entry.cpp
+    src/switchrecomp/lifter/lifter_m9.cpp
+)
+set_source_files_properties(src/switchrecomp/lifter/lifter.cpp PROPERTIES
+    COMPILE_DEFINITIONS "SWITCHRECOMP_LEGACY_LIFTER_IMPL;lift_function=lift_function_legacy;is_instruction_liftable=is_instruction_liftable_legacy"
+)
+set_source_files_properties(src/switchrecomp/lifter/lifter_m9.cpp PROPERTIES
+    COMPILE_DEFINITIONS "lift_function=lift_function_m9_injected"
+)
+target_include_directories(switchrecomp-lifter
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-lifter
+    PUBLIC switchrecomp-common switchrecomp-aarch64 switchrecomp-analysis switchrecomp-ir
+)
+totkrecomp_enable_project_warnings(switchrecomp-lifter)
+totkrecomp_enable_sanitizers(switchrecomp-lifter)
+
+add_library(switchrecomp-interpreter
+    src/switchrecomp/interpreter/interpreter.cpp
+    src/switchrecomp/interpreter/m9_semantics.cpp
+    src/switchrecomp/interpreter/interpreter_m9.cpp
+)
+set_source_files_properties(src/switchrecomp/interpreter/interpreter.cpp PROPERTIES
+    COMPILE_DEFINITIONS "SWITCHRECOMP_LEGACY_INTERPRETER_IMPL;execute=execute_legacy"
+)
+target_include_directories(switchrecomp-interpreter
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-interpreter
+    PUBLIC switchrecomp-common switchrecomp-ir switchrecomp-runtime-core
+)
+totkrecomp_enable_project_warnings(switchrecomp-interpreter)
+totkrecomp_enable_sanitizers(switchrecomp-interpreter)
+
+set(TOTKRECOMP_HAS_LLVM OFF)
+if(TOTKRECOMP_ENABLE_LLVM)
+    find_package(LLVM 18.1.3 CONFIG QUIET)
+    if(LLVM_FOUND)
+        set(TOTKRECOMP_HAS_LLVM ON)
+        add_library(switchrecomp-codegen-llvm
+            src/switchrecomp/codegen/llvm_backend.cpp
+            src/switchrecomp/codegen/llvm_backend_m9.cpp
+        )
+        set_source_files_properties(src/switchrecomp/codegen/llvm_backend.cpp PROPERTIES
+            COMPILE_DEFINITIONS "SWITCHRECOMP_LEGACY_LLVM_IMPL;lower_to_llvm_ir=lower_to_llvm_ir_legacy;execute=execute_legacy"
+        )
+        target_include_directories(switchrecomp-codegen-llvm
+            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_include_directories(switchrecomp-codegen-llvm SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+        target_compile_options(switchrecomp-codegen-llvm PRIVATE ${LLVM_DEFINITIONS})
+        target_link_libraries(switchrecomp-codegen-llvm
+            PUBLIC switchrecomp-common switchrecomp-ir switchrecomp-runtime-core
+        )
+        if(COMMAND llvm_map_components_to_libnames)
+            llvm_map_components_to_libnames(TOTKRECOMP_LLVM_LIBS core orcjit native support)
+            target_link_libraries(switchrecomp-codegen-llvm PRIVATE ${TOTKRECOMP_LLVM_LIBS})
+        elseif(TARGET LLVM)
+            target_link_libraries(switchrecomp-codegen-llvm PRIVATE LLVM)
+        endif()
+        totkrecomp_enable_project_warnings(switchrecomp-codegen-llvm)
+        totkrecomp_enable_sanitizers(switchrecomp-codegen-llvm)
+    else()
+        message(WARNING "TOTKRECOMP_ENABLE_LLVM=ON but LLVM was not found; LLVM backend is disabled")
+    endif()
+endif()
+
+add_library(switchrecomp-module-translation
+    src/switchrecomp/analysis/whole_module.cpp
+)
+target_include_directories(switchrecomp-module-translation
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-module-translation
+    PUBLIC switchrecomp-common switchrecomp-memory switchrecomp-analysis
+           switchrecomp-ir switchrecomp-lifter switchrecomp-interpreter
+           switchrecomp-runtime-core switchrecomp-target nlohmann_json::nlohmann_json
+)
+if(TOTKRECOMP_HAS_LLVM)
+    target_link_libraries(switchrecomp-module-translation PUBLIC switchrecomp-codegen-llvm)
+    target_compile_definitions(switchrecomp-module-translation PRIVATE TOTKRECOMP_HAS_LLVM=1)
+endif()
+totkrecomp_enable_project_warnings(switchrecomp-module-translation)
+totkrecomp_enable_sanitizers(switchrecomp-module-translation)
+
+add_library(switchrecomp-execution
+    src/switchrecomp/execution/session.cpp
+)
+target_include_directories(switchrecomp-execution
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(switchrecomp-execution
+    PUBLIC switchrecomp-common switchrecomp-memory switchrecomp-analysis
+           switchrecomp-ir switchrecomp-lifter switchrecomp-interpreter
+           switchrecomp-module-translation nlohmann_json::nlohmann_json
+)
+totkrecomp_enable_project_warnings(switchrecomp-execution)
+totkrecomp_enable_sanitizers(switchrecomp-execution)
+
 add_executable(nso-inspect tools/nso-inspect/main.cpp)
-target_link_libraries(nso-inspect PRIVATE switchrecomp-format)
+target_link_libraries(nso-inspect PRIVATE switchrecomp-memory)
 target_compile_definitions(nso-inspect PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
 totkrecomp_enable_project_warnings(nso-inspect)
 totkrecomp_enable_sanitizers(nso-inspect)
+
+add_executable(aarch64-analyze tools/aarch64-analyze/main.cpp)
+target_link_libraries(aarch64-analyze PRIVATE switchrecomp-analysis)
+target_compile_definitions(aarch64-analyze PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
+totkrecomp_enable_project_warnings(aarch64-analyze)
+totkrecomp_enable_sanitizers(aarch64-analyze)
+
+add_executable(aarch64-lift tools/aarch64-lift/main.cpp)
+target_link_libraries(aarch64-lift
+    PRIVATE switchrecomp-analysis switchrecomp-ir switchrecomp-lifter switchrecomp-interpreter
+)
+if(TOTKRECOMP_HAS_LLVM)
+    target_link_libraries(aarch64-lift PRIVATE switchrecomp-codegen-llvm)
+    target_compile_definitions(aarch64-lift PRIVATE TOTKRECOMP_HAS_LLVM=1)
+endif()
+target_compile_definitions(aarch64-lift PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
+totkrecomp_enable_project_warnings(aarch64-lift)
+totkrecomp_enable_sanitizers(aarch64-lift)
+
+add_executable(nso-dynamic-inspect tools/nso-dynamic-inspect/main.cpp)
+target_link_libraries(nso-dynamic-inspect
+    PRIVATE switchrecomp-memory nlohmann_json::nlohmann_json
+)
+target_compile_definitions(nso-dynamic-inspect PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
+totkrecomp_enable_project_warnings(nso-dynamic-inspect)
+totkrecomp_enable_sanitizers(nso-dynamic-inspect)
+
+add_executable(translate-module tools/translate-module/main.cpp)
+target_link_libraries(translate-module PRIVATE switchrecomp-module-translation)
+if(TOTKRECOMP_HAS_LLVM)
+    target_compile_definitions(translate-module PRIVATE TOTKRECOMP_HAS_LLVM=1)
+endif()
+target_compile_definitions(translate-module PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
+totkrecomp_enable_project_warnings(translate-module)
+totkrecomp_enable_sanitizers(translate-module)
+
+add_executable(run-entry tools/run-entry/main.cpp)
+target_link_libraries(run-entry PRIVATE switchrecomp-execution switchrecomp-target)
+target_compile_definitions(run-entry PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
+totkrecomp_enable_project_warnings(run-entry)
+totkrecomp_enable_sanitizers(run-entry)
+
+add_executable(process-inspect tools/process-inspect/main.cpp)
+target_link_libraries(process-inspect PRIVATE switchrecomp-analysis switchrecomp-target
+                                             nlohmann_json::nlohmann_json)
+target_compile_definitions(process-inspect PRIVATE SWITCHRECOMP_VERSION="${PROJECT_VERSION}-dev")
+totkrecomp_enable_project_warnings(process-inspect)
+totkrecomp_enable_sanitizers(process-inspect)
 
 if(TOTKRECOMP_BUILD_TESTS)
     add_executable(switchrecomp-tests
         tests/common_tests.cpp
         tests/format_tests.cpp
+        tests/guest_memory_tests.cpp
+        tests/nso_tests.cpp
+        tests/nso_materialization_tests.cpp
+        tests/mod0_dynamic_tests.cpp
         tests/target_tests.cpp
+        tests/aarch64_decoder_tests.cpp
+        tests/cfg_analyzer_tests.cpp
+        tests/relocation_symbol_tests.cpp
+        tests/semantic_ir_tests.cpp
+        tests/lifter_interpreter_tests.cpp
+        tests/milestone7_semantics_tests.cpp
+        tests/milestone8_fp_simd_tests.cpp
+        tests/milestone9_threads_atomics_tests.cpp
+        tests/milestone10_whole_main_tests.cpp
+        tests/milestone11_execution_tests.cpp
+        tests/milestone12_runtime_tests.cpp
+        tests/milestone13_multimodule_tests.cpp
+        tests/milestone14_module_set_tests.cpp
+        tests/milestone15_closure_tests.cpp
+        tests/milestone16_umulh_tests.cpp
+        tests/milestone18_indirect_target_tests.cpp
+        tests/milestone19_move_wide_tests.cpp
+        tests/milestone20_indirect_function_entry_tests.cpp
+        tests/milestone21_smulh_tests.cpp
+        tests/milestone22_indirect_boundary_tests.cpp
+        tests/milestone23_indirect_refinement_tests.cpp
+        tests/milestone24_bounded_closure_tests.cpp
+        tests/milestone25_resumable_m9_tests.cpp
+        tests/milestone26_progress_refinement_tests.cpp
+        tests/milestone27_aggregate_refinement_tests.cpp
+        tests/milestone28_structural_candidate_tests.cpp
+        tests/milestone29_resumable_ir_tests.cpp
+        tests/milestone30_stack_lifetime_tests.cpp
+        tests/milestone31_transition_frontier_tests.cpp
+        tests/milestone32_candidate_assessment_resource_tests.cpp
+        tests/milestone33_refinement_transaction_resource_tests.cpp
+        tests/milestone34_execution_observability_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE
             switchrecomp-common
             switchrecomp-format
+            switchrecomp-memory
+            switchrecomp-aarch64
+            switchrecomp-analysis
+            switchrecomp-ir
+            switchrecomp-runtime-core
+            switchrecomp-lifter
+            switchrecomp-interpreter
             switchrecomp-target
+            switchrecomp-module-translation
+            switchrecomp-execution
+            lz4_static
             Catch2::Catch2WithMain
     )
     totkrecomp_enable_project_warnings(switchrecomp-tests)
     totkrecomp_enable_sanitizers(switchrecomp-tests)
 
+    if(TOTKRECOMP_HAS_LLVM)
+        target_sources(switchrecomp-tests PRIVATE tests/llvm_backend_tests.cpp)
+        target_link_libraries(switchrecomp-tests PRIVATE switchrecomp-codegen-llvm)
+        target_compile_definitions(switchrecomp-tests PRIVATE TOTKRECOMP_HAS_LLVM=1)
+    endif()
+
     include(Catch)
     catch_discover_tests(switchrecomp-tests)
 endif()
 
-install(TARGETS nso-inspect RUNTIME DESTINATION bin)
+install(TARGETS nso-inspect nso-dynamic-inspect aarch64-analyze aarch64-lift translate-module run-entry process-inspect
+        RUNTIME DESTINATION bin)
