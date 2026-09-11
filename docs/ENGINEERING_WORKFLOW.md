@@ -102,3 +102,13 @@ duplicate-workflow result, measured wall/runner time, dependencies, privacy
 audit, semantic-integrity statement, and the exact next milestone base. CI run
 IDs are transient handoff data and must never be pinned in another tracked
 commit.
+
+## Live acceptance sequence
+
+After the infrastructure checkpoint receives a green heavy `CI Gate`, make one
+meaningful documentation-only follow-up on an allowlisted path. Confirm that
+the new run classifies only the `before -> after` documentation delta, proves
+the predecessor gate for the same PR, runs the light checks, skips every heavy
+job, and passes `CI Gate`. Record workflow URLs, timestamps, job states, and
+measured wall/runner time in the external handoff. Do not add a follow-up
+commit containing those transient run identifiers.
