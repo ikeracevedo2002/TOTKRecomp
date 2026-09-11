@@ -58,6 +58,7 @@ enum class AnalysisBudgetProvenanceKind : std::uint8_t
     LibraryDefault,
     ExecutionToolProfile,
     ExplicitCliOverride,
+    ExplicitApiOverride,
     LocalConfigurationOverride,
     DerivedStructuralBound,
 };
@@ -259,6 +260,11 @@ struct FunctionRecord
     // Exact normalized half-open spans made from decoded instruction PCs.
     // range_begin/range_end are only the encompassing display/search envelope.
     std::vector<GuestAddressRange> owned_code_ranges;
+    // Strong callable-entry boundaries that were in this function's precise
+    // ownership when its CFG was finalized. A later immutable generation may
+    // reuse the record only while none of these boundary dependencies is
+    // invalidated by a newly certified entry.
+    std::vector<memory::GuestAddress> boundary_dependencies;
     FunctionDiscoverySource primary_source = FunctionDiscoverySource::Heuristic;
     FunctionConfidence confidence = FunctionConfidence::Low;
     std::optional<std::string> name;
@@ -346,6 +352,10 @@ struct AnalysisAccounting
     std::size_t candidate_function_entries = 0U;
     std::size_t trusted_function_entries = 0U;
     std::size_t functions_cfg_analyzed = 0U;
+    std::size_t newly_analyzed_functions = 0U;
+    std::size_t reanalyzed_functions = 0U;
+    std::size_t reused_functions = 0U;
+    std::size_t invalidated_records = 0U;
     std::size_t canonical_functions_with_cfg = 0U;
     std::size_t direct_call_discoveries = 0U;
     std::size_t new_seeds_generated = 0U;
@@ -354,6 +364,7 @@ struct AnalysisAccounting
     std::size_t edges_consumed = 0U;
     memory::GuestSize bytes_analyzed = 0U;
     std::size_t boundary_finalization_passes = 0U;
+    std::size_t refinement_transactions = 0U;
     std::size_t failed_functions = 0U;
     std::size_t function_boundary_conflicts = 0U;
     std::size_t work_remaining_at_exhaustion = 0U;
@@ -373,6 +384,8 @@ struct ModuleAnalysisInput
     std::vector<FunctionSeed> seeds;
 };
 
+class FinalizedFunctionMap;
+
 struct FunctionMapOptions
 {
     AnalysisBudgets budgets;
@@ -382,6 +395,11 @@ struct FunctionMapOptions
     // are still expanded transitively and are never treated as speculative.
     std::set<memory::GuestAddress> execution_closure_roots;
     bool continue_after_function_failure = true;
+    // Optional immutable analysis reuse. The builder copies validated records
+    // from this map and invalidates any record whose boundary dependencies are
+    // touched by newly introduced strong entries before publishing a new map.
+    const FinalizedFunctionMap* reuse_map = nullptr;
+    std::set<memory::GuestAddress> newly_introduced_function_entries;
 };
 
 // Normalize four-byte instruction spans into deterministic, half-open code

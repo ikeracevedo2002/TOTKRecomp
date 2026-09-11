@@ -536,6 +536,22 @@ const ProcessModule* ProcessImage::module_for_address(GuestAddress address,
     return owner;
 }
 
+const std::vector<ProcessFunctionTargetReference>& ProcessImage::function_target_references(
+    GuestAddress target) const noexcept
+{
+    static const std::vector<ProcessFunctionTargetReference> empty;
+    const auto found = function_target_references_.find(target);
+    return found == function_target_references_.end() ? empty : found->second;
+}
+
+const std::vector<ProcessRelocationReference>& ProcessImage::relocation_references(
+    GuestAddress source_slot) const noexcept
+{
+    static const std::vector<ProcessRelocationReference> empty;
+    const auto found = relocation_references_.find(source_slot);
+    return found == relocation_references_.end() ? empty : found->second;
+}
+
 std::vector<loader::UnresolvedRelocation> ProcessImage::unresolved_relocations() const
 {
     std::vector<loader::UnresolvedRelocation> result;
@@ -1124,6 +1140,50 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
                         "applied process binding slot does not contain its resolved guest value"));
                 }
                 binding.slot_value_verified = true;
+            }
+        }
+
+        // Build deterministic lookup indexes once. Indirect-target
+        // certification still performs the same evidence validation and
+        // relocation readback, but equivalent runtime observations no longer
+        // rescan every process symbol and relocation table.
+        for (const auto& module : result.modules_)
+        {
+            for (std::size_t relocation_index = 0U;
+                 relocation_index < module.relocations.size(); ++relocation_index)
+            {
+                const auto& relocation = module.relocations[relocation_index];
+                result.relocation_references_[relocation.target_address].push_back(
+                    ProcessRelocationReference{module.identity.module, relocation_index});
+            }
+            if (!module.symbols) continue;
+            for (const auto& symbol : module.symbols->symbols)
+            {
+                if (!symbol.is_defined() || symbol.type != format::SymbolType::Function) continue;
+                const auto address = symbol_address(symbol, module.identity.guest_base);
+                if (address)
+                    result.function_target_references_[address.value()].push_back(
+                        ProcessFunctionTargetReference{module.identity.module, symbol.index,
+                                                       std::nullopt});
+            }
+            for (std::size_t relocation_index = 0U;
+                 relocation_index < module.relocations.size(); ++relocation_index)
+            {
+                const auto& relocation = module.relocations[relocation_index];
+                if (relocation.type == format::AArch64RelocationType::None ||
+                    relocation.type == format::AArch64RelocationType::Unknown)
+                    continue;
+                const auto* symbol = module.symbols->at(relocation.symbol_index);
+                if (symbol == nullptr || !symbol->is_defined() ||
+                    symbol->type != format::SymbolType::Function)
+                    continue;
+                const auto address = symbol_address(*symbol, module.identity.guest_base);
+                if (!address) continue;
+                const auto resolved = checked_add_signed_u64(address.value(), relocation.addend);
+                if (resolved)
+                    result.function_target_references_[resolved.value()].push_back(
+                        ProcessFunctionTargetReference{module.identity.module, symbol->index,
+                                                       relocation_index});
             }
         }
         return Result<ProcessImage>::success(std::move(result));

@@ -138,6 +138,22 @@ struct ProcessModule
     std::vector<memory::GuestMemoryRegionInfo> mappings;
 };
 
+// Stable process-image indexes used by indirect-target certification. They
+// retain module/index provenance while avoiding repeated scans of every
+// dynamic symbol and relocation for equivalent runtime observations.
+struct ProcessFunctionTargetReference
+{
+    std::string module;
+    std::uint32_t symbol_index = 0U;
+    std::optional<std::size_t> relocation_index;
+};
+
+struct ProcessRelocationReference
+{
+    std::string module;
+    std::size_t relocation_index = 0U;
+};
+
 struct ProviderCandidate
 {
     std::string module;
@@ -315,6 +331,10 @@ class ProcessImage
     [[nodiscard]] const ProcessModule* module(std::string_view name) const noexcept;
     [[nodiscard]] const ProcessModule* module_for_address(
         memory::GuestAddress address, memory::GuestSize size = 1U) const noexcept;
+    [[nodiscard]] const std::vector<ProcessFunctionTargetReference>&
+    function_target_references(memory::GuestAddress target) const noexcept;
+    [[nodiscard]] const std::vector<ProcessRelocationReference>&
+    relocation_references(memory::GuestAddress source_slot) const noexcept;
     [[nodiscard]] const std::vector<ProcessBinding>& bindings() const noexcept
     {
         return bindings_;
@@ -344,6 +364,10 @@ class ProcessImage
     bool executable_state_valid_ = true;
     std::vector<std::string> ignored_module_entries_;
     ProcessSymbolNamespace symbol_namespace_;
+    std::map<memory::GuestAddress, std::vector<ProcessFunctionTargetReference>>
+        function_target_references_;
+    std::map<memory::GuestAddress, std::vector<ProcessRelocationReference>>
+        relocation_references_;
     std::vector<ProcessModule> modules_;
     std::vector<ProcessBinding> bindings_;
 };

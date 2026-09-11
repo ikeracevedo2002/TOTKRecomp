@@ -254,3 +254,21 @@ TEST_CASE("Empty reads and writes are explicit no-ops")
     REQUIRE(memory.region_count() == 0U);
     REQUIRE(storage[0] == std::byte{0});
 }
+
+TEST_CASE("Guest memory releases only an authenticated owned mapping")
+{
+    GuestMemory memory;
+    REQUIRE(memory.map(0x1000U, 0x100U, GuestMemoryPermissions::Read, "static"));
+    const auto token = memory.map_owned(0x3000U, 0x100U,
+                                        GuestMemoryPermissions::Read | GuestMemoryPermissions::Write,
+                                        "owned");
+    REQUIRE(token);
+    REQUIRE(memory.region_count() == 2U);
+    REQUIRE(memory.total_mapped_size() == 0x200U);
+    REQUIRE(memory.release_owned(token.value()));
+    require_error(memory.release_owned(token.value()), ErrorCode::InvalidArgument);
+    REQUIRE(memory.region_count() == 1U);
+    REQUIRE(memory.total_mapped_size() == 0x100U);
+    REQUIRE(memory.region_at(0x1000U));
+    REQUIRE_FALSE(memory.region_at(0x3000U));
+}

@@ -45,6 +45,7 @@ using memory::GuestAddress;
                                     : IndirectTargetDecisionKind::InsufficientEvidence;
     result.decision.eligible_for_promotion = eligible;
     result.validation.target_module = observed_target.target_module;
+    result.validation.structurally_eligible = true;
     return result;
 }
 
@@ -206,12 +207,14 @@ TEST_CASE("M23 genuine candidate, promotion, and map-rebuild exhaustion remain t
     SECTION("round limit")
     {
         IndirectTargetRefinementBudgets budgets;
-        budgets.max_rounds = 1U;
+        budgets.max_stagnant_rounds = 1U;
         IndirectTargetRefinementWorklist worklist(budgets);
         REQUIRE(worklist.begin_round());
+        worklist.end_round();
         REQUIRE_FALSE(worklist.begin_round());
         const auto summary = worklist.summary();
-        REQUIRE(summary.exhaustion.dimension == IndirectTargetRefinementBudgetDimension::Rounds);
+        REQUIRE(summary.exhaustion.dimension ==
+                IndirectTargetRefinementBudgetDimension::StagnantRounds);
         REQUIRE(summary.exhaustion.consumed == 1U);
         REQUIRE(summary.exhaustion.limit == 1U);
     }
@@ -250,7 +253,7 @@ TEST_CASE("M23 refinement report is typed, provenance-preserving, and determinis
         analysis::IndirectTargetPointerProvenanceKind::GuestLoad, 0x1100U});
     execution::ExecutionSessionResult first;
     first.indirect_target_discovery.push_back(item);
-    first.indirect_target_refinement.configured.max_rounds = 64U;
+    first.indirect_target_refinement.configured.max_stagnant_rounds = 64U;
     first.indirect_target_refinement.observations_received = 2U;
     first.indirect_target_refinement.unique_candidates = 1U;
     first.indirect_target_refinement.duplicate_coalesced_observations = 1U;

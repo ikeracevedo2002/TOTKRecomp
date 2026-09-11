@@ -151,6 +151,20 @@ Literal loads remain supported only when their validated guest target is mapped.
 Indirect calls and branches return through the explicit guest `CpuState::pc`
 handoff; a full function-pointer dispatcher is deferred.
 
+## Resumable execution slices
+
+The interpreter executes verified Semantic IR one instruction at a time. A
+finite `slice_ir_operations` quantum may return a typed internal yield, but it
+does not change guest semantics or terminate the execution session. The
+`InterpreterFrame` stores the current block, next IR instruction index, SSA and
+provenance state, and any pending instruction observation. The index advances
+only after the complete IR instruction succeeds, so stores, register writes,
+M9 operations, and observations cannot be replayed or skipped across a slice.
+Terminators are not IR-operation count units; they select the next real block.
+The execution session supplies the aggregate finite block, transition, call,
+event, and refinement resources that prove ordinary termination. An explicit
+global IR maximum remains a separate hard compatibility guard.
+
 ## LLVM backend
 
 The backend is optional and is built as `switchrecomp-codegen-llvm` when CMake

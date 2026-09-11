@@ -122,6 +122,17 @@ struct CheckedGuestRange
     return Result<std::size_t>::success(left - right);
 }
 
+[[nodiscard]] inline Result<std::uint64_t> checked_sub_u64(std::uint64_t left,
+                                                           std::uint64_t right)
+{
+    if (right > left)
+    {
+        return Result<std::uint64_t>::failure(
+            make_error(ErrorCode::ArithmeticUnderflow, "checked 64-bit subtraction underflow"));
+    }
+    return Result<std::uint64_t>::success(left - right);
+}
+
 [[nodiscard]] inline Result<CheckedRange> checked_range(
     std::size_t offset,
     std::size_t size,

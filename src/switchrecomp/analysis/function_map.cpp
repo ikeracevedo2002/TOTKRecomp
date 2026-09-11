@@ -51,6 +51,7 @@ std::string_view analysis_budget_provenance_kind_name(
     case AnalysisBudgetProvenanceKind::LibraryDefault: return "library_default";
     case AnalysisBudgetProvenanceKind::ExecutionToolProfile: return "execution_tool_profile";
     case AnalysisBudgetProvenanceKind::ExplicitCliOverride: return "explicit_cli_override";
+    case AnalysisBudgetProvenanceKind::ExplicitApiOverride: return "explicit_api_override";
     case AnalysisBudgetProvenanceKind::LocalConfigurationOverride:
         return "local_configuration_override";
     case AnalysisBudgetProvenanceKind::DerivedStructuralBound:
@@ -199,6 +200,10 @@ std::string render_analysis_accounting_json(const AnalysisAccounting& accounting
                                     {"candidate_entries", accounting.candidate_function_entries},
                                     {"trusted_entries", accounting.trusted_function_entries},
                                     {"cfg_analyzed", accounting.functions_cfg_analyzed},
+                                    {"newly_analyzed", accounting.newly_analyzed_functions},
+                                    {"reanalyzed", accounting.reanalyzed_functions},
+                                    {"reused", accounting.reused_functions},
+                                    {"invalidated_records", accounting.invalidated_records},
                                     {"with_cfg", accounting.canonical_functions_with_cfg},
                                     {"failed", accounting.failed_functions}}},
                 {"discovery", json{{"direct_call_discoveries", accounting.direct_call_discoveries},
@@ -208,6 +213,7 @@ std::string render_analysis_accounting_json(const AnalysisAccounting& accounting
                                       {"edges", accounting.edges_consumed},
                                       {"bytes_analyzed", accounting.bytes_analyzed}}},
                 {"boundary_finalization_passes", accounting.boundary_finalization_passes},
+                {"refinement_transactions", accounting.refinement_transactions},
                 {"function_boundary_conflicts", accounting.function_boundary_conflicts},
                 {"work_remaining_at_exhaustion", accounting.work_remaining_at_exhaustion},
                 {"exhaustion", std::move(exhaustion)},
@@ -550,7 +556,16 @@ using GuestAddress = memory::GuestAddress;
     {
         record.entries.push_back(seed.entry);
     }
-    record.evidence.push_back(DiscoveryEvidence{seed.source, seed.confidence, seed.entry, seed.note});
+    const DiscoveryEvidence candidate{seed.source, seed.confidence, seed.entry, seed.note};
+    const auto duplicate = std::find_if(record.evidence.begin(), record.evidence.end(),
+                                        [&candidate](const auto& existing) {
+                                            return existing.source == candidate.source &&
+                                                   existing.confidence == candidate.confidence &&
+                                                   existing.entry == candidate.entry &&
+                                                   existing.note == candidate.note;
+                                        });
+    if (duplicate == record.evidence.end())
+        record.evidence.push_back(candidate);
     if (seed.name)
     {
         if (!record.name || record.name->empty() || confidence_rank(seed.confidence) >
@@ -715,6 +730,17 @@ using GuestAddress = memory::GuestAddress;
                   return left_register < right_register;
               });
     return Result<void>::success();
+}
+
+void populate_boundary_dependencies(FunctionRecord& record,
+                                    const std::set<GuestAddress>& known_function_entries)
+{
+    record.boundary_dependencies.clear();
+    for (const auto entry : known_function_entries)
+    {
+        if (contains_any(record.owned_code_ranges, entry, 4U))
+            record.boundary_dependencies.push_back(entry);
+    }
 }
 
 [[nodiscard]] Result<FunctionBoundaryConflict> make_conflict(const FunctionRecord& first,
@@ -1197,6 +1223,46 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
     std::set<GuestAddress> pending;
     std::set<GuestAddress> processed;
     std::set<GuestAddress> known_function_entries = options.cfg.known_function_entries;
+    const bool reuse_enabled = options.reuse_map != nullptr;
+    std::set<GuestAddress> reused_originals;
+    std::set<GuestAddress> previous_canonical_entries;
+    std::set<GuestAddress> previous_boundary_entries;
+    if (reuse_enabled)
+    {
+        const auto& previous = *options.reuse_map;
+        if (!previous.frozen() || previous.identity().module != input.identity.module ||
+            previous.identity().build_id != input.identity.build_id ||
+            previous.identity().input_sha256 != input.identity.input_sha256 ||
+            previous.identity().guest_base != input.identity.guest_base ||
+            previous.identity().executable_ranges != input.identity.executable_ranges)
+        {
+            return Result<FinalizedFunctionMap>::failure(make_error(
+                ErrorCode::InvalidArgument,
+                "persistent function analysis reuse requires the same module identity and executable layout"));
+        }
+        for (const auto& function : previous.functions())
+        {
+            records.emplace(function.canonical_entry, function);
+            reused_originals.insert(function.canonical_entry);
+            previous_canonical_entries.insert(function.canonical_entry);
+            processed.insert(function.canonical_entry);
+            for (const auto entry : function.entries)
+            {
+                known_function_entries.insert(entry);
+                previous_boundary_entries.insert(entry);
+            }
+            for (const auto target : function.direct_calls)
+            {
+                if (contains_any(input.identity.executable_ranges, target, 4U))
+                {
+                    known_function_entries.insert(target);
+                    previous_boundary_entries.insert(target);
+                }
+            }
+        }
+        accounting.reused_functions = records.size();
+        accounting.refinement_transactions = 1U;
+    }
     if (budgets.strategy == AnalysisStrategy::ExecutionClosure)
     {
         for (auto entry = known_function_entries.begin(); entry != known_function_entries.end();)
@@ -1205,6 +1271,44 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
                 entry = known_function_entries.erase(entry);
             else
                 ++entry;
+        }
+    }
+    const auto invalidate_reused = [&](GuestAddress boundary) {
+        if (!reuse_enabled || previous_boundary_entries.contains(boundary)) return;
+        for (auto it = reused_originals.begin(); it != reused_originals.end();)
+        {
+            const auto record = records.find(*it);
+            if (record == records.end() ||
+                (!function_owns_address(record->second, boundary) &&
+                 std::find(record->second.boundary_dependencies.begin(),
+                           record->second.boundary_dependencies.end(),
+                           boundary) == record->second.boundary_dependencies.end()))
+            {
+                ++it;
+                continue;
+            }
+            record->second.cfg.reset();
+            record->second.owned_code_ranges.clear();
+            record->second.boundary_dependencies.clear();
+            record->second.range_begin = 0U;
+            record->second.range_end = 0U;
+            record->second.direct_calls.clear();
+            record->second.indirect_calls.clear();
+            record->second.unresolved_control_flow.clear();
+            record->second.translation_status = TranslationStatus::Discovered;
+            processed.erase(record->second.canonical_entry);
+            pending.insert(record->second.canonical_entry);
+            ++accounting.invalidated_records;
+            if (accounting.reused_functions != 0U) --accounting.reused_functions;
+            it = reused_originals.erase(it);
+        }
+    };
+    for (const auto boundary : options.newly_introduced_function_entries)
+    {
+        if (!previous_boundary_entries.contains(boundary))
+        {
+            known_function_entries.insert(boundary);
+            invalidate_reused(boundary);
         }
     }
     std::size_t seed_count = 0U;
@@ -1229,11 +1333,27 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
         }
         ++source.included;
         const bool was_new = records.find(canonical) == records.end();
-        const auto added = add_seed(records, pending, input, seed, budgets, seed_count,
-                                    accounting, "initial_seeding");
-        if (!added)
+        bool reused_record = reuse_enabled && reused_originals.contains(canonical);
+        if (reused_record && is_boundary_worthy_function_seed(seed) &&
+            !previous_boundary_entries.contains(seed.entry))
         {
-            return Result<FinalizedFunctionMap>::failure(added.error());
+            known_function_entries.insert(seed.entry);
+            invalidate_reused(seed.entry);
+            reused_record = false;
+        }
+        if (reused_record)
+        {
+            const auto evidence = add_evidence(records.find(canonical)->second, seed);
+            if (!evidence) return Result<FinalizedFunctionMap>::failure(evidence.error());
+        }
+        else
+        {
+            const auto added = add_seed(records, pending, input, seed, budgets, seed_count,
+                                        accounting, "initial_seeding");
+            if (!added)
+            {
+                return Result<FinalizedFunctionMap>::failure(added.error());
+            }
         }
         if (was_new) ++source.new_canonical_entries;
         else
@@ -1432,6 +1552,10 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
             return Result<FinalizedFunctionMap>::failure(accounted.error());
         }
         ++accounting.functions_cfg_analyzed;
+        if (reuse_enabled && previous_canonical_entries.contains(entry))
+            ++accounting.reanalyzed_functions;
+        else
+            ++accounting.newly_analyzed_functions;
         ++accounting.phases.cfg_discovery;
 
         record->second.cfg = graph_value;
@@ -1450,6 +1574,7 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
             }
             continue;
         }
+        populate_boundary_dependencies(record->second, known_function_entries);
         record->second.translation_status = TranslationStatus::Analyzed;
 
         for (const auto target : record->second.direct_calls)
@@ -1478,7 +1603,7 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
                     ++source.coalesced;
                     ++accounting.duplicate_coalesced_seed_count;
                 }
-                known_function_entries.insert(target);
+                if (known_function_entries.insert(target).second) invalidate_reused(target);
                 cfg_options.known_function_entries = known_function_entries;
             }
         }
@@ -1496,6 +1621,7 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
         cfg_options.known_function_entries = known_function_entries;
         for (auto& [entry, record] : records)
         {
+            if (reuse_enabled && reused_originals.contains(entry)) continue;
             if (!record.cfg && record.translation_status != TranslationStatus::Discovered)
             {
                 continue;
@@ -1547,6 +1673,10 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
                 return Result<FinalizedFunctionMap>::failure(accounted.error());
             }
             ++accounting.functions_cfg_analyzed;
+            if (reuse_enabled && previous_canonical_entries.contains(entry))
+                ++accounting.reanalyzed_functions;
+            else
+                ++accounting.newly_analyzed_functions;
             record.cfg = graph.value();
             ++accounting.phases.ownership_normalization;
             const auto range = populate_ownership(record, input.identity.executable_ranges);
@@ -1559,6 +1689,7 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
                     range.error().message});
                 continue;
             }
+            populate_boundary_dependencies(record, known_function_entries);
             record.translation_status = TranslationStatus::Analyzed;
             for (const auto target : record.direct_calls)
             {
@@ -1590,6 +1721,7 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
                 }
                 if (known_function_entries.insert(target).second)
                 {
+                    invalidate_reused(target);
                     boundary_set_changed = true;
                 }
             }
@@ -1840,6 +1972,21 @@ Result<void> validate_finalized_function_map(const FinalizedFunctionMap& map)
                 return Result<void>::failure(make_error(
                     ErrorCode::InvalidGuestAddress,
                     "function precise ownership does not match its decoded CFG"));
+            }
+            if (!std::is_sorted(function.boundary_dependencies.begin(),
+                                function.boundary_dependencies.end()) ||
+                std::adjacent_find(function.boundary_dependencies.begin(),
+                                   function.boundary_dependencies.end()) !=
+                    function.boundary_dependencies.end() ||
+                std::any_of(function.boundary_dependencies.begin(),
+                            function.boundary_dependencies.end(),
+                            [&function](const auto entry) {
+                                return !function_owns_address(function, entry);
+                            }))
+            {
+                return Result<void>::failure(make_error(
+                    ErrorCode::FunctionBoundaryConflict,
+                    "function boundary dependencies are not normalized or owned"));
             }
             GuestAddress previous_end = 0U;
             bool first_range = true;

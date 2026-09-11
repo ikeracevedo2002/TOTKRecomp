@@ -290,6 +290,7 @@ totkrecomp_enable_sanitizers(switchrecomp-lifter)
 
 add_library(switchrecomp-interpreter
     src/switchrecomp/interpreter/interpreter.cpp
+    src/switchrecomp/interpreter/m9_semantics.cpp
     src/switchrecomp/interpreter/interpreter_m9.cpp
 )
 set_source_files_properties(src/switchrecomp/interpreter/interpreter.cpp PROPERTIES
@@ -454,6 +455,16 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/milestone22_indirect_boundary_tests.cpp
         tests/milestone23_indirect_refinement_tests.cpp
         tests/milestone24_bounded_closure_tests.cpp
+        tests/milestone25_resumable_m9_tests.cpp
+        tests/milestone26_progress_refinement_tests.cpp
+        tests/milestone27_aggregate_refinement_tests.cpp
+        tests/milestone28_structural_candidate_tests.cpp
+        tests/milestone29_resumable_ir_tests.cpp
+        tests/milestone30_stack_lifetime_tests.cpp
+        tests/milestone31_transition_frontier_tests.cpp
+        tests/milestone32_candidate_assessment_resource_tests.cpp
+        tests/milestone33_refinement_transaction_resource_tests.cpp
+        tests/milestone34_execution_observability_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE

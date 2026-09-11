@@ -197,8 +197,9 @@ RuntimeImportRegistry / import boundary
 ```
 
 The interpreter owns one resumable function frame. `ExecutionSession` owns the
-explicit guest call stack, global budgets, synthetic stack, exact-entry
-dispatch, tail-transfer return contracts, and deterministic events. `BL`/`BLR`
+explicit guest call stack, global budgets, one generation-scoped synthetic
+stack mapping, exact-entry dispatch, tail-transfer return contracts, and
+deterministic events. `BL`/`BLR`
 are calls with X30=`PC+4`; `B`/`BR` function transfers preserve X30 and do not
 push a call frame. Unresolved imports remain boundaries and are never replaced
 with host stubs. Milestone 12 adds a session-local ordered runtime-import
@@ -208,6 +209,48 @@ handlers. `BL`/`BLR` imports resume their explicit guest continuation;
 `B`/`BR` imports inherit the existing guest return contract. Guest addresses
 are never cast to host function pointers. A recognized import can therefore
 remain an explicit unimplemented boundary when its contract is not established.
+
+Milestone 31 makes the function-transition resource semantic and auditable.
+The schema-17 `execution.transition_accounting` record classifies each
+successful function entry as an initial entry, direct call, indirect call,
+non-call function transfer, or other typed category. Resumable IR slices,
+mid-block resumes, and return restoration do not create fresh entries. The
+unchanged default `max_function_transitions=1,000` charges only successful
+cross-function `B`/`BR` transfers, which bounds non-returning transfer churn;
+ordinary `BL`/`BLR` activity remains bounded by call depth, guest blocks,
+refinement, and the other finite execution resources. The transition
+accounting history is separately capped at `max_guest_blocks + 1` entries and
+reports truncation if that derived diagnostic bound is reached. This model
+does not alter indirect-target certification, candidate ordering, or call and
+return contracts.
+
+Milestone 33 makes the immutable refinement transaction resource semantic. A
+transaction is charged only when a reusable prior module map is supplied to
+`FunctionMapBuilder::build`; the builder always executes at least one
+boundary-finalization pass for a successful new-entry refinement. Therefore
+ordinary accounting uses the checked invariant
+`cumulative_transactions <= cumulative_boundary_finalization_passes`. The
+transaction count remains in reports, while its fixed ordinary ceiling is
+absent. A positive finite explicit ceiling remains available for compatibility
+and debugging and is reported with its provenance; absence is represented as
+`null`/`not_configured`.
+
+Milestone 34 separates execution progress from event observability. The
+session maintains a checked `total_generated` logical event count and assigns
+sequences from that count; it never uses the retained vector length as a guest
+execution guard. Ordinary `max_events` is absent (`null`/`not_configured`). An
+explicit `--max-events N`, local configuration value, or library option remains
+a positive finite compatibility/debug execution guard with typed provenance.
+The diagnostic event vector uses a deterministic first-prefix plus recent
+window policy, bounded by `event_history_limit`; omitted events remain counted
+and per-kind totals are retained. Terminal execution state is structured in the
+report, and an event that would hit an explicit guard is represented as a
+terminal attempt rather than silently dropping the stop evidence. Sequence and
+counter overflow fails closed with `arithmetic_overflow`. Event generation is
+finite because each production emission is attached to session setup, a guest
+block boundary, a function entry/call/return/transfer, or a runtime-import
+boundary; the finite guest-block, call-depth, transition, memory, refinement,
+and explicit hard resources therefore dominate ordinary execution.
 
 This controlled entry execution consumes a single prepared main module and a
 metadata-selected `DT_INIT` candidate. It is not full process launch: no rtld,
@@ -405,7 +448,10 @@ before committing them, so overlap, limit, and allocation failures leave an
 existing `GuestMemory` unchanged.
 
 The current implementation is intentionally not a page table, MMU, native
-address mirror, or CPU memory subsystem. Milestone 5 adds an explicit
+address mirror, or CPU memory subsystem. M30 adds exact opaque ownership tokens
+for dynamic whole-region mappings; controlled stacks use those tokens and
+retain only a checked virtual high-water cursor after release. Static loader
+mappings remain permanent process-image state. Milestone 5 adds an explicit
 loader-time privileged write path for relocation application while preserving
 normal guest write permission checks.
 
@@ -2112,8 +2158,8 @@ the exact next execution boundary.
 
 The outer refinement driver uses a deterministic pending worklist rather than
 rescanning all historical observations as new discoveries. Its typed finite
-limits separately bound rounds, target candidates, candidate assessments,
-successful promotions, and immutable map rebuilds. A work item includes the
+limits separately bound stagnant retries, target candidates, candidate
+assessments, successful promotions, and immutable map rebuilds. A work item includes the
 target module/address and source/control-flow/pointer provenance; repeated
 unchanged observations are coalesced while their guest-side provenance and
 observation count remain auditable. A promotion changes the immutable map and
@@ -2121,6 +2167,71 @@ advances a generation; only a later observation whose certification result can
 have changed is reconsidered. Exhaustion is reported with the exact dimension,
 consumed value, limit, and pending work, and never authorizes uncertified guest
 execution. See [MILESTONE_23.md](MILESTONE_23.md).
+
+### Milestone 26 — Progress-aware indirect refinement closure
+
+The indirect-refinement driver distinguishes total execution attempts from
+monotonic work. `total_execution_attempts` is accounting only. A productive
+round records a newly admitted candidate, a terminal candidate resolution, a
+generation-dependent reconsideration, or a successful promotion. A round that
+does none of these transitions increments the consecutive `stagnant_rounds`
+counter and is bounded by `max_stagnant_rounds`; productive work does not
+consume that retry allowance. The report schema is 12 because the former
+`max_rounds` field represented a total-attempt ceiling and would be misleading
+under this model. The CLI retains `--refinement-max-rounds` only as an
+explicitly deprecated alias for the stagnation budget.
+
+The finite-state argument is explicit: newly admitted target identities,
+candidate assessments, successful promotions, immutable map generations, and
+terminal resolutions are each bounded by their configured finite dimensions.
+Equivalent observations coalesce by stable guest-side identity and cannot
+create new work. A pending candidate is either promoted, becomes trusted, or
+becomes terminally rejected; only an attempt that makes none of those
+transitions consumes the finite stagnation allowance. Therefore a refinement
+driver cannot retry forever, while a sequence of independently certified
+promotions is not mistaken for stagnation.
+
+Process refinement remains transactional and immutable. The target module is
+rebuilt and fully revalidated from its deterministic seeds; unchanged frozen
+module maps are carried into the new process-map generation without another
+CFG/function reconstruction. Process-wide static function-target and
+relocation-slot indexes are built once when the process image is loaded. They
+preserve module/index provenance and relocation readback checks while avoiding
+repeated full metadata scans for duplicate runtime observations. The former
+M25 target was consequently assessed, certified, promoted, and entered through
+normal guest dispatch. See [MILESTONE_26.md](MILESTONE_26.md).
+
+### Milestone 27 — Proof-preserving aggregate refinement scaling
+
+M27 replaces the ordinary productive-event charge from successful promotions
+and target-module map rebuilds with a finite aggregate ledger of actual
+immutable refinement work. The ledger reuses M24 accounting dimensions where
+they have the same meaning: newly CFG-analyzed functions, reanalyzed
+functions, instructions, blocks, edges, analyzed bytes,
+boundary-finalization passes, invalidated records, and immutable refinement
+transactions. Each dimension has a finite default, explicit provenance, stable
+serialization, and typed exhaustion context containing the module, generation,
+and deterministic next candidate when one exists.
+
+Persistent reuse is copy-on-publish, not mutation. A refinement starts from a
+frozen prior module map, copies validated records into candidate state, and
+introduces only the newly certified callable boundary and its validated direct
+call targets. A copied record is reusable only when its stable module identity
+and executable layout match and the new boundary cannot intersect its precise
+owned ranges or recorded boundary dependencies. An affected record is cleared,
+reanalyzed, and revalidated before the candidate map can be published. The
+old generation remains dispatchable if any assessment, ownership check,
+provider check, CFG analysis, or budget check fails.
+
+The former `max_promotions` and `max_map_rebuilds` fields remain visible for
+intentional legacy CLI/library compatibility. They are disabled by the
+ordinary default profile and are enabled when an old event limit is explicitly
+selected; M27 does not silently reinterpret a larger event count as an
+analysis limit. Finite candidate identities, assessment work, terminal
+resolution, stagnation handling, and the aggregate ledger together provide the
+termination proof. See [MILESTONE_27.md](MILESTONE_27.md) for measured
+full-rebuild versus reuse work, synthetic invalidation/transaction tests, the
+real executable frontier, and schema-13 report evidence.
 
 ### Future milestone — Filesystem and asset loading
 
@@ -2404,3 +2515,32 @@ This RFC is complete when:
 - The next implementation task follows the current milestone roadmap and does not involve attempting to boot TOTK.
 - Every target-specific unknown remains marked as **Needs verification**.
 - Any future implementation claiming progress points back to a test, report, or exact-build artifact.
+
+## Resumable Semantic IR execution
+
+Milestone 29 separates interpreter scheduling from execution termination. A
+finite internal IR-operation slice yields an `InterpreterFrame` with an exact
+block and operation cursor; it does not create a guest boundary, function
+transition, refinement attempt, or candidate observation. The frame also owns
+the SSA/provenance and pending-observation state needed to continue without
+replaying side effects. Ordinary session termination remains governed by the
+finite guest-block, transition, call-depth, event, and refinement resources.
+An explicitly configured `--max-ir-operations N` remains an exact global hard
+guard and is reported separately from the slice quantum.
+
+## Generation-scoped controlled stack memory
+
+Milestone 30 gives dynamic controlled stacks an exact whole-region ownership
+token. `ExecutionSession` keeps the token for the lifetime of one logical
+execution generation, including candidate assessment and immutable refinement
+work performed by `run-entry`, then releases it on scope destruction. A
+release authenticates the memory domain, mapping identity, base, and size
+before removing exactly one region. Static loader mappings use the existing
+permanent mapping API and cannot be released by a controlled-stack token.
+
+Live mapped bytes remain the finite guest-memory resource. Cumulative mapping
+activity is diagnostic churn, and a checked virtual high-water cursor preserves
+the deterministic guest-visible stack-address sequence after backing storage
+is reclaimed. Every new stack is explicitly zero-filled. M30 does not provide
+a general heap, page table, snapshot, or escaped-stack-pointer lifetime model;
+those require separate ownership contracts.
