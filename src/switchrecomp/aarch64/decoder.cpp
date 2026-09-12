@@ -544,13 +544,19 @@ namespace
     case ARM64_INS_MOVN:
         return InstructionId::Movn;
     case ARM64_INS_LSL:
+    case ARM64_INS_LSLV:
         return InstructionId::Lsl;
     case ARM64_INS_LSR:
+    case ARM64_INS_LSRV:
         return InstructionId::Lsr;
     case ARM64_INS_ASR:
+    case ARM64_INS_ASRV:
         return InstructionId::Asr;
     case ARM64_INS_ROR:
+    case ARM64_INS_RORV:
         return InstructionId::Ror;
+    case ARM64_INS_EXTR:
+        return InstructionId::Extr;
     case ARM64_INS_UBFM:
         return InstructionId::Ubfm;
     case ARM64_INS_SBFM:

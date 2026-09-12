@@ -577,6 +577,10 @@ class ModuleLowerer
                 auto* width = ConstantInt::get(right.value()->getType(),
                                                instruction.result_type.bit_width());
                 auto* inverse = builder_.CreateSub(width, right.value(), "ror.inverse");
+                inverse = builder_.CreateAnd(
+                    inverse,
+                    ConstantInt::get(right.value()->getType(), instruction.result_type.bit_width() - 1U),
+                    "ror.inverse.masked");
                 auto* right_shift = builder_.CreateLShr(left.value(), right.value(), "ror.right");
                 auto* left_shift = builder_.CreateShl(left.value(), inverse, "ror.left");
                 lowered = builder_.CreateOr(right_shift, left_shift, "ror");
