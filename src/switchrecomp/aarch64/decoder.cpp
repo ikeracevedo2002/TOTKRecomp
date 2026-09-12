@@ -348,6 +348,12 @@ namespace
     }
     if (cmode == 0xeU)
         return replicate_movi_element(imm8, 8U);
+    if ((cmode & 0xeU) == 0xcU)
+    {
+        const auto shift = static_cast<std::uint8_t>((cmode & 1U) == 0U ? 8U : 16U);
+        const auto ones = (std::uint64_t{1} << shift) - 1U;
+        return replicate_movi_element((static_cast<std::uint64_t>(imm8) << shift) | ones, 32U);
+    }
     if ((cmode & 0x9U) == 0x8U)
     {
         const auto shift = static_cast<std::uint8_t>(((cmode >> 1U) & 1U) * 8U);
@@ -357,12 +363,6 @@ namespace
     {
         const auto shift = static_cast<std::uint8_t>(((cmode >> 1U) & 0x3U) * 8U);
         return replicate_movi_element(static_cast<std::uint64_t>(imm8) << shift, 32U);
-    }
-    if ((cmode & 0xeU) == 0xcU)
-    {
-        const auto shift = static_cast<std::uint8_t>((cmode & 1U) == 0U ? 8U : 16U);
-        const auto ones = (std::uint64_t{1} << shift) - 1U;
-        return replicate_movi_element((static_cast<std::uint64_t>(imm8) << shift) | ones, 32U);
     }
     return std::nullopt;
 }

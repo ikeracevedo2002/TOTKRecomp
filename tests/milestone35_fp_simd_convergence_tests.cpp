@@ -264,6 +264,27 @@ TEST_CASE("M35 MOVI vector immediate lifts and verifies")
     REQUIRE(lifter::is_instruction_liftable(decoded.value()));
 }
 
+TEST_CASE("M35 MOVI MSL immediates use the architectural 32-bit expansion")
+{
+    constexpr std::uint32_t msl8 = 0x4f00c640U; // movi v0.4s, #0x12, msl #8
+    constexpr std::uint32_t msl16 = 0x4f00d640U; // movi v0.4s, #0x12, msl #16
+    const auto decoder = aarch64::AArch64Decoder::create();
+    REQUIRE(decoder);
+    const auto first = decoder.value()->decode(code_address, msl8);
+    const auto second = decoder.value()->decode(code_address, msl16);
+    REQUIRE(first);
+    REQUIRE(second);
+    REQUIRE(first.value().operands[1].immediate == static_cast<std::int64_t>(0x000012ff000012ffULL));
+    REQUIRE(second.value().operands[1].immediate == static_cast<std::int64_t>(0x0012ffff0012ffffULL));
+
+    auto program = lift_program({msl8, ret});
+    REQUIRE(program);
+    runtime::CpuState cpu;
+    REQUIRE(execute_program(program.value(), cpu));
+    REQUIRE(cpu.vreg[0] == (runtime::Vector128{0x000012ff000012ffULL,
+                                               0x000012ff000012ffULL}));
+}
+
 TEST_CASE("M35 measured ST1 lane normalizes architectural arrangement")
 {
     const auto decoder = aarch64::AArch64Decoder::create();

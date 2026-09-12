@@ -139,7 +139,7 @@ conditional, or game-specific semantic branch was introduced.
 ## Synthetic validation
 
 `tests/milestone35_fp_simd_convergence_tests.cpp` is registered in the normal
-test target. The focused M35 filter currently contains 16 tests and covers:
+test target. The focused M35 filter currently contains 17 tests and covers:
 
 - measured FMOV typed decode and ordinary fallthrough;
 - measured FMOV liftability and IR verification;
@@ -149,6 +149,7 @@ test target. The focused M35 filter currently contains 16 tests and covers:
 - malformed `VectorBroadcast` verifier rejection;
 - measured MOVI `.2D` normalization, liftability, exact zero state, and a
   nonzero repeated-byte immediate;
+- exact MOVI MSL `#8`/`#16` 32-bit modified-immediate expansion;
 - measured ST1 typed lane normalization and liftability;
 - exact selected S-lane store through checked memory with V/GPR/status-state
   preservation;
