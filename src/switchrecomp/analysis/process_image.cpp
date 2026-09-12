@@ -1233,17 +1233,55 @@ Result<ProcessFunctionMap> ProcessFunctionMap::replace_module(
             ErrorCode::InvalidArgument,
             "incremental process map replacement must be a frozen map for the requested module"));
     }
+
+    const auto found = std::find_if(
+        existing.maps_.begin(), existing.maps_.end(), [module](const auto& item) {
+            return item != nullptr && item->identity().module == module;
+        });
+    if (found != existing.maps_.end() && existing.address_ranges_ != nullptr)
+    {
+        const auto map_index = static_cast<std::size_t>(found - existing.maps_.begin());
+        // Replacing an existing module preserves its sorted position. If its
+        // executable layout is unchanged, the interval index remains valid
+        // and can be shared by the new immutable process map.
+        if ((*found)->identity().executable_ranges == replacement.identity().executable_ranges)
+        {
+            const auto replacement_ptr =
+                std::make_shared<const FinalizedFunctionMap>(std::move(replacement));
+            for (const auto& function : replacement_ptr->functions())
+            {
+                const auto* previous_owner = existing.find(function.canonical_entry);
+                if (previous_owner == nullptr) continue;
+                const auto* previous_map = existing.map_for(function.canonical_entry);
+                if (previous_map == nullptr || previous_map->identity().module != module)
+                {
+                    return Result<ProcessFunctionMap>::failure(make_error(
+                        ErrorCode::FunctionBoundaryConflict,
+                        "two process modules claim the same canonical function entry"));
+                }
+            }
+
+            ProcessFunctionMap result;
+            result.maps_ = existing.maps_;
+            result.maps_[map_index] = replacement_ptr;
+            result.address_ranges_ = existing.address_ranges_;
+            return Result<ProcessFunctionMap>::success(std::move(result));
+        }
+    }
+
+    // A new module or a changed executable layout needs a complete index
+    // construction. This is uncommon during refinement but remains the safe
+    // general path for callers using replace_module directly.
     MapStorage storage = existing.maps_;
-    const auto found = std::find_if(storage.begin(), storage.end(), [module](const auto& item) {
-        return item != nullptr && item->identity().module == module;
-    });
-    if (found == storage.end())
+    if (found == existing.maps_.end())
     {
         storage.push_back(std::make_shared<const FinalizedFunctionMap>(std::move(replacement)));
     }
     else
     {
-        *found = std::make_shared<const FinalizedFunctionMap>(std::move(replacement));
+        const auto map_index = static_cast<std::size_t>(found - existing.maps_.begin());
+        storage[map_index] =
+            std::make_shared<const FinalizedFunctionMap>(std::move(replacement));
     }
     std::sort(storage.begin(), storage.end(), [](const auto& left, const auto& right) {
         return left->identity().module < right->identity().module;
@@ -1272,11 +1310,15 @@ Result<ProcessFunctionMap> ProcessFunctionMap::from_storage(MapStorage maps)
                 "process function maps contain a duplicate logical module identity"));
         }
     }
+
+    auto address_ranges = std::make_shared<AddressRangeIndex>();
+    std::map<GuestAddress, std::size_t> canonical_entries;
     for (std::size_t map_index = 0U; map_index < result.maps_.size(); ++map_index)
     {
-        for (const auto& function : result.maps_[map_index]->functions())
+        const auto& map = result.maps_[map_index];
+        for (const auto& function : map->functions())
         {
-            const auto inserted = result.entries_.emplace(function.canonical_entry, map_index);
+            const auto inserted = canonical_entries.emplace(function.canonical_entry, map_index);
             if (!inserted.second)
             {
                 return Result<ProcessFunctionMap>::failure(make_error(
@@ -1284,26 +1326,71 @@ Result<ProcessFunctionMap> ProcessFunctionMap::from_storage(MapStorage maps)
                     "two process modules claim the same canonical function entry"));
             }
         }
+        for (const auto& range : map->identity().executable_ranges)
+        {
+            if (range.size == 0U) continue;
+            const auto end = checked_add_u64(range.base, range.size);
+            if (!end)
+            {
+                return Result<ProcessFunctionMap>::failure(make_error(
+                    ErrorCode::ArithmeticOverflow,
+                    "process function-map executable range overflows"));
+            }
+            address_ranges->push_back(
+                ProcessFunctionMap::AddressRangeIndexEntry{range.base, end.value(), 0U, map_index});
+        }
     }
+    std::sort(address_ranges->begin(), address_ranges->end(),
+              [](const auto& left, const auto& right) {
+                  if (left.base != right.base) return left.base < right.base;
+                  if (left.end != right.end) return left.end < right.end;
+                  return left.map_index < right.map_index;
+              });
+    GuestAddress maximum_end = 0U;
+    for (auto& range : *address_ranges)
+    {
+        maximum_end = std::max(maximum_end, range.end);
+        range.maximum_end = maximum_end;
+    }
+    result.address_ranges_ = std::move(address_ranges);
     return Result<ProcessFunctionMap>::success(std::move(result));
+}
+
+std::optional<std::size_t> ProcessFunctionMap::find_map_index(GuestAddress entry) const noexcept
+{
+    if (address_ranges_ == nullptr || address_ranges_->empty()) return std::nullopt;
+    const auto& ranges = *address_ranges_;
+    auto current = std::upper_bound(
+        ranges.begin(), ranges.end(), entry,
+        [](GuestAddress value, const AddressRangeIndexEntry& range) {
+            return value < range.base;
+        });
+    while (current != ranges.begin())
+    {
+        --current;
+        if (entry < current->end && current->map_index < maps_.size())
+        {
+            const auto& map = maps_[current->map_index];
+            if (map != nullptr && map->find_canonical_entry(entry) != nullptr)
+                return current->map_index;
+        }
+        const auto current_index = static_cast<std::size_t>(current - ranges.begin());
+        if (current_index == 0U || ranges[current_index - 1U].maximum_end <= entry) break;
+    }
+    return std::nullopt;
 }
 
 const FunctionRecord* ProcessFunctionMap::find(GuestAddress entry) const noexcept
 {
-    const auto found = entries_.find(entry);
-    if (found == entries_.end()) return nullptr;
-    const auto& functions = maps_[found->second]->functions();
-    const auto item = std::lower_bound(functions.begin(), functions.end(), entry,
-                                       [](const auto& function, GuestAddress value) {
-                                           return function.canonical_entry < value;
-                                       });
-    return item != functions.end() && item->canonical_entry == entry ? &*item : nullptr;
+    const auto map_index = find_map_index(entry);
+    if (!map_index) return nullptr;
+    return maps_[map_index.value()]->find_canonical_entry(entry);
 }
 
 const FinalizedFunctionMap* ProcessFunctionMap::map_for(GuestAddress entry) const noexcept
 {
-    const auto found = entries_.find(entry);
-    return found == entries_.end() ? nullptr : maps_[found->second].get();
+    const auto map_index = find_map_index(entry);
+    return map_index ? maps_[map_index.value()].get() : nullptr;
 }
 
 } // namespace switchrecomp::analysis

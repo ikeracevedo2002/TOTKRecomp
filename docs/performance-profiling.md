@@ -15,8 +15,11 @@ enabled. Refinement publishes immutable process maps by sharing unchanged
 module records and rebuilding only touched modules. The rebuilt module passes
 the previous frozen map to `FunctionMapBuilder`, which retains decoded/finalized
 records until a newly introduced callable boundary invalidates their ownership
-or boundary dependency. The publication coordinator still reconstructs the
-process entry index; that is the remaining map-level reconstruction cost.
+or boundary dependency. `ProcessFunctionMap::replace_module` shares its
+immutable executable-range index when the replaced module keeps the same
+layout; only a new module or changed layout takes the complete index-building
+path. This keeps publication work proportional to the touched module and
+preserves exact canonical-entry collision checks.
 
 The refinement driver first assesses the currently pending candidates against
 one map generation. Structurally independent candidates are grouped by target
