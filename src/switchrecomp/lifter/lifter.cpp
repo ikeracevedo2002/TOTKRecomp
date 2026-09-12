@@ -2098,13 +2098,37 @@ class FunctionLifter
         {
             const auto old = read_register(instruction.operands[0].reg, instruction);
             const auto inverse_write = unary(ir::Opcode::Not, write_mask_value.value(), type, instruction);
+            const auto inverse_test = unary(ir::Opcode::Not, test_mask_value.value(), type, instruction);
             if (!old || !inverse_write)
             {
                 return Result<void>::failure(!old ? old.error() : inverse_write.error());
             }
+            if (!inverse_test)
+            {
+                return Result<void>::failure(inverse_test.error());
+            }
             const auto preserved = binary(ir::Opcode::And, old.value(), inverse_write.value(), type, instruction);
-            result = preserved ? binary(ir::Opcode::Or, preserved.value(), inserted.value(), type, instruction)
-                               : Result<ir::ValueId>::failure(preserved.error());
+            if (!preserved)
+            {
+                return Result<void>::failure(preserved.error());
+            }
+            const auto combined = binary(ir::Opcode::Or, preserved.value(), inserted.value(), type,
+                                         instruction);
+            if (!combined)
+            {
+                return Result<void>::failure(combined.error());
+            }
+            const auto within_test = binary(ir::Opcode::And, combined.value(), test_mask_value.value(),
+                                            type, instruction);
+            const auto preserved_outside_test = binary(ir::Opcode::And, old.value(),
+                                                       inverse_test.value(), type, instruction);
+            if (!within_test || !preserved_outside_test)
+            {
+                return Result<void>::failure(!within_test ? within_test.error()
+                                                          : preserved_outside_test.error());
+            }
+            result = binary(ir::Opcode::Or, within_test.value(), preserved_outside_test.value(),
+                            type, instruction);
         }
         return result ? write_register(instruction.operands[0].reg, result.value(), instruction)
                       : Result<void>::failure(result.error());

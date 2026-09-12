@@ -1,4 +1,5 @@
 #include "switchrecomp/aarch64/decoder.hpp"
+#include "switchrecomp/analysis/indirect_target.hpp"
 #ifdef TOTKRECOMP_HAS_LLVM
 #include "switchrecomp/codegen/llvm_backend.hpp"
 #endif
@@ -12,6 +13,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -115,10 +117,65 @@ struct LiftedProgram
         const auto top = ((source >> imms) & 1U) != 0U ? full : 0U;
         return (top & ~test_mask) | (inserted & test_mask);
     }
-    return (destination & ~write_mask) | inserted;
+    const auto combined = (destination & ~write_mask) | inserted;
+    return (combined & test_mask) | (destination & ~test_mask);
 }
 
 } // namespace
+
+TEST_CASE("M36 refinement batches publish deterministically and count avoided rebuilds")
+{
+    const auto make_observation = [](memory::GuestAddress target) {
+        analysis::ObservedIndirectTarget observed;
+        observed.source_module = "m36";
+        observed.source_function = 0x1000U;
+        observed.source_pc = 0x1004U;
+        observed.control_flow = analysis::IndirectControlFlowKind::Call;
+        observed.target_register = "x8";
+        observed.target = target;
+        observed.target_module = "m36";
+        return observed;
+    };
+    const auto make_assessment = [&](memory::GuestAddress target) {
+        analysis::IndirectTargetAssessment assessment;
+        assessment.observed = make_observation(target);
+        assessment.validation.target_module = "m36";
+        assessment.validation.structurally_eligible = true;
+        assessment.decision.kind = analysis::IndirectTargetDecisionKind::TrustedNewEntry;
+        assessment.decision.eligible_for_promotion = true;
+        return assessment;
+    };
+    const auto first = make_assessment(0x2000U);
+    const auto second = make_assessment(0x3000U);
+    analysis::IndirectTargetRefinementWorklist worklist;
+    REQUIRE(worklist.begin_round());
+    REQUIRE(worklist.observe(first).newly_unique_candidate);
+    REQUIRE(worklist.observe(second).newly_unique_candidate);
+    const auto first_id = analysis::indirect_target_candidate_identity(first.observed);
+    const auto second_id = analysis::indirect_target_candidate_identity(second.observed);
+    REQUIRE(worklist.begin_candidate_assessment(first_id));
+    REQUIRE(worklist.begin_candidate_assessment(second_id));
+    const analysis::IndirectTargetRefinementAnalysisWork work{
+        "m36", 2U, 0U, 4U, 8U, 2U, 2U, 32U, 1U, 0U, 1U};
+    const std::array<analysis::IndirectTargetCandidateIdentity, 2U> identities{
+        first_id, second_id};
+    REQUIRE(worklist.can_commit_batch_refinement(identities, work, 1U, 0U));
+    worklist.record_batch_promotion(identities, 1U, 0U, work, 4U, 4U, 2U, 1U, 1U, 0U);
+    worklist.end_round();
+    const auto summary = worklist.summary();
+    REQUIRE(summary.successful_promotions == 2U);
+    REQUIRE(summary.map_rebuilds == 1U);
+    REQUIRE(summary.refinement_batches == 1U);
+    REQUIRE(summary.batch_candidates == 2U);
+    REQUIRE(summary.singleton_batches == 0U);
+    REQUIRE(summary.rebuilds_avoided == 1U);
+    REQUIRE(summary.max_batch_width == 2U);
+    REQUIRE(summary.finalized_functions_reused == 4U);
+    REQUIRE(summary.cfgs_reused == 4U);
+    REQUIRE(summary.functions_rebuilt == 2U);
+    REQUIRE(summary.map_generation == 1U);
+    REQUIRE(summary.pending_candidate_count == 0U);
+}
 
 TEST_CASE("M36 measured word normalizes as register-controlled LSL")
 {
