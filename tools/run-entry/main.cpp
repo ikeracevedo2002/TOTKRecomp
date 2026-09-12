@@ -1,10 +1,12 @@
 #include "switchrecomp/execution/session.hpp"
+#include "switchrecomp/analysis/indirect_target.hpp"
 #include "switchrecomp/analysis/module_set.hpp"
 #include "switchrecomp/analysis/process_image.hpp"
 #include "switchrecomp/target/manifest.hpp"
 #include "switchrecomp/version.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <charconv>
 #include <cstddef>
@@ -16,11 +18,14 @@
 #include <limits>
 #include <map>
 #include <nlohmann/json.hpp>
+#include <new>
 #include <optional>
 #include <set>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -127,6 +132,7 @@ void help(std::ostream& output)
               "  --entry KIND                   dt-init, dt-fini, text-start, process.\n"
               "  --entry-address ADDR           Unverified analyst address.\n"
               "  --analysis-focus-symbol NAME  Analyze only the bounded startup/provider closure for NAME.\n"
+              "  --analysis-workers N          Bounded independent refinement-analysis workers.\n"
               "  --backend interpreter           M11 reference backend.\n"
               "  --stack-size N                 Synthetic guest stack size.\n"
               "  --report PATH                  Write deterministic JSON report.\n"
@@ -273,6 +279,94 @@ refinement_analysis_dimension_for_option(std::string_view argument)
     return std::nullopt;
 }
 
+[[nodiscard]] std::size_t default_analysis_workers() noexcept
+{
+    const auto hardware = std::thread::hardware_concurrency();
+    if (hardware == 0U) return 1U;
+    return std::min<std::size_t>(4U, hardware);
+}
+
+[[nodiscard]] std::vector<Result<analysis::IndirectTargetAssessment>> assess_candidates_parallel(
+    std::span<const analysis::ObservedIndirectTarget> candidates,
+    const analysis::ProcessFunctionMap& process_map,
+    const analysis::ProcessImage& process_image,
+    const analysis::IndirectTargetDiscoveryOptions& options,
+    std::size_t requested_workers)
+{
+    std::vector<Result<analysis::IndirectTargetAssessment>> results;
+    results.reserve(candidates.size());
+    if (requested_workers <= 1U || candidates.size() <= 1U)
+    {
+        for (const auto& candidate : candidates)
+            results.push_back(analysis::assess_indirect_target(
+                candidate, process_image.memory(), nullptr, &process_map,
+                &process_image, options));
+        return results;
+    }
+
+    std::vector<std::optional<Result<analysis::IndirectTargetAssessment>>> worker_results(
+        candidates.size());
+    const auto worker_count = std::min(requested_workers, candidates.size());
+    std::atomic<std::size_t> next{0U};
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+    for (std::size_t worker = 0U; worker < worker_count; ++worker)
+    {
+        workers.emplace_back([&]() {
+            for (;;)
+            {
+                const auto index = next.fetch_add(1U, std::memory_order_relaxed);
+                if (index >= candidates.size()) return;
+                try
+                {
+                    worker_results[index] = analysis::assess_indirect_target(
+                        candidates[index], process_image.memory(), nullptr, &process_map,
+                        &process_image, options);
+                }
+                catch (const std::bad_alloc&)
+                {
+                    worker_results[index] = Result<analysis::IndirectTargetAssessment>::failure(
+                        make_error(ErrorCode::ResourceLimit,
+                                   "parallel indirect-target assessment allocation failed"));
+                }
+            }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    for (auto& result : worker_results)
+        results.push_back(std::move(result.value()));
+    return results;
+}
+
+[[nodiscard]] bool ranges_overlap(
+    const std::vector<analysis::GuestAddressRange>& left,
+    const std::vector<analysis::GuestAddressRange>& right) noexcept
+{
+    const auto end = [](const analysis::GuestAddressRange& range) noexcept {
+        return range.size > std::numeric_limits<memory::GuestAddress>::max() - range.base
+                   ? std::numeric_limits<memory::GuestAddress>::max()
+                   : range.base + range.size;
+    };
+    for (const auto& left_range : left)
+    {
+        for (const auto& right_range : right)
+        {
+            if (left_range.base < end(right_range) && right_range.base < end(left_range))
+                return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool independent_candidates(
+    const analysis::IndirectTargetAssessment& left,
+    const analysis::IndirectTargetAssessment& right) noexcept
+{
+    return left.observed.target_module != right.observed.target_module ||
+           !ranges_overlap(left.validation.candidate_owned_code_ranges,
+                           right.validation.candidate_owned_code_ranges);
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -307,6 +401,7 @@ int main(int argc, char** argv)
     std::map<std::string, std::uint64_t> configured_bases;
     std::string configured_primary = "main";
     std::string analysis_focus_symbol;
+    std::size_t analysis_workers = default_analysis_workers();
     bool provider_search_complete = false;
     analysis::ModuleSetCompleteness module_set_completeness =
         analysis::ModuleSetCompleteness::Incomplete;
@@ -604,7 +699,8 @@ int main(int argc, char** argv)
                 return true;
             }
             destination = static_cast<T>(parsed);
-            if (refinement_analysis_dimension_for_option(argument) && parsed == 0U)
+            if ((refinement_analysis_dimension_for_option(argument) ||
+                 argument == "--analysis-workers") && parsed == 0U)
                 invalid_number = true;
             return true;
         };
@@ -616,6 +712,7 @@ int main(int argc, char** argv)
             parse_number("--analysis-max-bytes", function_options.budgets.max_bytes_analyzed) ||
             parse_number("--analysis-max-boundary-passes",
                          function_options.budgets.max_boundary_finalization_passes) ||
+            parse_number("--analysis-workers", analysis_workers) ||
             parse_number("--refinement-max-stagnant-rounds",
                          refinement_budgets.max_stagnant_rounds) ||
             parse_number("--refinement-max-rounds", refinement_budgets.max_stagnant_rounds) ||
@@ -1420,6 +1517,8 @@ int main(int argc, char** argv)
         discovery_options.cfg = function_options.cfg;
         analysis::IndirectTargetRefinementWorklist worklist(refinement_budgets);
         const auto refinement_start = std::chrono::steady_clock::now();
+        std::int64_t assessment_elapsed_us = 0;
+        std::int64_t refinement_publication_elapsed_us = 0;
         std::vector<analysis::IndirectTargetAssessment> promoted_targets;
         std::optional<execution::ExecutionSessionResult> last_run_result;
         execution::ExecutionSessionResult final_result;
@@ -1467,43 +1566,163 @@ int main(int argc, char** argv)
                 }
             }
             bool refined = false;
-            for (const auto& candidate : worklist.pending_candidates())
+            const auto pending = worklist.pending_candidates();
+            std::vector<analysis::ObservedIndirectTarget> assessment_candidates;
+            assessment_candidates.reserve(pending.size());
+            for (const auto& candidate : pending)
             {
                 const auto identity = analysis::indirect_target_candidate_identity(candidate);
                 if (!worklist.begin_candidate_assessment(identity) || !worklist.can_promote()) break;
-                const auto map_generation_before = worklist.summary().map_generation;
-                auto expansion = analysis::refine_process_function_map(
-                    process_map, process.value(), candidate, discovery_options);
-                if (!expansion)
+                assessment_candidates.push_back(candidate);
+            }
+            const auto assessment_start = std::chrono::steady_clock::now();
+            auto assessed = assess_candidates_parallel(
+                assessment_candidates, process_map, process.value(), discovery_options,
+                analysis_workers);
+            assessment_elapsed_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - assessment_start).count();
+            std::vector<analysis::IndirectTargetAssessment> assessments;
+            assessments.reserve(assessed.size());
+            for (auto& candidate : assessed)
+            {
+                if (!candidate)
                 {
-                    print_error(expansion.error());
+                    print_error(candidate.error());
                     return static_cast<int>(ExitCode::InfrastructureFailure);
                 }
-                if (!expansion.value().assessment.decision.promoted)
+                assessments.push_back(std::move(candidate).value());
+            }
+            std::vector<std::size_t> selected_indices;
+            for (std::size_t index = 0U; index < assessments.size(); ++index)
+            {
+                auto& assessment = assessments[index];
+                const auto identity = analysis::indirect_target_candidate_identity(
+                    assessment.observed);
+                if (!assessment.decision.eligible_for_promotion ||
+                    assessment.decision.kind != analysis::IndirectTargetDecisionKind::TrustedNewEntry)
                 {
-                    if (expansion.value().assessment.validation.analysis_error)
+                    if (assessment.validation.analysis_error)
                         worklist.record_failed_refinement(identity);
                     else
                         worklist.record_terminal_candidate(identity);
                     continue;
                 }
-                if (!worklist.can_commit_refinement(
-                        identity, expansion.value().analysis_work,
-                        expansion.value().module_maps_rebuilt,
-                        expansion.value().module_maps_reused))
+                bool independent = true;
+                for (const auto selected_index : selected_indices)
                 {
-                    worklist.record_rollback_assessment(identity);
-                    break;
+                    if (!independent_candidates(assessment, assessments[selected_index]))
+                    {
+                        independent = false;
+                        break;
+                    }
                 }
-                process_map = std::move(expansion.value().map);
-                expansion.value().assessment.map_generation_before = map_generation_before;
-                expansion.value().assessment.map_generation_after = map_generation_before + 1U;
-                promoted_targets.push_back(std::move(expansion.value().assessment));
-                worklist.record_promotion(identity, expansion.value().module_maps_rebuilt,
-                                           expansion.value().module_maps_reused,
-                                           expansion.value().analysis_work);
-                refined = true;
-                break;
+                if (independent) selected_indices.push_back(index);
+            }
+            if (!selected_indices.empty())
+            {
+                const auto map_generation_before = worklist.summary().map_generation;
+                std::vector<analysis::IndirectTargetAssessment> batch;
+                batch.reserve(selected_indices.size());
+                for (const auto index : selected_indices)
+                    batch.push_back(std::move(assessments[index]));
+                const auto publication_start = std::chrono::steady_clock::now();
+                auto expansion = analysis::refine_process_function_map_batch(
+                    process_map, process.value(), batch, discovery_options);
+                refinement_publication_elapsed_us +=
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - publication_start).count();
+                if (!expansion)
+                {
+                    print_error(expansion.error());
+                    return static_cast<int>(ExitCode::InfrastructureFailure);
+                }
+                std::vector<analysis::IndirectTargetAssessment> fallback_failures;
+                if (!expansion.value().all_promoted && batch.size() > 1U)
+                {
+                    // A combined analysis is an optimization, never a new
+                    // source of semantic failure. Retry each selected
+                    // candidate in stable order against the unchanged map
+                    // until one publishes successfully. If every singleton
+                    // fails, all attempted candidates are terminalized below
+                    // so a failed optimization cannot strand the round with
+                    // hidden same-generation work.
+                    for (const auto& candidate : batch)
+                    {
+                        std::vector<analysis::IndirectTargetAssessment> singleton;
+                        singleton.push_back(candidate);
+                        const auto retry_start = std::chrono::steady_clock::now();
+                        expansion = analysis::refine_process_function_map_batch(
+                            process_map, process.value(), singleton, discovery_options);
+                        refinement_publication_elapsed_us +=
+                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - retry_start).count();
+                        if (!expansion)
+                        {
+                            print_error(expansion.error());
+                            return static_cast<int>(ExitCode::InfrastructureFailure);
+                        }
+                        if (expansion.value().all_promoted) break;
+                        fallback_failures.push_back(
+                            std::move(expansion.value().assessments.front()));
+                    }
+                }
+                if (!expansion)
+                {
+                    print_error(expansion.error());
+                    return static_cast<int>(ExitCode::InfrastructureFailure);
+                }
+                if (!expansion.value().all_promoted)
+                {
+                    const auto& failed_assessments = fallback_failures.empty()
+                                                         ? expansion.value().assessments
+                                                         : fallback_failures;
+                    for (const auto& assessment : failed_assessments)
+                    {
+                        const auto identity = analysis::indirect_target_candidate_identity(
+                            assessment.observed);
+                        if (assessment.validation.analysis_error)
+                            worklist.record_failed_refinement(identity);
+                        else
+                            worklist.record_terminal_candidate(identity);
+                    }
+                }
+                else
+                {
+                    std::vector<analysis::IndirectTargetCandidateIdentity> identities;
+                    identities.reserve(expansion.value().assessments.size());
+                    for (const auto& assessment : expansion.value().assessments)
+                        identities.push_back(analysis::indirect_target_candidate_identity(
+                            assessment.observed));
+                    if (!worklist.can_commit_batch_refinement(
+                            identities, expansion.value().analysis_work,
+                            expansion.value().module_maps_rebuilt,
+                            expansion.value().module_maps_reused))
+                    {
+                        for (const auto& identity : identities)
+                            worklist.record_rollback_assessment(identity);
+                    }
+                    else
+                    {
+                        process_map = std::move(expansion.value().map);
+                        for (auto& assessment : expansion.value().assessments)
+                        {
+                            assessment.map_generation_before = map_generation_before;
+                            assessment.map_generation_after = map_generation_before + 1U;
+                            promoted_targets.push_back(std::move(assessment));
+                        }
+                        worklist.record_batch_promotion(
+                            identities, expansion.value().module_maps_rebuilt,
+                            expansion.value().module_maps_reused,
+                            expansion.value().analysis_work,
+                            expansion.value().finalized_functions_reused,
+                            expansion.value().cfgs_reused,
+                            expansion.value().functions_rebuilt,
+                            expansion.value().modules_touched,
+                            expansion.value().incremental_updates,
+                            expansion.value().full_rebuilds);
+                        refined = true;
+                    }
+                }
             }
             worklist.end_round();
             if (refined)
@@ -1563,7 +1782,27 @@ int main(int argc, char** argv)
                       << " rebuilds=" << refinement.map_rebuilds
                       << " functions_analyzed=" << refinement.analysis.functions_analyzed
                       << " functions_reanalyzed=" << refinement.analysis.functions_reanalyzed
-                      << " candidate_assessments=" << refinement.candidate_assessments << "\n";
+                      << " candidate_assessments=" << refinement.candidate_assessments
+                      << " assessment_elapsed_us=" << assessment_elapsed_us
+                      << " publication_elapsed_us=" << refinement_publication_elapsed_us
+                      << " worker_count=" << analysis_workers
+                      << " batch_count=" << refinement.refinement_batches
+                      << " batch_candidates=" << refinement.batch_candidates
+                      << " singleton_batches=" << refinement.singleton_batches
+                      << " rebuilds_avoided=" << refinement.rebuilds_avoided
+                      << " average_batch_width="
+                      << (refinement.refinement_batches == 0U
+                              ? 0.0
+                              : static_cast<double>(refinement.batch_candidates) /
+                                    static_cast<double>(refinement.refinement_batches))
+                      << " max_batch_width=" << refinement.max_batch_width
+                      << " finalized_functions_reused="
+                      << refinement.finalized_functions_reused
+                      << " cfgs_reused=" << refinement.cfgs_reused
+                      << " functions_rebuilt=" << refinement.functions_rebuilt
+                      << " modules_touched=" << refinement.modules_touched
+                      << " incremental_updates=" << refinement.incremental_updates
+                      << " full_rebuilds=" << refinement.full_rebuilds << "\n";
         }
         // Every loop-local ExecutionSession has now been destroyed, including
         // the terminal or failed generation. Capture post-lifetime accounting
