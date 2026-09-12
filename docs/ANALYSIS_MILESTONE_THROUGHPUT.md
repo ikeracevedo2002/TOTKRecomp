@@ -15,7 +15,8 @@ The project has produced a large, rigorously validated codebase in a very short
 calendar window (36+ milestones in about 8 days), but the *measured guest
 execution frontier* advances far slower than the process volume suggests. The
 last reproducible real frontier recorded before the input-set drift was about
-`18,897` guest instructions (M34), and M36 could not reproduce it at all.
+`31,366` guest instructions (M35); M36 could not reproduce it at all and
+stopped at `63` instructions.
 
 The five dominant losses, in order of impact:
 
@@ -23,7 +24,9 @@ The five dominant losses, in order of impact:
    real run, refinement consumed `1191.78 s` of roughly `1221 s` total
    (~97.6%). Guest execution is a rounding error. Every real measurement
    milestone therefore inherits a ~20-minute wall time, doubled for the
-   required byte-identical A/B determinism run.
+   required byte-identical A/B determinism run. Two consecutive milestones
+   (M35 and M36) each carried a "performance pass", which muddies the
+   before/after baseline.
 2. **The private real input set is not stable across milestones.** M36 documents
    that the available local recovery configuration no longer reproduces the M35
    frontier and stops earlier at an unresolved `__nnmusl_init_dso` provider
@@ -116,9 +119,10 @@ duplicate in M34).
 | M26 | 3,832 → 6,186 | Refinement scaling milestones |
 | M32/M33 | — | Crossed an indirect-target refinement frontier |
 | M34 | 18,897 | Stop at single `fmov v1.2s, #imm` instruction |
-| M36 | 63 | Input drift; frontier not reproduced |
+| M35 | 31,366 | Crossed the FP/SIMD frontier (+12,469 instructions); stop at a scalar shift form; real run 1221.28 s |
+| M36 | 63 | Input drift; frontier not reproduced. Shift/bitfield semantics proven only on synthetic fixtures |
 
-Broad strokes: M22 → M34 moved the frontier from 390 to 18,897 instructions
+Broad strokes: M22 → M35 moved the frontier from 390 to 31,366 instructions
 over roughly a dozen milestones. That is real progress, but it is still an
 extremely small fraction of a shipping title's instruction count, and the last
 milestone could not reproduce it.
@@ -146,6 +150,17 @@ set changed provenance and stops earlier. Consequences:
 - Reviewers cannot reproduce the frontier without the same private files.
 - Whole milestones get consumed re-establishing the input (M23 and M36 are both
   examples of "ran, could not reach the frontier").
+
+M36 is a concrete case study. Its headline objective was to cut the ~97.6%
+refinement cost via batching, incremental publication, and parallel assessment.
+The agent implemented all of it, got the remote CI matrix green, and produced
+byte-identical A/B reports — but the only available input stopped at `63` guest
+instructions before any refinement ran. The result is `0` real batches, `0`
+reuse events, and no measurable speedup; the batch design is demonstrated only
+by a synthetic two-candidate fixture. The milestone also reported the Pi
+verifier timing out after ~18 minutes in a silent HTTPS wait, so the required
+independent review did not happen and was recorded as "unavailable". A correct
+measurement contract, enforced before implementation, would have caught both.
 
 ### 3.3 One-blocker-at-a-time semantic convergence
 
@@ -278,7 +293,7 @@ batch width, reuse counts. Track it per milestone so regressions are obvious.
 | Real-run wall time | ~1221 s (M35) | < 600 s |
 | Refinement share of wall time | ~97.6% | < 80% |
 | Rebuilds per productive round | 1.0 (M35) | < 0.2 (batch) |
-| Guest instructions to frontier | 18,897 (M34) | monotonic; ≥ 100k |
+| Guest instructions to frontier | 31,366 (M35) | monotonic; ≥ 100k |
 | Milestones per capability outcome | ~1.8 | ≤ 1.0 |
 | Docs lines per milestone | ~250 avg | ≤ 80 |
 | Redundant CI runs (same SHA >2) | 12 | 0 |
@@ -309,7 +324,9 @@ Caveats:
 
 - Wall-clock figures are self-reported in milestone documents; CI run durations
   combine all five jobs and therefore overstate the critical path per job.
-- The M36 input-set drift means the most recent real-frontier number (18,897)
-  is from M34, not M36.
+- The M36 input-set drift means the most recent real-frontier number is
+  `31,366` (M35), not the `63`-instruction result from M36.
+- The M35 profile already contains a performance pass, so the "M35 baseline"
+  used by M36 is not a pristine pre-optimization measurement.
 - This analysis deliberately does not evaluate semantic correctness; the
   existing suite and review process remain authoritative.
