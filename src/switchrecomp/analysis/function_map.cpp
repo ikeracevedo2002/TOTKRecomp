@@ -1201,20 +1201,21 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
         const auto* value = std::getenv("SWITCHRECOMP_PROFILE");
         return value != nullptr && value[0] != '\0' && value[0] != '0';
     };
+    const bool profiling = profile_enabled();
     struct ProfileExit
     {
-        decltype(profile_enabled)& enabled;
+        bool enabled;
         const std::chrono::steady_clock::time_point& start;
         const ModuleAnalysisInput& input;
         ~ProfileExit() noexcept
         {
-            if (!enabled()) return;
+            if (!enabled) return;
             const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - start).count();
-            std::cerr << "[switchrecomp profile] function_map.build module="
-                      << input.identity.module << " " << elapsed << " us\n";
+            std::cerr << "[switchrecomp profile] phase=function_map_build module="
+                      << input.identity.module << " elapsed_us=" << elapsed << "\n";
         }
-    } profile_exit{profile_enabled, profile_start, input};
+    } profile_exit{profiling, profile_start, input};
     const auto valid_input = validate_input(input, options);
     if (!valid_input)
     {
@@ -1928,6 +1929,13 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
     if (!valid)
     {
         return Result<FinalizedFunctionMap>::failure(valid.error());
+    }
+    if (profiling)
+    {
+        std::cerr << "[switchrecomp profile] map_build module=" << input.identity.module
+                  << " map_builds=1 functions_analyzed=" << result.accounting_.functions_cfg_analyzed
+                  << " functions_lifted=0 candidate_assessments=0 refinement_transactions="
+                  << result.accounting_.refinement_transactions << "\n";
     }
     return Result<FinalizedFunctionMap>::success(std::move(result));
 }

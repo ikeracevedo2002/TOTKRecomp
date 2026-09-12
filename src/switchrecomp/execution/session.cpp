@@ -43,19 +43,28 @@ using json = nlohmann::json;
 class ProfileTimer
 {
   public:
-    explicit ProfileTimer(const char* name) : name_(name), start_(std::chrono::steady_clock::now()) {}
+    explicit ProfileTimer(const char* name)
+        : name_(name), enabled_(profiling_enabled()),
+          start_(enabled_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
     ~ProfileTimer() noexcept
     {
-        if (!profiling_enabled()) return;
+        if (!enabled_) return;
         const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - start_).count();
-        std::cerr << "[switchrecomp profile] " << name_ << " " << elapsed << " us\n";
+        std::cerr << "[switchrecomp profile] phase=" << name_ << " elapsed_us=" << elapsed << "\n";
     }
 
   private:
     const char* name_;
+    bool enabled_;
     std::chrono::steady_clock::time_point start_;
 };
+
+void profile_counter(const char* name, std::size_t value) noexcept
+{
+    if (profiling_enabled())
+        std::cerr << "[switchrecomp profile] counter=" << name << " value=" << value << "\n";
+}
 
 [[nodiscard]] std::uint64_t cfg_identity(const analysis::ControlFlowGraph& cfg) noexcept
 {
@@ -2653,7 +2662,20 @@ Result<void> ExecutionSession::classify_target(const runtime::ExecutionResult& b
     if (payload.has_provenance_address) observed.guest_load_address = payload.provenance_address;
     const auto assessment = analysis::assess_indirect_target(
         observed, *memory_, function_map_, process_function_map_, process_image_);
-    if (assessment) result.indirect_target_discovery.push_back(assessment.value());
+    if (assessment)
+    {
+        result.indirect_target_discovery.push_back(assessment.value());
+        if (profiling_enabled())
+            std::cerr << "[switchrecomp profile] target_classification decision="
+                      << analysis::indirect_target_decision_name(assessment.value().decision.kind)
+                      << " ownership="
+                      << analysis::indirect_target_ownership_name(assessment.value().validation.ownership)
+                      << " cfg="
+                      << analysis::indirect_target_cfg_status_name(assessment.value().validation.cfg_status)
+                      << "\n";
+    }
+    else
+        profile_counter("target_assessments_failed", 1U);
     const auto* record = function_record(target);
     if (process_image_ != nullptr && process_image_->module_for_address(target, 4U) == nullptr)
     {
@@ -3377,6 +3399,7 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         interpreter_options.observed_guest_pcs =
             std::span<const memory::GuestAddress>(instruction_observation_targets_);
         interpreter_options.max_observed_guest_pcs = 32U;
+        ProfileTimer interpreter_timer("execute_until_boundary");
         const auto step = interpreter::execute_until_boundary(
             *function, cpu_, runtime_, current_.interpreter, interpreter_options);
         if (!step)
@@ -3700,18 +3723,19 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     result.guest_memory = memory_->accounting();
     if (profiling_enabled())
     {
-        std::cerr << "[switchrecomp profile] execution.lift_cache hits="
-                  << result.performance.lift_cache_hits << " misses="
-                  << result.performance.lift_cache_misses << " invalidations="
-                  << result.performance.lift_cache_invalidations << " lifted="
-                  << result.performance.functions_lifted << " slices="
-                  << result.execution_slices << "\n";
+        std::cerr << "[switchrecomp profile] cache hits=" << result.performance.lift_cache_hits
+                  << " misses=" << result.performance.lift_cache_misses
+                  << " invalidations=" << result.performance.lift_cache_invalidations << "\n";
+        profile_counter("functions_lifted", result.performance.functions_lifted);
+        profile_counter("execution_slices", result.execution_slices);
+        profile_counter("target_assessments", result.indirect_target_discovery.size());
     }
     return Result<ExecutionSessionResult>::success(std::move(result));
 }
 
 std::string render_execution_report_json(const ExecutionSessionResult& result)
 {
+    ProfileTimer timer("report_generation");
     json executable_ranges = json::array();
     for (const auto& range : result.identity.executable_ranges)
     {

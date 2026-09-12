@@ -5,9 +5,11 @@
 #include "switchrecomp/version.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -275,6 +277,24 @@ refinement_analysis_dimension_for_option(std::string_view argument)
 
 int main(int argc, char** argv)
 {
+    const bool profiling = []() noexcept {
+        const auto* value = std::getenv("SWITCHRECOMP_PROFILE");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    const auto wall_start = std::chrono::steady_clock::now();
+    struct WallProfileExit
+    {
+        bool enabled;
+        std::chrono::steady_clock::time_point start;
+        ~WallProfileExit() noexcept
+        {
+            if (!enabled) return;
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            std::cerr << "[switchrecomp profile] phase=total_wall_time elapsed_us=" << elapsed
+                      << "\n";
+        }
+    } wall_profile_exit{profiling, wall_start};
     std::string module_name = "main";
     std::uint64_t module_base = 0U;
     std::string entry_name = "dt-init";
@@ -1399,6 +1419,7 @@ int main(int argc, char** argv)
         discovery_options.budgets = function_options.budgets;
         discovery_options.cfg = function_options.cfg;
         analysis::IndirectTargetRefinementWorklist worklist(refinement_budgets);
+        const auto refinement_start = std::chrono::steady_clock::now();
         std::vector<analysis::IndirectTargetAssessment> promoted_targets;
         std::optional<execution::ExecutionSessionResult> last_run_result;
         execution::ExecutionSessionResult final_result;
@@ -1528,6 +1549,21 @@ int main(int argc, char** argv)
                 }),
                 final_result.indirect_target_discovery.end());
             final_result.indirect_target_discovery.push_back(std::move(merged));
+        }
+        if (profiling)
+        {
+            const auto refinement = worklist.summary();
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - refinement_start).count();
+            std::cerr << "[switchrecomp profile] phase=refinement_total elapsed_us=" << elapsed
+                      << " rounds=" << refinement.total_execution_attempts
+                      << " productive_rounds=" << refinement.productive_rounds
+                      << " stagnant_rounds=" << refinement.stagnant_rounds
+                      << " transactions=" << refinement.analysis.transactions
+                      << " rebuilds=" << refinement.map_rebuilds
+                      << " functions_analyzed=" << refinement.analysis.functions_analyzed
+                      << " functions_reanalyzed=" << refinement.analysis.functions_reanalyzed
+                      << " candidate_assessments=" << refinement.candidate_assessments << "\n";
         }
         // Every loop-local ExecutionSession has now been destroyed, including
         // the terminal or failed generation. Capture post-lifetime accounting

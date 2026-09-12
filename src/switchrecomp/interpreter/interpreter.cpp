@@ -7,6 +7,9 @@
 #include "switchrecomp/runtime/fp.hpp"
 
 #include <cstdint>
+#include <chrono>
+#include <cstdlib>
+#include <iostream>
 #include <algorithm>
 #include <iomanip>
 #include <limits>
@@ -18,6 +21,15 @@
 
 namespace switchrecomp::interpreter
 {
+
+namespace
+{
+[[nodiscard]] bool profiling_enabled() noexcept
+{
+    const auto* value = std::getenv("SWITCHRECOMP_PROFILE");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+}
 
 void InterpreterFrame::reset(const ir::Function& function_value)
 {
@@ -139,7 +151,16 @@ Result<runtime::ExecutionResult> execute_until_boundary(
     }
     if (!frame.function_verified)
     {
+        const auto verify_start = profiling_enabled() ? std::chrono::steady_clock::now()
+                                                       : std::chrono::steady_clock::time_point{};
         const auto verified = ir::verify(function);
+        if (profiling_enabled())
+        {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - verify_start).count();
+            std::cerr << "[switchrecomp profile] phase=ir_verification elapsed_us=" << elapsed
+                      << " result=" << (verified ? "ok" : "failure") << "\n";
+        }
         if (!verified)
         {
             return Result<runtime::ExecutionResult>::failure(verified.error());
