@@ -72,6 +72,7 @@ namespace
     case aarch64::InstructionId::Lsr: case aarch64::InstructionId::Asr:
     case aarch64::InstructionId::Ror: case aarch64::InstructionId::Ubfm:
     case aarch64::InstructionId::Sbfm: case aarch64::InstructionId::Bfm:
+    case aarch64::InstructionId::Extr:
     case aarch64::InstructionId::Mul: case aarch64::InstructionId::Madd:
     case aarch64::InstructionId::Msub: case aarch64::InstructionId::Mneg:
     case aarch64::InstructionId::Adr: case aarch64::InstructionId::Adrp:

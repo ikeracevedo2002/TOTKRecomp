@@ -137,6 +137,7 @@ std::string_view instruction_id_name(InstructionId id) noexcept
     case InstructionId::Ubfm: return "ubfm";
     case InstructionId::Sbfm: return "sbfm";
     case InstructionId::Bfm: return "bfm";
+    case InstructionId::Extr: return "extr";
     case InstructionId::Mul: return "mul";
     case InstructionId::Madd: return "madd";
     case InstructionId::Msub: return "msub";

@@ -4,7 +4,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -378,17 +380,75 @@ class ProcessImage
 class ProcessFunctionMap
 {
   public:
+    class MapView
+    {
+      private:
+        using Storage = std::vector<std::shared_ptr<const FinalizedFunctionMap>>;
+        using BaseIterator = Storage::const_iterator;
+
+      public:
+        class const_iterator
+        {
+          public:
+            using iterator_category = std::forward_iterator_tag;
+            using value_type = const FinalizedFunctionMap;
+            using difference_type = std::ptrdiff_t;
+            using pointer = const FinalizedFunctionMap*;
+            using reference = const FinalizedFunctionMap&;
+
+            const_iterator() = default;
+            explicit const_iterator(BaseIterator iterator) : iterator_(iterator) {}
+
+            [[nodiscard]] reference operator*() const noexcept { return *iterator_->get(); }
+            [[nodiscard]] pointer operator->() const noexcept { return iterator_->get(); }
+            const_iterator& operator++() noexcept
+            {
+                ++iterator_;
+                return *this;
+            }
+            friend bool operator==(const const_iterator&, const const_iterator&) = default;
+
+          private:
+            BaseIterator iterator_;
+        };
+
+        MapView() = default;
+        explicit MapView(const Storage& storage) noexcept
+            : begin_(storage.begin()), end_(storage.end())
+        {
+        }
+
+        [[nodiscard]] const_iterator begin() const noexcept { return const_iterator(begin_); }
+        [[nodiscard]] const_iterator end() const noexcept { return const_iterator(end_); }
+        [[nodiscard]] bool empty() const noexcept { return begin_ == end_; }
+        [[nodiscard]] std::size_t size() const noexcept {
+            return static_cast<std::size_t>(end_ - begin_);
+        }
+        [[nodiscard]] const FinalizedFunctionMap& front() const noexcept { return **begin_; }
+
+      private:
+        BaseIterator begin_;
+        BaseIterator end_;
+    };
+
     ProcessFunctionMap() = default;
 
     [[nodiscard]] static Result<ProcessFunctionMap> build(
         std::vector<FinalizedFunctionMap> maps);
+    [[nodiscard]] static Result<ProcessFunctionMap> replace_module(
+        const ProcessFunctionMap& existing, std::string_view module,
+        FinalizedFunctionMap replacement);
     [[nodiscard]] const FunctionRecord* find(memory::GuestAddress entry) const noexcept;
     [[nodiscard]] const FinalizedFunctionMap* map_for(
         memory::GuestAddress entry) const noexcept;
-    [[nodiscard]] const std::vector<FinalizedFunctionMap>& maps() const noexcept { return maps_; }
+    [[nodiscard]] MapView maps() const noexcept { return MapView(maps_); }
 
   private:
-    std::vector<FinalizedFunctionMap> maps_;
+    using MapStorage = std::vector<std::shared_ptr<const FinalizedFunctionMap>>;
+
+    [[nodiscard]] static Result<ProcessFunctionMap> from_storage(MapStorage maps);
+
+    MapStorage maps_;
     std::map<memory::GuestAddress, std::size_t> entries_;
 };
 

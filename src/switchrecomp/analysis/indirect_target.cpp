@@ -5,11 +5,15 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <exception>
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <new>
 #include <set>
 #include <sstream>
+#include <thread>
 #include <tuple>
 #include <utility>
 
@@ -1662,6 +1666,108 @@ Result<IndirectTargetAssessment> assess_indirect_target(
     return complete_assessment(std::move(assessment));
 }
 
+Result<std::vector<IndirectTargetAssessment>> assess_indirect_targets(
+    std::span<const ObservedIndirectTarget> candidates, const memory::GuestMemory& memory,
+    const ProcessFunctionMap& process_map, const ProcessImage& process_image,
+    const IndirectTargetDiscoveryOptions& options, std::size_t workers)
+{
+    try
+    {
+        std::vector<IndirectTargetAssessment> results;
+        results.reserve(candidates.size());
+        if (workers <= 1U || candidates.size() <= 1U)
+        {
+            for (const auto& candidate : candidates)
+            {
+                const auto assessment = assess_indirect_target(
+                    candidate, memory, nullptr, &process_map, &process_image, options);
+                if (!assessment)
+                    return Result<std::vector<IndirectTargetAssessment>>::failure(
+                        assessment.error());
+                results.push_back(std::move(assessment).value());
+            }
+            return Result<std::vector<IndirectTargetAssessment>>::success(std::move(results));
+        }
+
+        const auto worker_count = std::min(workers, candidates.size());
+        std::vector<std::optional<Result<IndirectTargetAssessment>>> worker_results(
+            candidates.size());
+        std::atomic<std::size_t> next{0U};
+        std::vector<std::thread> worker_threads;
+        worker_threads.reserve(worker_count);
+        const auto join_workers = [&]() noexcept {
+            for (auto& worker : worker_threads)
+                if (worker.joinable()) worker.join();
+        };
+        try
+        {
+            for (std::size_t worker = 0U; worker < worker_count; ++worker)
+            {
+                worker_threads.emplace_back([&]() {
+                    for (;;)
+                    {
+                        const auto index = next.fetch_add(1U, std::memory_order_relaxed);
+                        if (index >= candidates.size()) return;
+                        try
+                        {
+                            worker_results[index] = assess_indirect_target(
+                                candidates[index], memory, nullptr, &process_map,
+                                &process_image, options);
+                        }
+                        catch (const std::bad_alloc&)
+                        {
+                            worker_results[index] = Result<IndirectTargetAssessment>::failure(
+                                make_error(ErrorCode::ResourceLimit,
+                                           "parallel indirect-target assessment allocation failed"));
+                        }
+                        catch (...)
+                        {
+                            worker_results[index] = Result<IndirectTargetAssessment>::failure(
+                                make_error(ErrorCode::ThreadCreationFailed,
+                                           "parallel indirect-target assessment failed unexpectedly"));
+                        }
+                    }
+                });
+            }
+        }
+        catch (const std::exception&)
+        {
+            join_workers();
+            return Result<std::vector<IndirectTargetAssessment>>::failure(
+                make_error(ErrorCode::ThreadCreationFailed,
+                           "unable to create the bounded analysis worker pool"));
+        }
+        catch (...)
+        {
+            join_workers();
+            return Result<std::vector<IndirectTargetAssessment>>::failure(
+                make_error(ErrorCode::ThreadCreationFailed,
+                           "unable to create the bounded analysis worker pool"));
+        }
+        join_workers();
+        for (auto& result : worker_results)
+        {
+            if (!result)
+            {
+                return Result<std::vector<IndirectTargetAssessment>>::failure(
+                    make_error(ErrorCode::ThreadCreationFailed,
+                               "analysis worker did not publish a result"));
+            }
+            if (!result->has_value())
+                return Result<std::vector<IndirectTargetAssessment>>::failure(
+                    result->error());
+            results.push_back(std::move(result->value()));
+        }
+        return Result<std::vector<IndirectTargetAssessment>>::success(std::move(results));
+    }
+    catch (const std::bad_alloc&)
+    {
+        return Result<std::vector<IndirectTargetAssessment>>::failure(
+            make_error(ErrorCode::ResourceLimit,
+                       "unable to allocate indirect-target assessment results"));
+    }
+}
+
 Result<FunctionMapRefinement> refine_function_map(
     const FinalizedFunctionMap& existing, const ModuleAnalysisInput& input,
     const ObservedIndirectTarget& observed, const IndirectTargetDiscoveryOptions& options)
@@ -1745,9 +1851,17 @@ Result<ProcessFunctionMapRefinement> refine_process_function_map(
         return Result<ProcessFunctionMapRefinement>::success(std::move(result));
     }
 
-    std::vector<FinalizedFunctionMap> maps;
-    maps.reserve(std::max(existing.maps().size(), process_image.modules().size()));
-    bool target_module_rebuilt = false;
+    const auto target_module_name = result.assessment.validation.target_module;
+    const auto* target_module = process_image.module(target_module_name);
+    if (target_module == nullptr)
+    {
+        mark_refinement_failure(result.assessment, make_error(
+            ErrorCode::InvalidCrossModuleTransfer,
+            "candidate target module is not present in the process image"));
+        return Result<ProcessFunctionMapRefinement>::success(std::move(result));
+    }
+
+    const FinalizedFunctionMap* existing_target_map = nullptr;
     for (const auto& existing_map : existing.maps())
     {
         const auto* module = process_image.module(existing_map.identity().module);
@@ -1758,72 +1872,49 @@ Result<ProcessFunctionMapRefinement> refine_process_function_map(
                 "existing process map has no corresponding process-image module"));
             return Result<ProcessFunctionMapRefinement>::success(std::move(result));
         }
-        if (existing_map.identity().module != result.assessment.validation.target_module)
+        if (existing_map.identity().module != target_module_name)
         {
-            // Finalized maps are frozen values. Reusing this value preserves
-            // the previous module generation exactly while avoiding another
-            // CFG/function reconstruction for a logically unchanged module.
-            maps.push_back(existing_map);
             ++result.module_maps_reused;
             continue;
         }
-        target_module_rebuilt = true;
-        auto seeds = seeds_from_finalized_map(existing_map);
-        seeds.push_back(FunctionSeed{
-            observed.target, FunctionDiscoverySource::ObservedIndirectTarget,
-            result.assessment.decision.confidence, std::nullopt, std::nullopt,
-            "immutable process refinement from runtime indirect target at " +
-                hex_address(observed.source_pc)});
-        auto rebuild_options = map_options(options);
-        set_rebuild_roots(rebuild_options, seeds);
-        rebuild_options.reuse_map = &existing_map;
-        rebuild_options.newly_introduced_function_entries.insert(observed.target);
-        for (const auto target : result.assessment.validation.direct_call_targets)
-            rebuild_options.newly_introduced_function_entries.insert(target);
-        const auto rebuilt = FunctionMapBuilder::build(
-            ModuleAnalysisInput{module->identity, &process_image.memory(), std::move(seeds)},
-            rebuild_options);
-        if (!rebuilt)
-        {
-            mark_refinement_failure(result.assessment, rebuilt.error());
-            return Result<ProcessFunctionMapRefinement>::success(std::move(result));
-        }
-        maps.push_back(std::move(rebuilt).value());
-        ++result.module_maps_rebuilt;
+        existing_target_map = &existing_map;
     }
-    if (!target_module_rebuilt)
+    if (existing_target_map != nullptr && result.module_maps_reused != existing.maps().size() - 1U)
     {
-        const auto* target_module = process_image.module(
-            result.assessment.validation.target_module);
-        if (target_module == nullptr)
-        {
-            mark_refinement_failure(result.assessment, make_error(
-                ErrorCode::InvalidCrossModuleTransfer,
-                "candidate target module is not present in the process image"));
-            return Result<ProcessFunctionMapRefinement>::success(std::move(result));
-        }
-        std::vector<FunctionSeed> seeds{FunctionSeed{
-            observed.target, FunctionDiscoverySource::ObservedIndirectTarget,
-            result.assessment.decision.confidence, std::nullopt, std::nullopt,
-            "immutable process refinement from runtime indirect target at " +
-                hex_address(observed.source_pc)}};
-        auto rebuild_options = map_options(options);
-        set_rebuild_roots(rebuild_options, seeds);
-        rebuild_options.newly_introduced_function_entries.insert(observed.target);
-        for (const auto target : result.assessment.validation.direct_call_targets)
-            rebuild_options.newly_introduced_function_entries.insert(target);
-        const auto rebuilt = FunctionMapBuilder::build(
-            ModuleAnalysisInput{target_module->identity, &process_image.memory(), std::move(seeds)},
-            rebuild_options);
-        if (!rebuilt)
-        {
-            mark_refinement_failure(result.assessment, rebuilt.error());
-            return Result<ProcessFunctionMapRefinement>::success(std::move(result));
-        }
-        maps.push_back(std::move(rebuilt).value());
-        ++result.module_maps_rebuilt;
+        result.module_maps_reused = existing.maps().size() - 1U;
     }
-    const auto rebuilt = ProcessFunctionMap::build(std::move(maps));
+
+    std::vector<FunctionSeed> seeds;
+    if (existing_target_map != nullptr)
+    {
+        seeds = seeds_from_finalized_map(*existing_target_map);
+    }
+    seeds.push_back(FunctionSeed{
+        observed.target, FunctionDiscoverySource::ObservedIndirectTarget,
+        result.assessment.decision.confidence, std::nullopt, std::nullopt,
+        "immutable process refinement from runtime indirect target at " +
+            hex_address(observed.source_pc)});
+    auto rebuild_options = map_options(options);
+    set_rebuild_roots(rebuild_options, seeds);
+    rebuild_options.reuse_map = existing_target_map;
+    rebuild_options.newly_introduced_function_entries.insert(observed.target);
+    for (const auto target : result.assessment.validation.direct_call_targets)
+        rebuild_options.newly_introduced_function_entries.insert(target);
+    const auto rebuilt_module_map = FunctionMapBuilder::build(
+        ModuleAnalysisInput{target_module->identity, &process_image.memory(), std::move(seeds)},
+        rebuild_options);
+    if (!rebuilt_module_map)
+    {
+        mark_refinement_failure(result.assessment, rebuilt_module_map.error());
+        return Result<ProcessFunctionMapRefinement>::success(std::move(result));
+    }
+    ++result.module_maps_rebuilt;
+
+    // ProcessFunctionMap::replace_module shares every untouched immutable map
+    // and publishes only the changed module. This keeps lookup indexes
+    // deterministic while avoiding deep copies of unrelated module records.
+    const auto rebuilt = ProcessFunctionMap::replace_module(
+        existing, target_module_name, std::move(rebuilt_module_map).value());
     if (!rebuilt)
     {
         mark_refinement_failure(result.assessment, rebuilt.error());
@@ -1846,12 +1937,201 @@ Result<ProcessFunctionMapRefinement> refine_process_function_map(
     }
     result.map = std::move(rebuilt).value();
     if (const auto* rebuilt_module = result.map.map_for(observed.target))
+    {
         result.analysis_work = analysis_work_from_accounting(rebuilt_module->accounting());
+        result.finalized_functions_reused = rebuilt_module->accounting().reused_functions;
+        result.cfgs_reused = rebuilt_module->accounting().reused_functions;
+        result.functions_rebuilt = rebuilt_module->accounting().newly_analyzed_functions +
+                                   rebuilt_module->accounting().reanalyzed_functions;
+        result.modules_touched = 1U;
+    }
     result.assessment.decision.kind = IndirectTargetDecisionKind::TrustedNewEntry;
     result.assessment.decision.canonical_entry = record->canonical_entry;
     result.assessment.decision.promoted = true;
     result.assessment.decision.reason = "new immutable process function record was built and validated";
     return Result<ProcessFunctionMapRefinement>::success(std::move(result));
+}
+
+Result<ProcessFunctionMapBatchRefinement> refine_process_function_map_batch(
+    const ProcessFunctionMap& existing, const ProcessImage& process_image,
+    std::span<const IndirectTargetAssessment> assessments,
+    const IndirectTargetDiscoveryOptions& options)
+{
+    ProcessFunctionMapBatchRefinement result;
+    result.map = existing;
+    result.assessments.assign(assessments.begin(), assessments.end());
+    if (result.assessments.empty())
+    {
+        result.all_promoted = true;
+        return Result<ProcessFunctionMapBatchRefinement>::success(std::move(result));
+    }
+
+    std::map<std::string, std::vector<std::size_t>> by_module;
+    std::map<std::pair<std::string, GuestAddress>, bool> seen_targets;
+    bool structurally_valid = true;
+    for (std::size_t index = 0U; index < result.assessments.size(); ++index)
+    {
+        auto& assessment = result.assessments[index];
+        if (!assessment.decision.eligible_for_promotion ||
+            assessment.decision.kind != IndirectTargetDecisionKind::TrustedNewEntry)
+        {
+            structurally_valid = false;
+            continue;
+        }
+        const auto& module = assessment.validation.target_module;
+        const auto target = assessment.observed.target;
+        if (module.empty() || !seen_targets.emplace(std::make_pair(module, target), true).second)
+        {
+            structurally_valid = false;
+            mark_refinement_failure(assessment, make_error(
+                ErrorCode::FunctionBoundaryConflict,
+                "refinement batch contains an empty or duplicate target identity"));
+            continue;
+        }
+        auto& module_candidates = by_module[module];
+        for (const auto other_index : module_candidates)
+        {
+            if (owned_ranges_overlap(
+                    assessment.validation.candidate_owned_code_ranges,
+                    result.assessments[other_index].validation.candidate_owned_code_ranges))
+            {
+                structurally_valid = false;
+                mark_refinement_failure(assessment, make_error(
+                    ErrorCode::FunctionBoundaryConflict,
+                    "refinement batch contains overlapping candidate ownership"));
+                break;
+            }
+        }
+        if (assessment.decision.promoted)
+        {
+            structurally_valid = false;
+            continue;
+        }
+        module_candidates.push_back(index);
+    }
+    if (!structurally_valid || by_module.empty())
+    {
+        result.all_promoted = false;
+        return Result<ProcessFunctionMapBatchRefinement>::success(std::move(result));
+    }
+
+    std::size_t existing_touched = 0U;
+    ProcessFunctionMap published = existing;
+    for (const auto& [module_name, candidates] : by_module)
+    {
+        const auto* target_module = process_image.module(module_name);
+        if (target_module == nullptr)
+        {
+            for (const auto index : candidates)
+                mark_refinement_failure(result.assessments[index], make_error(
+                    ErrorCode::InvalidCrossModuleTransfer,
+                    "candidate target module is not present in the process image"));
+            return Result<ProcessFunctionMapBatchRefinement>::success(std::move(result));
+        }
+        const FinalizedFunctionMap* existing_module_map = nullptr;
+        for (const auto& existing_map : existing.maps())
+        {
+            if (existing_map.identity().module == module_name)
+            {
+                existing_module_map = &existing_map;
+                break;
+            }
+        }
+        if (existing_module_map != nullptr) ++existing_touched;
+
+        std::vector<FunctionSeed> seeds;
+        if (existing_module_map != nullptr)
+            seeds = seeds_from_finalized_map(*existing_module_map);
+        auto rebuild_options = map_options(options);
+        for (const auto index : candidates)
+        {
+            const auto& assessment = result.assessments[index];
+            seeds.push_back(FunctionSeed{
+                assessment.observed.target, FunctionDiscoverySource::ObservedIndirectTarget,
+                assessment.decision.confidence, std::nullopt, std::nullopt,
+                "immutable batched process refinement from runtime indirect target at " +
+                    hex_address(assessment.observed.source_pc)});
+            rebuild_options.newly_introduced_function_entries.insert(assessment.observed.target);
+            for (const auto target : assessment.validation.direct_call_targets)
+            {
+                rebuild_options.newly_introduced_function_entries.insert(target);
+                seeds.push_back(FunctionSeed{
+                    target, FunctionDiscoverySource::DirectCall,
+                    FunctionConfidence::High, std::nullopt, std::nullopt,
+                    "direct-call closure of a batched indirect target"});
+            }
+        }
+        set_rebuild_roots(rebuild_options, seeds);
+        rebuild_options.reuse_map = existing_module_map;
+        const auto rebuilt_module = FunctionMapBuilder::build(
+            ModuleAnalysisInput{target_module->identity, &process_image.memory(), std::move(seeds)},
+            rebuild_options);
+        if (!rebuilt_module)
+        {
+            for (const auto index : candidates)
+                mark_refinement_failure(result.assessments[index], rebuilt_module.error());
+            return Result<ProcessFunctionMapBatchRefinement>::success(std::move(result));
+        }
+        const auto accounting = rebuilt_module.value().accounting();
+        result.analysis_work.module = accounting.module;
+        result.analysis_work.functions_analyzed += accounting.newly_analyzed_functions;
+        result.analysis_work.functions_reanalyzed += accounting.reanalyzed_functions;
+        result.analysis_work.functions_reused += accounting.reused_functions;
+        result.analysis_work.instructions += accounting.instructions_consumed;
+        result.analysis_work.blocks += accounting.blocks_consumed;
+        result.analysis_work.edges += accounting.edges_consumed;
+        result.analysis_work.bytes_analyzed += accounting.bytes_analyzed;
+        result.analysis_work.boundary_finalization_passes += accounting.boundary_finalization_passes;
+        result.analysis_work.invalidated_records += accounting.invalidated_records;
+        result.analysis_work.transactions += accounting.refinement_transactions;
+        result.finalized_functions_reused += accounting.reused_functions;
+        result.cfgs_reused += accounting.reused_functions;
+        result.functions_rebuilt += accounting.newly_analyzed_functions +
+                                    accounting.reanalyzed_functions;
+        ++result.module_maps_rebuilt;
+        result.modules_touched = by_module.size();
+        const auto replacement = ProcessFunctionMap::replace_module(
+            published, module_name, std::move(rebuilt_module).value());
+        if (!replacement)
+        {
+            for (const auto index : candidates)
+                mark_refinement_failure(result.assessments[index], replacement.error());
+            return Result<ProcessFunctionMapBatchRefinement>::success(std::move(result));
+        }
+        published = std::move(replacement).value();
+    }
+    result.module_maps_reused = existing.maps().size() - existing_touched;
+    result.map = std::move(published);
+    result.all_promoted = true;
+    for (const auto& [module_name, candidates] : by_module)
+    {
+        const auto* module_map = result.map.map_for(result.assessments[candidates.front()].observed.target);
+        if (module_map == nullptr) result.all_promoted = false;
+        for (const auto index : candidates)
+        {
+            auto& assessment = result.assessments[index];
+            const auto* record = result.map.find(assessment.observed.target);
+            if (record == nullptr || record->translation_status == TranslationStatus::Conflict ||
+                !record->cfg || module_map == nullptr ||
+                !boundary_refinement_matches(
+                    *module_map, assessment.validation.boundary_reconciliation,
+                    assessment.observed.target))
+            {
+                mark_refinement_failure(assessment, make_error(
+                    ErrorCode::FunctionBoundaryConflict,
+                    "batched process refinement did not produce a validated candidate record"));
+                result.all_promoted = false;
+                continue;
+            }
+            assessment.decision.kind = IndirectTargetDecisionKind::TrustedNewEntry;
+            assessment.decision.canonical_entry = record->canonical_entry;
+            assessment.decision.promoted = true;
+            assessment.decision.reason =
+                "new immutable finalized function record was built in a deterministic batch";
+        }
+    }
+    result.incremental_updates = 1U;
+    return Result<ProcessFunctionMapBatchRefinement>::success(std::move(result));
 }
 
 IndirectTargetCandidateIdentity indirect_target_candidate_identity(
@@ -2571,6 +2851,36 @@ bool IndirectTargetRefinementWorklist::can_commit_refinement(
     return true;
 }
 
+bool IndirectTargetRefinementWorklist::can_commit_batch_refinement(
+    std::span<const IndirectTargetCandidateIdentity> candidates,
+    const IndirectTargetRefinementAnalysisWork& work, std::size_t module_maps_rebuilt,
+    std::size_t module_maps_reused) noexcept
+{
+    if (candidates.empty() || counters_.exhaustion.dimension != IndirectTargetRefinementBudgetDimension::None)
+        return false;
+    for (const auto& candidate : candidates)
+    {
+        const auto item = work_items_.find(std::make_pair(candidate.target_module, candidate.target));
+        if (item == work_items_.end() || !item->second.pending ||
+            !item->second.last_assessed_generation ||
+            item->second.last_assessed_generation.value() != map_generation_)
+            return false;
+    }
+    if (!can_commit_refinement(candidates.front(), work, module_maps_rebuilt,
+                               module_maps_reused))
+        return false;
+    const auto legacy_limits_enabled = budgets_.legacy_event_limits ||
+                                       budgets_.max_promotions != 128U ||
+                                       budgets_.max_map_rebuilds != 128U;
+    if (legacy_limits_enabled &&
+        (candidates.size() > budgets_.max_promotions -
+             std::min(budgets_.max_promotions, counters_.successful_promotions) ||
+         counters_.map_rebuilds >= budgets_.max_map_rebuilds))
+        return false;
+    return candidates.size() <= std::numeric_limits<std::size_t>::max() -
+                               counters_.successful_promotions;
+}
+
 void IndirectTargetRefinementWorklist::record_terminal_candidate(
     const IndirectTargetCandidateIdentity& candidate) noexcept
 {
@@ -2621,15 +2931,28 @@ void IndirectTargetRefinementWorklist::record_rollback_assessment(
 void IndirectTargetRefinementWorklist::record_promotion(
     const IndirectTargetCandidateIdentity& candidate, std::size_t module_maps_rebuilt,
     std::size_t module_maps_reused,
-    const IndirectTargetRefinementAnalysisWork& work) noexcept
+    const IndirectTargetRefinementAnalysisWork& work,
+    std::size_t finalized_functions_reused, std::size_t cfgs_reused,
+    std::size_t functions_rebuilt, std::size_t modules_touched,
+    std::size_t incremental_updates, std::size_t full_rebuilds) noexcept
 {
-    const auto item = work_items_.find(std::make_pair(candidate.target_module, candidate.target));
-    if (item == work_items_.end() || !item->second.pending ||
-        !item->second.last_assessed_generation ||
-        item->second.last_assessed_generation.value() != map_generation_)
+    const std::array<IndirectTargetCandidateIdentity, 1U> candidates{candidate};
+    record_batch_promotion(candidates, module_maps_rebuilt, module_maps_reused, work,
+                           finalized_functions_reused, cfgs_reused, functions_rebuilt,
+                           modules_touched, incremental_updates, full_rebuilds);
+}
+
+void IndirectTargetRefinementWorklist::record_batch_promotion(
+    std::span<const IndirectTargetCandidateIdentity> candidates,
+    std::size_t module_maps_rebuilt, std::size_t module_maps_reused,
+    const IndirectTargetRefinementAnalysisWork& work,
+    std::size_t finalized_functions_reused, std::size_t cfgs_reused,
+    std::size_t functions_rebuilt, std::size_t modules_touched,
+    std::size_t incremental_updates, std::size_t full_rebuilds) noexcept
+{
+    if (!can_commit_batch_refinement(candidates, work, module_maps_rebuilt,
+                                     module_maps_reused))
         return;
-    if (!can_promote()) return;
-    if (!can_commit_refinement(candidate, work, module_maps_rebuilt, module_maps_reused)) return;
     const auto checked_add_size = [](std::size_t current, std::size_t delta,
                                      std::size_t& next) noexcept {
         if (delta > std::numeric_limits<std::size_t>::max() - current) return false;
@@ -2647,6 +2970,16 @@ void IndirectTargetRefinementWorklist::record_promotion(
     std::size_t map_rebuilds = 0U;
     std::size_t module_maps_rebuilt_total = 0U;
     std::size_t module_maps_reused_total = 0U;
+    std::size_t refinement_batches = 0U;
+    std::size_t batch_candidates = 0U;
+    std::size_t rebuilds_avoided = 0U;
+    std::size_t singleton_batches = 0U;
+    std::size_t finalized_functions_reused_total = 0U;
+    std::size_t cfgs_reused_total = 0U;
+    std::size_t functions_rebuilt_total = 0U;
+    std::size_t modules_touched_total = 0U;
+    std::size_t incremental_updates_total = 0U;
+    std::size_t full_rebuilds_total = 0U;
     std::size_t functions_analyzed = 0U;
     std::size_t functions_reanalyzed = 0U;
     std::size_t functions_reused = 0U;
@@ -2658,13 +2991,26 @@ void IndirectTargetRefinementWorklist::record_promotion(
     std::size_t invalidated_records = 0U;
     std::size_t transactions = 0U;
     std::size_t next_generation = 0U;
-    if (!checked_add_size(counters_.successful_promotions, 1U, successful_promotions) ||
+    if (!checked_add_size(counters_.successful_promotions, candidates.size(), successful_promotions) ||
         !checked_add_size(counters_.map_rebuilds, 1U, map_rebuilds) ||
         !checked_add_size(map_generation_, 1U, next_generation) ||
         !checked_add_size(counters_.module_maps_rebuilt, module_maps_rebuilt,
                           module_maps_rebuilt_total) ||
         !checked_add_size(counters_.module_maps_reused, module_maps_reused,
                           module_maps_reused_total) ||
+        !checked_add_size(counters_.refinement_batches, 1U, refinement_batches) ||
+        !checked_add_size(counters_.batch_candidates, candidates.size(), batch_candidates) ||
+        !checked_add_size(counters_.rebuilds_avoided, candidates.size() - 1U, rebuilds_avoided) ||
+        !checked_add_size(counters_.singleton_batches, candidates.size() == 1U ? 1U : 0U,
+                          singleton_batches) ||
+        !checked_add_size(counters_.finalized_functions_reused, finalized_functions_reused,
+                          finalized_functions_reused_total) ||
+        !checked_add_size(counters_.cfgs_reused, cfgs_reused, cfgs_reused_total) ||
+        !checked_add_size(counters_.functions_rebuilt, functions_rebuilt, functions_rebuilt_total) ||
+        !checked_add_size(counters_.modules_touched, modules_touched, modules_touched_total) ||
+        !checked_add_size(counters_.incremental_updates, incremental_updates,
+                          incremental_updates_total) ||
+        !checked_add_size(counters_.full_rebuilds, full_rebuilds, full_rebuilds_total) ||
         !checked_add_size(counters_.analysis.functions_analyzed, work.functions_analyzed,
                           functions_analyzed) ||
         !checked_add_size(counters_.analysis.functions_reanalyzed, work.functions_reanalyzed,
@@ -2688,13 +3034,24 @@ void IndirectTargetRefinementWorklist::record_promotion(
             std::numeric_limits<std::size_t>::max(),
             work.module,
             map_generation_,
-            candidate};
+            candidates.front()};
         return;
     }
     counters_.successful_promotions = successful_promotions;
     counters_.map_rebuilds = map_rebuilds;
     counters_.module_maps_rebuilt = module_maps_rebuilt_total;
     counters_.module_maps_reused = module_maps_reused_total;
+    counters_.refinement_batches = refinement_batches;
+    counters_.batch_candidates = batch_candidates;
+    counters_.singleton_batches = singleton_batches;
+    counters_.rebuilds_avoided = rebuilds_avoided;
+    counters_.max_batch_width = std::max(counters_.max_batch_width, candidates.size());
+    counters_.finalized_functions_reused = finalized_functions_reused_total;
+    counters_.cfgs_reused = cfgs_reused_total;
+    counters_.functions_rebuilt = functions_rebuilt_total;
+    counters_.modules_touched = modules_touched_total;
+    counters_.incremental_updates = incremental_updates_total;
+    counters_.full_rebuilds = full_rebuilds_total;
     counters_.analysis.functions_analyzed = functions_analyzed;
     counters_.analysis.functions_reanalyzed = functions_reanalyzed;
     counters_.analysis.functions_reused = functions_reused;
@@ -2705,9 +3062,14 @@ void IndirectTargetRefinementWorklist::record_promotion(
     counters_.analysis.boundary_finalization_passes = boundary_finalization_passes;
     counters_.analysis.invalidated_records = invalidated_records;
     counters_.analysis.transactions = transactions;
-    item->second.pending = false;
-    item->second.processed = true;
-    item->second.promoted = true;
+    for (const auto& candidate : candidates)
+    {
+        const auto item = work_items_.find(std::make_pair(candidate.target_module, candidate.target));
+        if (item == work_items_.end()) return;
+        item->second.pending = false;
+        item->second.processed = true;
+        item->second.promoted = true;
+    }
     // Keep the generation in which this candidate was processed.  The
     // publication below advances the immutable map generation; a later
     // observation can therefore explicitly prove that this record is being

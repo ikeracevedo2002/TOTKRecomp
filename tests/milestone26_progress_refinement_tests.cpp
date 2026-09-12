@@ -277,6 +277,49 @@ void write_u32(std::vector<std::byte>& bytes, std::size_t offset, std::uint32_t 
     return result;
 }
 
+struct MinimalProcessFixture
+{
+    analysis::ProcessImage image;
+    analysis::ProcessFunctionMap map;
+};
+
+[[nodiscard]] Result<MinimalProcessFixture> minimal_process_fixture()
+{
+    const auto bytes = minimal_nso();
+    const std::array<analysis::ProcessModuleInput, 2> inputs{
+        analysis::ProcessModuleInput{"main", bytes, 0x100000U},
+        analysis::ProcessModuleInput{"provider", bytes, 0x200000U}};
+    analysis::ProcessImageOptions image_options;
+    image_options.primary_module = "main";
+    image_options.provider_search_complete = true;
+    image_options.module_options.seed_text_entry = false;
+    const auto image = analysis::load_process_image(inputs, image_options);
+    if (!image) return Result<MinimalProcessFixture>::failure(image.error());
+
+    std::vector<analysis::FinalizedFunctionMap> maps;
+    for (const auto& module : image.value().modules())
+    {
+        auto identity = module.identity;
+        const auto entry = module.identity.guest_base + 8U;
+        identity.entry_points.push_back({entry, analysis::EntryPointKind::DynamicInit,
+                                         "synthetic M36 entry", FunctionConfidence::High, false,
+                                         "synthetic entry"});
+        auto seeds = module.seeds;
+        seeds.push_back({entry, FunctionDiscoverySource::ModuleEntry,
+                         FunctionConfidence::Confirmed, std::nullopt, std::nullopt,
+                         "synthetic M36 entry"});
+        const auto map = analysis::FunctionMapBuilder::build(
+            analysis::ModuleAnalysisInput{std::move(identity), &image.value().memory(),
+                                          std::move(seeds)});
+        if (!map) return Result<MinimalProcessFixture>::failure(map.error());
+        maps.push_back(std::move(map).value());
+    }
+    const auto process = analysis::ProcessFunctionMap::build(std::move(maps));
+    if (!process) return Result<MinimalProcessFixture>::failure(process.error());
+    return Result<MinimalProcessFixture>::success(
+        MinimalProcessFixture{std::move(image).value(), std::move(process).value()});
+}
+
 TEST_CASE("M26 target-only map refinement reuses unchanged frozen modules transactionally")
 {
     const auto bytes = minimal_nso();
@@ -312,8 +355,14 @@ TEST_CASE("M26 target-only map refinement reuses unchanged frozen modules transa
     REQUIRE(process);
 
     std::vector<analysis::FunctionRecord> provider_before;
+    const analysis::FinalizedFunctionMap* provider_map_before = nullptr;
     for (const auto& map : process.value().maps())
-        if (map.identity().module == "provider") provider_before = map.functions();
+        if (map.identity().module == "provider")
+        {
+            provider_map_before = &map;
+            provider_before = map.functions();
+        }
+    REQUIRE(provider_map_before != nullptr);
 
     analysis::IndirectTargetDiscoveryOptions options;
     const auto refined = analysis::refine_process_function_map(
@@ -327,6 +376,7 @@ TEST_CASE("M26 target-only map refinement reuses unchanged frozen modules transa
     for (const auto& map : refined.value().map.maps())
         if (map.identity().module == "provider")
         {
+            REQUIRE(&map == provider_map_before);
             REQUIRE(map.functions().size() == provider_before.size());
             for (std::size_t index = 0U; index < provider_before.size(); ++index)
             {
@@ -337,6 +387,28 @@ TEST_CASE("M26 target-only map refinement reuses unchanged frozen modules transa
             }
         }
 
+    const auto main_assessment = analysis::assess_indirect_target(
+        process_target(0x100000U + 0x0cU, 0x100000U), image.value().memory(), nullptr,
+        &process.value(), &image.value());
+    REQUIRE(main_assessment);
+    auto provider_observed = process_target(0x200000U + 0x0cU, 0x100000U);
+    provider_observed.target_module.clear();
+    const auto provider_assessment = analysis::assess_indirect_target(
+        provider_observed, image.value().memory(), nullptr, &process.value(), &image.value());
+    REQUIRE(provider_assessment);
+    REQUIRE(main_assessment.value().decision.eligible_for_promotion);
+    REQUIRE(provider_assessment.value().decision.eligible_for_promotion);
+    const std::array<analysis::IndirectTargetAssessment, 2U> batch_assessments{
+        main_assessment.value(), provider_assessment.value()};
+    const auto batched = analysis::refine_process_function_map_batch(
+        process.value(), image.value(), batch_assessments);
+    REQUIRE(batched);
+    REQUIRE(batched.value().all_promoted);
+    REQUIRE(batched.value().module_maps_rebuilt == 2U);
+    REQUIRE(batched.value().module_maps_reused == 0U);
+    REQUIRE(batched.value().map.find(0x100000U + 0x0cU) != nullptr);
+    REQUIRE(batched.value().map.find(0x200000U + 0x0cU) != nullptr);
+
     const auto failed = analysis::refine_process_function_map(
         process.value(), image.value(), process_target(0xdead0000U, 0x100000U), options);
     REQUIRE(failed);
@@ -345,6 +417,38 @@ TEST_CASE("M26 target-only map refinement reuses unchanged frozen modules transa
     REQUIRE(failed.value().module_maps_reused == 0U);
     REQUIRE(failed.value().map.maps().size() == process.value().maps().size());
     REQUIRE(failed.value().map.find(0x100000U + 0x0cU) == nullptr);
+}
+
+TEST_CASE("M36 worker counts produce byte-identical synthetic assessments")
+{
+    const auto fixture = minimal_process_fixture();
+    REQUIRE(fixture);
+    auto main_candidate = process_target(0x100000U + 0x0cU, 0x100000U);
+    main_candidate.target_module.clear();
+    auto provider_candidate = process_target(0x200000U + 0x0cU, 0x100000U);
+    provider_candidate.target_module.clear();
+    const std::array<ObservedIndirectTarget, 2U> candidates{
+        main_candidate, provider_candidate};
+    analysis::IndirectTargetDiscoveryOptions options;
+    const auto serial = analysis::assess_indirect_targets(
+        candidates, fixture.value().image.memory(), fixture.value().map,
+        fixture.value().image, options, 1U);
+    const auto parallel = analysis::assess_indirect_targets(
+        candidates, fixture.value().image.memory(), fixture.value().map,
+        fixture.value().image, options, 2U);
+    const auto higher_parallel = analysis::assess_indirect_targets(
+        candidates, fixture.value().image.memory(), fixture.value().map,
+        fixture.value().image, options, 4U);
+    REQUIRE(serial);
+    REQUIRE(parallel);
+    REQUIRE(higher_parallel);
+    const auto render = [](const auto& assessments) {
+        execution::ExecutionSessionResult result;
+        result.indirect_target_discovery = assessments;
+        return execution::render_execution_report_json(result);
+    };
+    REQUIRE(render(serial.value()) == render(parallel.value()));
+    REQUIRE(render(serial.value()) == render(higher_parallel.value()));
 }
 
 } // namespace

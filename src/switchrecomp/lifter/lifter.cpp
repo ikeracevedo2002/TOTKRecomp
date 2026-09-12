@@ -1858,18 +1858,84 @@ class FunctionLifter
 
     [[nodiscard]] Result<void> lift_bitfield(const DecodedInstruction& instruction)
     {
+        const auto is_scalar_register = [](const aarch64::Register& reg) noexcept {
+            return reg.kind == aarch64::RegisterKind::General && reg.valid() && reg.index < 32U &&
+                   (reg.width == aarch64::RegisterWidth::W32 ||
+                    reg.width == aarch64::RegisterWidth::X64);
+        };
+        if (instruction.id == aarch64::InstructionId::Extr)
+        {
+            if (instruction.operands.size() != 4U ||
+                instruction.operands[0].kind != aarch64::OperandKind::Register ||
+                instruction.operands[1].kind != aarch64::OperandKind::Register ||
+                instruction.operands[2].kind != aarch64::OperandKind::Register ||
+                instruction.operands[3].kind != aarch64::OperandKind::Immediate ||
+                !is_scalar_register(instruction.operands[0].reg) ||
+                !is_scalar_register(instruction.operands[1].reg) ||
+                !is_scalar_register(instruction.operands[2].reg))
+            {
+                return Result<void>::failure(unsupported(instruction, "EXTR requires three scalar registers and an immediate"));
+            }
+            const auto type = type_for_width(instruction.operands[0].reg.width);
+            const auto width = static_cast<unsigned int>(type.bit_width());
+            if (instruction.operands[1].reg.width != instruction.operands[0].reg.width ||
+                instruction.operands[2].reg.width != instruction.operands[0].reg.width ||
+                instruction.operands[3].immediate < 0 ||
+                static_cast<std::uint64_t>(instruction.operands[3].immediate) >= width)
+            {
+                return Result<void>::failure(unsupported(instruction, "EXTR operands do not have a common valid width"));
+            }
+            const auto low = read_register(instruction.operands[2].reg, instruction);
+            const auto high = read_register(instruction.operands[1].reg, instruction);
+            if (!low || !high)
+            {
+                return Result<void>::failure(!low ? low.error() : high.error());
+            }
+            const auto lsb = static_cast<unsigned int>(instruction.operands[3].immediate);
+            auto result = low;
+            if (lsb != 0U)
+            {
+                const auto amount = constant(type, lsb, instruction);
+                const auto inverse = constant(type, width - lsb, instruction);
+                if (!amount || !inverse)
+                {
+                    return Result<void>::failure(!amount ? amount.error() : inverse.error());
+                }
+                const auto right = binary(ir::Opcode::LogicalShiftRight, low.value(), amount.value(), type,
+                                          instruction);
+                const auto left = binary(ir::Opcode::ShiftLeft, high.value(), inverse.value(), type,
+                                         instruction);
+                if (!right || !left)
+                {
+                    return Result<void>::failure(!right ? right.error() : left.error());
+                }
+                result = binary(ir::Opcode::Or, right.value(), left.value(), type, instruction);
+            }
+            return result ? write_register(instruction.operands[0].reg, result.value(), instruction)
+                          : Result<void>::failure(result.error());
+        }
+
         const bool encoded_bitfield = instruction.id == aarch64::InstructionId::Ubfm ||
                                       instruction.id == aarch64::InstructionId::Sbfm ||
                                       instruction.id == aarch64::InstructionId::Bfm;
         if (instruction.operands.size() < (encoded_bitfield ? 2U : 3U) ||
             instruction.operands[0].kind != aarch64::OperandKind::Register ||
             instruction.operands[1].kind != aarch64::OperandKind::Register ||
-            (!encoded_bitfield && instruction.operands[2].kind != aarch64::OperandKind::Immediate))
+            !is_scalar_register(instruction.operands[0].reg) ||
+            !is_scalar_register(instruction.operands[1].reg))
         {
-            return Result<void>::failure(unsupported(instruction, "expected bitfield register and immediate operands"));
+            return Result<void>::failure(unsupported(instruction, "expected scalar W/X register operands"));
         }
         const auto type = type_for_width(instruction.operands[0].reg.width);
         const auto width = static_cast<unsigned int>(type.bit_width());
+        const auto operation = instruction.id == aarch64::InstructionId::Lsl
+                                   ? ir::Opcode::ShiftLeft
+                               : instruction.id == aarch64::InstructionId::Lsr
+                                   ? ir::Opcode::LogicalShiftRight
+                               : instruction.id == aarch64::InstructionId::Asr
+                                   ? ir::Opcode::ArithmeticShiftRight
+                                   : ir::Opcode::RotateRight;
+
         auto source = read_register(instruction.operands[1].reg, instruction);
         if (!source)
         {
@@ -1887,62 +1953,91 @@ class FunctionLifter
             }
             source = widened;
         }
-        const auto immediate = (instruction.id == aarch64::InstructionId::Ubfm ||
-                                instruction.id == aarch64::InstructionId::Sbfm ||
-                                instruction.id == aarch64::InstructionId::Bfm)
-                                   ? static_cast<unsigned int>((instruction.opcode >> 16U) & 0x3fU)
-                                   : static_cast<unsigned int>(instruction.operands[2].immediate);
-        if (immediate >= width)
+
+        if (!encoded_bitfield)
         {
-            return Result<void>::failure(unsupported(instruction, "bitfield shift is outside the register width"));
-        }
-        if (instruction.id == aarch64::InstructionId::Lsl ||
-            instruction.id == aarch64::InstructionId::Lsr ||
-            instruction.id == aarch64::InstructionId::Asr ||
-            instruction.id == aarch64::InstructionId::Ror)
-        {
-            const auto shift = constant(type, immediate, instruction);
+            if (instruction.operands.size() != 3U ||
+                (instruction.operands[2].kind != aarch64::OperandKind::Immediate &&
+                 instruction.operands[2].kind != aarch64::OperandKind::Register))
+            {
+                return Result<void>::failure(unsupported(instruction, "shift requires an immediate or register amount"));
+            }
+            if (instruction.operands[1].reg.width != instruction.operands[0].reg.width)
+            {
+                return Result<void>::failure(unsupported(instruction, "shift source and destination widths differ"));
+            }
+            Result<ir::ValueId> shift = Result<ir::ValueId>::failure(
+                make_error(ErrorCode::UnsupportedInstruction, "shift amount was not materialized"));
+            if (instruction.operands[2].kind == aarch64::OperandKind::Immediate)
+            {
+                if (instruction.operands[2].immediate < 0 ||
+                    static_cast<std::uint64_t>(instruction.operands[2].immediate) >= width)
+                {
+                    return Result<void>::failure(unsupported(instruction, "shift amount is outside the register width"));
+                }
+                shift = constant(type, static_cast<std::uint64_t>(instruction.operands[2].immediate), instruction);
+            }
+            else
+            {
+                if (!is_scalar_register(instruction.operands[2].reg) ||
+                    instruction.operands[2].reg.width != instruction.operands[0].reg.width)
+                {
+                    return Result<void>::failure(unsupported(instruction, "register shift amount has the wrong width"));
+                }
+                const auto amount = read_register(instruction.operands[2].reg, instruction);
+                const auto mask = constant(type, width - 1U, instruction);
+                if (!amount || !mask)
+                {
+                    return Result<void>::failure(!amount ? amount.error() : mask.error());
+                }
+                shift = binary(ir::Opcode::And, amount.value(), mask.value(), type, instruction);
+            }
             if (!shift)
             {
                 return Result<void>::failure(shift.error());
             }
-            const auto opcode = instruction.id == aarch64::InstructionId::Lsl
-                                    ? ir::Opcode::ShiftLeft
-                                    : instruction.id == aarch64::InstructionId::Lsr
-                                          ? ir::Opcode::LogicalShiftRight
-                                          : instruction.id == aarch64::InstructionId::Asr
-                                                ? ir::Opcode::ArithmeticShiftRight
-                                                : ir::Opcode::RotateRight;
-            const auto result = binary(opcode, source.value(), shift.value(), type, instruction);
+            const auto result = binary(operation, source.value(), shift.value(), type, instruction);
             if (!result)
             {
                 return Result<void>::failure(result.error());
             }
             return write_register(instruction.operands[0].reg, result.value(), instruction);
         }
-        if (instruction.id != aarch64::InstructionId::Ubfm &&
-            instruction.id != aarch64::InstructionId::Sbfm &&
-            instruction.id != aarch64::InstructionId::Bfm &&
-            (instruction.operands.size() != 4U || instruction.operands[3].kind != aarch64::OperandKind::Immediate))
+
+        const auto immr = static_cast<unsigned int>((instruction.opcode >> 16U) & 0x3fU);
+        const auto imms = static_cast<unsigned int>((instruction.opcode >> 10U) & 0x3fU);
+        const bool n_bit = ((instruction.opcode >> 22U) & 1U) != 0U;
+        if ((width == 64U && !n_bit) || (width == 32U && n_bit) || immr >= width || imms >= width)
         {
-            return Result<void>::failure(unsupported(instruction, "bitfield operation requires immr and imms"));
+            return Result<void>::failure(unsupported(instruction, "bitfield encoding is reserved for this register width"));
         }
-        const auto rotate_amount = immediate;
-        const auto mask_amount = (instruction.id == aarch64::InstructionId::Ubfm ||
-                                  instruction.id == aarch64::InstructionId::Sbfm ||
-                                  instruction.id == aarch64::InstructionId::Bfm)
-                                     ? static_cast<unsigned int>((instruction.opcode >> 10U) & 0x3fU)
-                                     : static_cast<unsigned int>(instruction.operands[3].immediate);
-        if (mask_amount >= width)
+        const auto full_mask = width == 32U ? std::uint64_t{0xffffffffU}
+                                            : std::numeric_limits<std::uint64_t>::max();
+        const auto low_mask = [full_mask, width](unsigned int count) noexcept {
+            if (count == 0U) return std::uint64_t{0U};
+            if (count >= width) return full_mask;
+            return (std::uint64_t{1U} << count) - 1U;
+        };
+        const auto rotate_right = [full_mask, width](std::uint64_t value,
+                                                      unsigned int amount) noexcept {
+            value &= full_mask;
+            amount %= width;
+            if (amount == 0U) return value;
+            return ((value >> amount) | (value << (width - amount))) & full_mask;
+        };
+        const auto write_mask = rotate_right(low_mask(imms + 1U), immr);
+        const auto bit_count = ((imms - immr) & (width - 1U)) + 1U;
+        const auto test_mask = low_mask(bit_count);
+        const auto rotate = constant(type, immr, instruction);
+        const auto write_mask_value = constant(type, write_mask, instruction);
+        const auto test_mask_value = constant(type, test_mask, instruction);
+        if (!rotate || !write_mask_value || !test_mask_value)
         {
-            return Result<void>::failure(unsupported(instruction, "bitfield mask is outside the register width"));
+            return Result<void>::failure(!rotate ? rotate.error()
+                                        : !write_mask_value ? write_mask_value.error()
+                                                            : test_mask_value.error());
         }
-        const auto rotate = constant(type, rotate_amount, instruction);
-        if (!rotate)
-        {
-            return Result<void>::failure(rotate.error());
-        }
-        const auto rotated = rotate_amount == 0U
+        const auto rotated = immr == 0U
                                  ? source
                                  : binary(ir::Opcode::RotateRight, source.value(), rotate.value(), type,
                                           instruction);
@@ -1950,68 +2045,93 @@ class FunctionLifter
         {
             return Result<void>::failure(rotated.error());
         }
-        const auto length = mask_amount >= rotate_amount ? mask_amount - rotate_amount + 1U
-                                                         : mask_amount + 1U;
-        const auto mask = length == width ? (type == ir::i32_type() ? 0xffffffffU
-                                                                      : std::numeric_limits<std::uint64_t>::max())
-                                          : (std::uint64_t{1} << length) - 1U;
-        const auto mask_value = constant(type, mask, instruction);
-        if (!mask_value)
+        const auto inserted = binary(ir::Opcode::And, rotated.value(), write_mask_value.value(), type,
+                                     instruction);
+        if (!inserted)
         {
-            return Result<void>::failure(mask_value.error());
+            return Result<void>::failure(inserted.error());
         }
-        auto result = binary(ir::Opcode::And, rotated.value(), mask_value.value(), type, instruction);
-        if (!result)
+        Result<ir::ValueId> result = inserted;
+        if (instruction.id == aarch64::InstructionId::Ubfm)
         {
-            return Result<void>::failure(result.error());
+            result = binary(ir::Opcode::And, inserted.value(), test_mask_value.value(), type, instruction);
         }
-        if (instruction.id == aarch64::InstructionId::Sbfm)
+        else if (instruction.id == aarch64::InstructionId::Sbfm)
         {
-            const auto sign_shift = constant(type, length - 1U, instruction);
-            const auto sign_bit = sign_shift
-                                      ? binary(ir::Opcode::LogicalShiftRight, result.value(), sign_shift.value(), type,
-                                               instruction)
-                                      : Result<ir::ValueId>::failure(sign_shift.error());
-            if (!sign_bit)
-            {
-                return Result<void>::failure(sign_bit.error());
-            }
-            const auto sign = cast(ir::Opcode::Truncate, sign_bit.value(), ir::i1_type(), instruction);
-            const auto sign_mask = constant(type, type == ir::i32_type()
-                                                       ? static_cast<std::uint64_t>(~static_cast<std::uint32_t>(mask))
-                                                       : ~mask,
-                                             instruction);
+            const auto sign_shift = constant(type, imms, instruction);
             const auto zero = constant(type, 0U, instruction);
-            const auto extended = sign && sign_mask && zero
-                                      ? emit_value(ir::Instruction{ir::Opcode::Select, ir::invalid_value, type,
-                                                                   {sign.value(), sign_mask.value(), zero.value()}, {},
-                                                                   ir::Flag::N, ir::ConditionCode::Al, 0, 0, 0,
-                                                                   source_location(instruction)})
-                                      : Result<ir::ValueId>::failure(!sign ? sign.error()
-                                                                     : !sign_mask ? sign_mask.error() : zero.error());
-            if (!extended)
+            const auto all_ones = constant(type, full_mask, instruction);
+            const auto inverse_test = unary(ir::Opcode::Not, test_mask_value.value(), type, instruction);
+            if (!sign_shift || !zero || !all_ones || !inverse_test)
             {
-                return Result<void>::failure(extended.error());
+                return Result<void>::failure(!sign_shift ? sign_shift.error()
+                                            : !zero ? zero.error()
+                                            : !all_ones ? all_ones.error() : inverse_test.error());
             }
-            result = binary(ir::Opcode::Or, result.value(), extended.value(), type, instruction);
+            const auto sign_value = binary(ir::Opcode::LogicalShiftRight, source.value(), sign_shift.value(),
+                                           type, instruction);
+            if (!sign_value)
+            {
+                return Result<void>::failure(sign_value.error());
+            }
+            const auto sign = cast(ir::Opcode::Truncate, sign_value.value(), ir::i1_type(), instruction);
+            if (!sign)
+            {
+                return Result<void>::failure(sign.error());
+            }
+            const auto top = emit_value(ir::Instruction{ir::Opcode::Select, ir::invalid_value, type,
+                                                         {sign.value(), all_ones.value(), zero.value()}, {},
+                                                         ir::Flag::N, ir::ConditionCode::Al, 0, 0, 0,
+                                                         source_location(instruction)});
+            const auto top_masked = top ? binary(ir::Opcode::And, top.value(), inverse_test.value(), type,
+                                                 instruction)
+                                        : Result<ir::ValueId>::failure(top.error());
+            const auto bottom_masked = binary(ir::Opcode::And, inserted.value(), test_mask_value.value(), type,
+                                              instruction);
+            if (!top_masked || !bottom_masked)
+            {
+                return Result<void>::failure(!top_masked ? top_masked.error() : bottom_masked.error());
+            }
+            result = binary(ir::Opcode::Or, top_masked.value(), bottom_masked.value(), type, instruction);
         }
-        if (instruction.id == aarch64::InstructionId::Bfm)
+        else if (instruction.id == aarch64::InstructionId::Bfm)
         {
             const auto old = read_register(instruction.operands[0].reg, instruction);
-            const auto inverse_mask = unary(ir::Opcode::Not, mask_value.value(), type, instruction);
-            if (!old || !inverse_mask)
+            const auto inverse_write = unary(ir::Opcode::Not, write_mask_value.value(), type, instruction);
+            const auto inverse_test = unary(ir::Opcode::Not, test_mask_value.value(), type, instruction);
+            if (!old || !inverse_write)
             {
-                return Result<void>::failure(!old ? old.error() : inverse_mask.error());
+                return Result<void>::failure(!old ? old.error() : inverse_write.error());
             }
-            const auto preserved = binary(ir::Opcode::And, old.value(), inverse_mask.value(), type, instruction);
-            result = preserved ? binary(ir::Opcode::Or, preserved.value(), result.value(), type, instruction)
-                               : Result<ir::ValueId>::failure(preserved.error());
+            if (!inverse_test)
+            {
+                return Result<void>::failure(inverse_test.error());
+            }
+            const auto preserved = binary(ir::Opcode::And, old.value(), inverse_write.value(), type, instruction);
+            if (!preserved)
+            {
+                return Result<void>::failure(preserved.error());
+            }
+            const auto combined = binary(ir::Opcode::Or, preserved.value(), inserted.value(), type,
+                                         instruction);
+            if (!combined)
+            {
+                return Result<void>::failure(combined.error());
+            }
+            const auto within_test = binary(ir::Opcode::And, combined.value(), test_mask_value.value(),
+                                            type, instruction);
+            const auto preserved_outside_test = binary(ir::Opcode::And, old.value(),
+                                                       inverse_test.value(), type, instruction);
+            if (!within_test || !preserved_outside_test)
+            {
+                return Result<void>::failure(!within_test ? within_test.error()
+                                                          : preserved_outside_test.error());
+            }
+            result = binary(ir::Opcode::Or, within_test.value(), preserved_outside_test.value(),
+                            type, instruction);
         }
-        if (!result)
-        {
-            return Result<void>::failure(result.error());
-        }
-        return write_register(instruction.operands[0].reg, result.value(), instruction);
+        return result ? write_register(instruction.operands[0].reg, result.value(), instruction)
+                      : Result<void>::failure(result.error());
     }
 
     [[nodiscard]] Result<void> lift_pc_relative(const DecodedInstruction& instruction)
@@ -3199,6 +3319,7 @@ class FunctionLifter
         case aarch64::InstructionId::Ubfm:
         case aarch64::InstructionId::Sbfm:
         case aarch64::InstructionId::Bfm:
+        case aarch64::InstructionId::Extr:
             return lift_bitfield(instruction);
         case aarch64::InstructionId::Mul:
         case aarch64::InstructionId::Madd:
@@ -3306,6 +3427,7 @@ bool is_instruction_liftable(aarch64::InstructionId id) noexcept
     case aarch64::InstructionId::Ubfm:
     case aarch64::InstructionId::Sbfm:
     case aarch64::InstructionId::Bfm:
+    case aarch64::InstructionId::Extr:
     case aarch64::InstructionId::Mul:
     case aarch64::InstructionId::Madd:
     case aarch64::InstructionId::Msub:

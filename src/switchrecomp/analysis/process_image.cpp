@@ -1197,7 +1197,6 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
 
 Result<ProcessFunctionMap> ProcessFunctionMap::build(std::vector<FinalizedFunctionMap> maps)
 {
-    ProcessFunctionMap result;
     std::sort(maps.begin(), maps.end(), [](const auto& left, const auto& right) {
         return left.identity().module < right.identity().module;
     });
@@ -1210,15 +1209,72 @@ Result<ProcessFunctionMap> ProcessFunctionMap::build(std::vector<FinalizedFuncti
                 "process function maps contain a duplicate logical module identity"));
         }
     }
-    result.maps_ = std::move(maps);
-    for (std::size_t map_index = 0U; map_index < result.maps_.size(); ++map_index)
+    MapStorage storage;
+    storage.reserve(maps.size());
+    for (auto& map : maps)
     {
-        if (!result.maps_[map_index].frozen())
+        if (!map.frozen())
         {
             return Result<ProcessFunctionMap>::failure(make_error(
                 ErrorCode::InvalidArgument, "process function map requires frozen module maps"));
         }
-        for (const auto& function : result.maps_[map_index].functions())
+        storage.push_back(std::make_shared<const FinalizedFunctionMap>(std::move(map)));
+    }
+    return from_storage(std::move(storage));
+}
+
+Result<ProcessFunctionMap> ProcessFunctionMap::replace_module(
+    const ProcessFunctionMap& existing, std::string_view module,
+    FinalizedFunctionMap replacement)
+{
+    if (!replacement.frozen() || replacement.identity().module != module)
+    {
+        return Result<ProcessFunctionMap>::failure(make_error(
+            ErrorCode::InvalidArgument,
+            "incremental process map replacement must be a frozen map for the requested module"));
+    }
+    MapStorage storage = existing.maps_;
+    const auto found = std::find_if(storage.begin(), storage.end(), [module](const auto& item) {
+        return item != nullptr && item->identity().module == module;
+    });
+    if (found == storage.end())
+    {
+        storage.push_back(std::make_shared<const FinalizedFunctionMap>(std::move(replacement)));
+    }
+    else
+    {
+        *found = std::make_shared<const FinalizedFunctionMap>(std::move(replacement));
+    }
+    std::sort(storage.begin(), storage.end(), [](const auto& left, const auto& right) {
+        return left->identity().module < right->identity().module;
+    });
+    return from_storage(std::move(storage));
+}
+
+Result<ProcessFunctionMap> ProcessFunctionMap::from_storage(MapStorage maps)
+{
+    ProcessFunctionMap result;
+    result.maps_ = std::move(maps);
+    for (const auto& map : result.maps_)
+    {
+        if (map == nullptr || !map->frozen())
+        {
+            return Result<ProcessFunctionMap>::failure(make_error(
+                ErrorCode::InvalidArgument, "process function map requires frozen module maps"));
+        }
+    }
+    for (std::size_t index = 1U; index < result.maps_.size(); ++index)
+    {
+        if (result.maps_[index - 1U]->identity().module == result.maps_[index]->identity().module)
+        {
+            return Result<ProcessFunctionMap>::failure(make_error(
+                ErrorCode::DuplicateModuleIdentity,
+                "process function maps contain a duplicate logical module identity"));
+        }
+    }
+    for (std::size_t map_index = 0U; map_index < result.maps_.size(); ++map_index)
+    {
+        for (const auto& function : result.maps_[map_index]->functions())
         {
             const auto inserted = result.entries_.emplace(function.canonical_entry, map_index);
             if (!inserted.second)
@@ -1236,7 +1292,7 @@ const FunctionRecord* ProcessFunctionMap::find(GuestAddress entry) const noexcep
 {
     const auto found = entries_.find(entry);
     if (found == entries_.end()) return nullptr;
-    const auto& functions = maps_[found->second].functions();
+    const auto& functions = maps_[found->second]->functions();
     const auto item = std::lower_bound(functions.begin(), functions.end(), entry,
                                        [](const auto& function, GuestAddress value) {
                                            return function.canonical_entry < value;
@@ -1247,7 +1303,7 @@ const FunctionRecord* ProcessFunctionMap::find(GuestAddress entry) const noexcep
 const FinalizedFunctionMap* ProcessFunctionMap::map_for(GuestAddress entry) const noexcept
 {
     const auto found = entries_.find(entry);
-    return found == entries_.end() ? nullptr : &maps_[found->second];
+    return found == entries_.end() ? nullptr : maps_[found->second].get();
 }
 
 } // namespace switchrecomp::analysis

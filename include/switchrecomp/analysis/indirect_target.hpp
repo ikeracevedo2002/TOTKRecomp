@@ -543,6 +543,17 @@ struct IndirectTargetRefinementSummary
     std::size_t module_maps_rebuilt = 0U;
     std::size_t module_maps_reused = 0U;
     std::size_t candidates_reconsidered_after_map_change = 0U;
+    std::size_t refinement_batches = 0U;
+    std::size_t batch_candidates = 0U;
+    std::size_t singleton_batches = 0U;
+    std::size_t rebuilds_avoided = 0U;
+    std::size_t max_batch_width = 0U;
+    std::size_t finalized_functions_reused = 0U;
+    std::size_t cfgs_reused = 0U;
+    std::size_t functions_rebuilt = 0U;
+    std::size_t modules_touched = 0U;
+    std::size_t incremental_updates = 0U;
+    std::size_t full_rebuilds = 0U;
     std::size_t map_generation = 0U;
     std::size_t pending_candidate_count = 0U;
     IndirectTargetRefinementAnalysisSummary analysis;
@@ -587,13 +598,35 @@ class IndirectTargetRefinementWorklist
         const IndirectTargetRefinementAnalysisWork& work,
         std::size_t module_maps_rebuilt = 0U,
         std::size_t module_maps_reused = 0U) noexcept;
+    [[nodiscard]] bool can_commit_batch_refinement(
+        std::span<const IndirectTargetCandidateIdentity> candidates,
+        const IndirectTargetRefinementAnalysisWork& work,
+        std::size_t module_maps_rebuilt = 0U,
+        std::size_t module_maps_reused = 0U) noexcept;
     void record_terminal_candidate(const IndirectTargetCandidateIdentity& candidate) noexcept;
     void record_failed_refinement(const IndirectTargetCandidateIdentity& candidate) noexcept;
     void record_rollback_assessment(const IndirectTargetCandidateIdentity& candidate) noexcept;
     void record_promotion(const IndirectTargetCandidateIdentity& candidate,
                           std::size_t module_maps_rebuilt = 0U,
                           std::size_t module_maps_reused = 0U,
-                          const IndirectTargetRefinementAnalysisWork& work = {}) noexcept;
+                          const IndirectTargetRefinementAnalysisWork& work = {},
+                          std::size_t finalized_functions_reused = 0U,
+                          std::size_t cfgs_reused = 0U,
+                          std::size_t functions_rebuilt = 0U,
+                          std::size_t modules_touched = 0U,
+                          std::size_t incremental_updates = 1U,
+                          std::size_t full_rebuilds = 0U) noexcept;
+    void record_batch_promotion(
+        std::span<const IndirectTargetCandidateIdentity> candidates,
+        std::size_t module_maps_rebuilt = 0U,
+        std::size_t module_maps_reused = 0U,
+        const IndirectTargetRefinementAnalysisWork& work = {},
+        std::size_t finalized_functions_reused = 0U,
+        std::size_t cfgs_reused = 0U,
+        std::size_t functions_rebuilt = 0U,
+        std::size_t modules_touched = 0U,
+        std::size_t incremental_updates = 1U,
+        std::size_t full_rebuilds = 0U) noexcept;
 
     [[nodiscard]] std::vector<ObservedIndirectTarget> pending_candidates() const;
     [[nodiscard]] IndirectTargetRefinementSummary summary() const;
@@ -704,6 +737,15 @@ struct IndirectTargetDiscoveryOptions
     bool require_independent_static_evidence = false;
 };
 
+// Assess a stable candidate sequence against one immutable process-map
+// generation. Worker completion order is intentionally hidden: the returned
+// vector always follows the input order, and workers only write isolated
+// result slots before coordinator publication.
+[[nodiscard]] Result<std::vector<IndirectTargetAssessment>> assess_indirect_targets(
+    std::span<const ObservedIndirectTarget> candidates, const memory::GuestMemory& memory,
+    const ProcessFunctionMap& process_map, const ProcessImage& process_image,
+    const IndirectTargetDiscoveryOptions& options = {}, std::size_t workers = 1U);
+
 struct FunctionMapRefinement
 {
     FinalizedFunctionMap map;
@@ -718,6 +760,28 @@ struct ProcessFunctionMapRefinement
     std::size_t module_maps_rebuilt = 0U;
     std::size_t module_maps_reused = 0U;
     IndirectTargetRefinementAnalysisWork analysis_work;
+    std::size_t finalized_functions_reused = 0U;
+    std::size_t cfgs_reused = 0U;
+    std::size_t functions_rebuilt = 0U;
+    std::size_t modules_touched = 0U;
+    std::size_t incremental_updates = 1U;
+    std::size_t full_rebuilds = 0U;
+};
+
+struct ProcessFunctionMapBatchRefinement
+{
+    ProcessFunctionMap map;
+    std::vector<IndirectTargetAssessment> assessments;
+    std::size_t module_maps_rebuilt = 0U;
+    std::size_t module_maps_reused = 0U;
+    IndirectTargetRefinementAnalysisWork analysis_work;
+    std::size_t finalized_functions_reused = 0U;
+    std::size_t cfgs_reused = 0U;
+    std::size_t functions_rebuilt = 0U;
+    std::size_t modules_touched = 0U;
+    std::size_t incremental_updates = 1U;
+    std::size_t full_rebuilds = 0U;
+    bool all_promoted = false;
 };
 
 [[nodiscard]] Result<IndirectTargetAssessment> assess_indirect_target(
@@ -740,6 +804,14 @@ struct ProcessFunctionMapRefinement
 [[nodiscard]] Result<ProcessFunctionMapRefinement> refine_process_function_map(
     const ProcessFunctionMap& existing, const ProcessImage& process_image,
     const ObservedIndirectTarget& observed,
+    const IndirectTargetDiscoveryOptions& options = {});
+
+// Assessments in a batch are made against one immutable input generation. The
+// coordinator must only pass structurally independent candidates; the helper
+// builds each touched module once and publishes one deterministic map.
+[[nodiscard]] Result<ProcessFunctionMapBatchRefinement> refine_process_function_map_batch(
+    const ProcessFunctionMap& existing, const ProcessImage& process_image,
+    std::span<const IndirectTargetAssessment> assessments,
     const IndirectTargetDiscoveryOptions& options = {});
 
 void sort_observed_indirect_targets(std::vector<ObservedIndirectTarget>& targets);
