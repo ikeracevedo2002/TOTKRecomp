@@ -1461,6 +1461,7 @@ int main(int argc, char** argv)
         analysis::IndirectTargetDiscoveryOptions discovery_options;
         discovery_options.budgets = function_options.budgets;
         discovery_options.cfg = function_options.cfg;
+        discovery_options.refinement_workers = analysis_workers;
         analysis::IndirectTargetRefinementWorklist worklist(refinement_budgets);
         const auto refinement_start = std::chrono::steady_clock::now();
         std::int64_t assessment_elapsed_us = 0;

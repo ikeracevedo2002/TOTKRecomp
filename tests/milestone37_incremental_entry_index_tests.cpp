@@ -1,3 +1,4 @@
+#include "switchrecomp/analysis/indirect_target.hpp"
 #include "switchrecomp/analysis/process_image.hpp"
 #include "switchrecomp/version.hpp"
 
@@ -9,6 +10,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -72,20 +74,10 @@ void write_u32(std::vector<std::byte>& bytes, std::size_t offset, std::uint32_t 
     return file;
 }
 
-[[nodiscard]] analysis::FinalizedFunctionMap make_map(
-    const memory::GuestMemory& memory, std::string module, memory::GuestAddress base,
-    memory::GuestSize executable_size, std::initializer_list<memory::GuestAddress> entries)
+[[nodiscard]] analysis::FinalizedFunctionMap make_map_from_identity(
+    const memory::GuestMemory& memory, analysis::ModuleIdentity identity,
+    std::initializer_list<memory::GuestAddress> entries)
 {
-    analysis::ModuleIdentity identity;
-    identity.module = std::move(module);
-    identity.build_id = "synthetic-build";
-    identity.input_sha256 = "synthetic-sha";
-    identity.guest_base = base;
-    identity.guest_base_provenance = analysis::ModuleBaseProvenance::ExplicitAnalysisBase;
-    identity.translator_version = version;
-    identity.executable_ranges.push_back(
-        analysis::GuestAddressRange{base, executable_size});
-
     std::vector<analysis::FunctionSeed> seeds;
     for (const auto entry : entries)
     {
@@ -100,6 +92,46 @@ void write_u32(std::vector<std::byte>& bytes, std::size_t offset, std::uint32_t 
         analysis::ModuleAnalysisInput{std::move(identity), &memory, std::move(seeds)});
     REQUIRE(result);
     return std::move(result).value();
+}
+
+[[nodiscard]] analysis::FinalizedFunctionMap make_map(
+    const memory::GuestMemory& memory, std::string module, memory::GuestAddress base,
+    memory::GuestSize executable_size, std::initializer_list<memory::GuestAddress> entries)
+{
+    analysis::ModuleIdentity identity;
+    identity.module = std::move(module);
+    identity.build_id = "synthetic-build";
+    identity.input_sha256 = "synthetic-sha";
+    identity.guest_base = base;
+    identity.guest_base_provenance = analysis::ModuleBaseProvenance::ExplicitAnalysisBase;
+    identity.translator_version = version;
+    identity.executable_ranges.push_back(
+        analysis::GuestAddressRange{base, executable_size});
+    return make_map_from_identity(memory, std::move(identity), entries);
+}
+
+[[nodiscard]] analysis::FinalizedFunctionMap make_process_map(
+    const analysis::ProcessImage& image, std::string_view module,
+    std::initializer_list<memory::GuestAddress> entries)
+{
+    const auto* process_module = image.module(module);
+    REQUIRE(process_module != nullptr);
+    return make_map_from_identity(image.memory(), process_module->identity, entries);
+}
+
+[[nodiscard]] analysis::ObservedIndirectTarget observed_target(
+    std::string target_module, memory::GuestAddress target)
+{
+    analysis::ObservedIndirectTarget result;
+    result.source_module = "main";
+    result.source_function = 0x100008U;
+    result.source_pc = 0x100008U;
+    result.control_flow = analysis::IndirectControlFlowKind::Call;
+    result.target_register = "x8";
+    result.target = target;
+    result.target_module = std::move(target_module);
+    result.pointer_provenance = analysis::IndirectTargetPointerProvenanceKind::Unknown;
+    return result;
 }
 
 } // namespace
@@ -145,6 +177,72 @@ TEST_CASE("M37 replacing one module preserves immutable untouched maps and looku
     REQUIRE(process.value().find(0x200008U) != nullptr);
 }
 
+TEST_CASE("M37 independent module map builds are deterministic with multiple workers")
+{
+    const auto bytes = minimal_nso();
+    const std::array<analysis::ProcessModuleInput, 2U> inputs{
+        analysis::ProcessModuleInput{"main", bytes, 0x100000U},
+        analysis::ProcessModuleInput{"provider", bytes, 0x200000U}};
+    analysis::ProcessImageOptions image_options;
+    image_options.primary_module = "main";
+    image_options.provider_search_complete = true;
+    image_options.module_options.seed_text_entry = false;
+    const auto image = analysis::load_process_image(inputs, image_options);
+    REQUIRE(image);
+
+    std::vector<analysis::FinalizedFunctionMap> maps;
+    maps.push_back(make_process_map(image.value(), "main", {0x100008U}));
+    maps.push_back(make_process_map(image.value(), "provider", {0x200008U}));
+    const auto process = analysis::ProcessFunctionMap::build(std::move(maps));
+    REQUIRE(process);
+
+    const auto main_assessment = analysis::assess_indirect_target(
+        observed_target("main", 0x10000cU), image.value().memory(), nullptr,
+        &process.value(), &image.value());
+    const auto provider_assessment = analysis::assess_indirect_target(
+        observed_target("provider", 0x20000cU), image.value().memory(), nullptr,
+        &process.value(), &image.value());
+    REQUIRE(main_assessment);
+    REQUIRE(provider_assessment);
+    REQUIRE(main_assessment.value().decision.eligible_for_promotion);
+    REQUIRE(provider_assessment.value().decision.eligible_for_promotion);
+
+    const std::array<analysis::IndirectTargetAssessment, 2U> assessments{
+        main_assessment.value(), provider_assessment.value()};
+    analysis::IndirectTargetDiscoveryOptions serial_options;
+    serial_options.refinement_workers = 1U;
+    const auto serial = analysis::refine_process_function_map_batch(
+        process.value(), image.value(), assessments, serial_options);
+    REQUIRE(serial);
+    REQUIRE(serial.value().all_promoted);
+
+    analysis::IndirectTargetDiscoveryOptions parallel_options = serial_options;
+    parallel_options.refinement_workers = 2U;
+    const auto parallel = analysis::refine_process_function_map_batch(
+        process.value(), image.value(), assessments, parallel_options);
+    REQUIRE(parallel);
+    REQUIRE(parallel.value().all_promoted);
+    REQUIRE(parallel.value().module_maps_rebuilt == serial.value().module_maps_rebuilt);
+    REQUIRE(parallel.value().module_maps_reused == serial.value().module_maps_reused);
+    REQUIRE(parallel.value().map.find(0x10000cU) != nullptr);
+    REQUIRE(parallel.value().map.find(0x20000cU) != nullptr);
+
+    for (const auto& module : serial.value().map.maps())
+    {
+        const auto* parallel_map = parallel.value().map.map_for(
+            module.identity().module == "main" ? 0x100008U : 0x200008U);
+        REQUIRE(parallel_map != nullptr);
+        REQUIRE(parallel_map->functions().size() == module.functions().size());
+        for (std::size_t index = 0U; index < module.functions().size(); ++index)
+        {
+            REQUIRE(parallel_map->functions()[index].canonical_entry ==
+                    module.functions()[index].canonical_entry);
+            REQUIRE(parallel_map->functions()[index].owned_code_ranges ==
+                    module.functions()[index].owned_code_ranges);
+        }
+    }
+}
+
 TEST_CASE("M37 changed module layouts use the complete index construction path")
 {
     const auto bytes = minimal_nso();
@@ -159,10 +257,8 @@ TEST_CASE("M37 changed module layouts use the complete index construction path")
     REQUIRE(image);
 
     std::vector<analysis::FinalizedFunctionMap> maps;
-    maps.push_back(make_map(image.value().memory(), "main", 0x100000U, 0x20U,
-                            {0x100008U}));
-    maps.push_back(make_map(image.value().memory(), "provider", 0x300000U, 0x20U,
-                            {0x300008U}));
+    maps.push_back(make_process_map(image.value(), "main", {0x100008U}));
+    maps.push_back(make_process_map(image.value(), "provider", {0x300008U}));
     const auto process = analysis::ProcessFunctionMap::build(std::move(maps));
     REQUIRE(process);
 

@@ -2015,8 +2015,19 @@ Result<ProcessFunctionMapBatchRefinement> refine_process_function_map_batch(
         return Result<ProcessFunctionMapBatchRefinement>::success(std::move(result));
     }
 
+    struct ModuleBuildTask
+    {
+        std::string module_name;
+        std::vector<std::size_t> candidates;
+        ModuleIdentity identity;
+        const FinalizedFunctionMap* existing_map = nullptr;
+        std::vector<FunctionSeed> seeds;
+        FunctionMapOptions options;
+    };
+
     std::size_t existing_touched = 0U;
-    ProcessFunctionMap published = existing;
+    std::vector<ModuleBuildTask> tasks;
+    tasks.reserve(by_module.size());
     for (const auto& [module_name, candidates] : by_module)
     {
         const auto* target_module = process_image.module(module_name);
@@ -2039,40 +2050,124 @@ Result<ProcessFunctionMapBatchRefinement> refine_process_function_map_batch(
         }
         if (existing_module_map != nullptr) ++existing_touched;
 
-        std::vector<FunctionSeed> seeds;
+        ModuleBuildTask task{module_name, candidates, target_module->identity,
+                             existing_module_map, {}, map_options(options)};
         if (existing_module_map != nullptr)
-            seeds = seeds_from_finalized_map(*existing_module_map);
-        auto rebuild_options = map_options(options);
+            task.seeds = seeds_from_finalized_map(*existing_module_map);
         for (const auto index : candidates)
         {
             const auto& assessment = result.assessments[index];
-            seeds.push_back(FunctionSeed{
+            task.seeds.push_back(FunctionSeed{
                 assessment.observed.target, FunctionDiscoverySource::ObservedIndirectTarget,
                 assessment.decision.confidence, std::nullopt, std::nullopt,
                 "immutable batched process refinement from runtime indirect target at " +
                     hex_address(assessment.observed.source_pc)});
-            rebuild_options.newly_introduced_function_entries.insert(assessment.observed.target);
+            task.options.newly_introduced_function_entries.insert(assessment.observed.target);
             for (const auto target : assessment.validation.direct_call_targets)
             {
-                rebuild_options.newly_introduced_function_entries.insert(target);
-                seeds.push_back(FunctionSeed{
+                task.options.newly_introduced_function_entries.insert(target);
+                task.seeds.push_back(FunctionSeed{
                     target, FunctionDiscoverySource::DirectCall,
                     FunctionConfidence::High, std::nullopt, std::nullopt,
                     "direct-call closure of a batched indirect target"});
             }
         }
-        set_rebuild_roots(rebuild_options, seeds);
-        rebuild_options.reuse_map = existing_module_map;
-        const auto rebuilt_module = FunctionMapBuilder::build(
-            ModuleAnalysisInput{target_module->identity, &process_image.memory(), std::move(seeds)},
-            rebuild_options);
+        set_rebuild_roots(task.options, task.seeds);
+        task.options.reuse_map = existing_module_map;
+        tasks.push_back(std::move(task));
+    }
+
+    std::vector<std::optional<Result<FinalizedFunctionMap>>> rebuilt_modules(tasks.size());
+    const auto build_module = [&](std::size_t index) {
+        auto& task = tasks[index];
+        try
+        {
+            rebuilt_modules[index] = FunctionMapBuilder::build(
+                ModuleAnalysisInput{task.identity, &process_image.memory(),
+                                    std::move(task.seeds)},
+                std::move(task.options));
+        }
+        catch (const std::bad_alloc&)
+        {
+            rebuilt_modules[index] = Result<FinalizedFunctionMap>::failure(
+                make_error(ErrorCode::ResourceLimit,
+                           "parallel module-map construction allocation failed"));
+        }
+        catch (...)
+        {
+            rebuilt_modules[index] = Result<FinalizedFunctionMap>::failure(
+                make_error(ErrorCode::ThreadCreationFailed,
+                           "parallel module-map construction failed unexpectedly"));
+        }
+    };
+
+    if (options.refinement_workers <= 1U || tasks.size() <= 1U)
+    {
+        for (std::size_t index = 0U; index < tasks.size(); ++index) build_module(index);
+    }
+    else
+    {
+        const auto worker_count = std::min(options.refinement_workers, tasks.size());
+        std::atomic<std::size_t> next{0U};
+        std::vector<std::thread> worker_threads;
+        worker_threads.reserve(worker_count);
+        const auto join_workers = [&]() noexcept {
+            for (auto& worker : worker_threads)
+                if (worker.joinable()) worker.join();
+        };
+        try
+        {
+            for (std::size_t worker = 0U; worker < worker_count; ++worker)
+            {
+                worker_threads.emplace_back([&]() {
+                    for (;;)
+                    {
+                        const auto index = next.fetch_add(1U, std::memory_order_relaxed);
+                        if (index >= tasks.size()) return;
+                        build_module(index);
+                    }
+                });
+            }
+        }
+        catch (const std::exception&)
+        {
+            join_workers();
+            return Result<ProcessFunctionMapBatchRefinement>::failure(
+                make_error(ErrorCode::ThreadCreationFailed,
+                           "unable to create the bounded module-map worker pool"));
+        }
+        catch (...)
+        {
+            join_workers();
+            return Result<ProcessFunctionMapBatchRefinement>::failure(
+                make_error(ErrorCode::ThreadCreationFailed,
+                           "unable to create the bounded module-map worker pool"));
+        }
+        join_workers();
+    }
+
+    for (std::size_t index = 0U; index < tasks.size(); ++index)
+    {
+        auto& rebuilt_module = rebuilt_modules[index];
         if (!rebuilt_module)
         {
-            for (const auto index : candidates)
-                mark_refinement_failure(result.assessments[index], rebuilt_module.error());
+            return Result<ProcessFunctionMapBatchRefinement>::failure(
+                make_error(ErrorCode::ThreadCreationFailed,
+                           "module-map worker did not publish a result"));
+        }
+        if (!rebuilt_module->has_value())
+        {
+            for (const auto candidate : tasks[index].candidates)
+                mark_refinement_failure(result.assessments[candidate], rebuilt_module->error());
             return Result<ProcessFunctionMapBatchRefinement>::success(std::move(result));
         }
-        const auto accounting = rebuilt_module.value().accounting();
+    }
+
+    ProcessFunctionMap published = existing;
+    for (std::size_t index = 0U; index < tasks.size(); ++index)
+    {
+        auto& task = tasks[index];
+        const auto& accounting = rebuilt_modules[index]->value().accounting();
         result.analysis_work.module = accounting.module;
         result.analysis_work.functions_analyzed += accounting.newly_analyzed_functions;
         result.analysis_work.functions_reanalyzed += accounting.reanalyzed_functions;
@@ -2089,17 +2184,17 @@ Result<ProcessFunctionMapBatchRefinement> refine_process_function_map_batch(
         result.functions_rebuilt += accounting.newly_analyzed_functions +
                                     accounting.reanalyzed_functions;
         ++result.module_maps_rebuilt;
-        result.modules_touched = by_module.size();
         const auto replacement = ProcessFunctionMap::replace_module(
-            published, module_name, std::move(rebuilt_module).value());
+            published, task.module_name, std::move(rebuilt_modules[index]->value()));
         if (!replacement)
         {
-            for (const auto index : candidates)
-                mark_refinement_failure(result.assessments[index], replacement.error());
+            for (const auto candidate : task.candidates)
+                mark_refinement_failure(result.assessments[candidate], replacement.error());
             return Result<ProcessFunctionMapBatchRefinement>::success(std::move(result));
         }
         published = std::move(replacement).value();
     }
+    result.modules_touched = tasks.size();
     result.module_maps_reused = existing.maps().size() - existing_touched;
     result.map = std::move(published);
     result.all_promoted = true;
