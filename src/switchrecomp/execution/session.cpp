@@ -2418,6 +2418,7 @@ void ExecutionSession::append_transition(const TransitionRequest& request, Guest
         accounting.history.push_back(std::move(evidence));
     }
     result.executed_functions.push_back(target);
+    executed_function_index_.insert(target);
     result.executed_function_modules.push_back(module_name_for(target));
 }
 
@@ -3074,6 +3075,8 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     suspended_frames_.clear();
     current_ = SessionFrame{};
     lift_cache_.clear();
+    executed_function_index_.clear();
+    instruction_evidence_index_.clear();
     runtime_state_.reset();
     ExecutionSessionResult result;
     result.identity = function_map_->identity();
@@ -3377,14 +3380,14 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         }
         for (const auto& observed_execution : step.value().observed_instruction_executions)
         {
-            const auto already_recorded = std::find_if(
-                result.instruction_evidence.begin(), result.instruction_evidence.end(),
-                [&](const auto& observed) { return observed.guest_pc == observed_execution.guest_pc; });
-            if (already_recorded != result.instruction_evidence.end()) continue;
+            if (instruction_evidence_index_.find(observed_execution.guest_pc) !=
+                instruction_evidence_index_.end())
+                continue;
             if (const auto observed = describe_observed_instruction(observed_execution,
                                                                     current_.call_depth))
             {
                 result.instruction_evidence.push_back(observed.value());
+                instruction_evidence_index_.insert(observed->guest_pc);
                 if (observed->instruction_id == "umulh" || observed->instruction_id == "smulh")
                     result.executed_guest_instructions.push_back(observed.value());
                 if (observed->instruction_id == "smulh" && !result.smulh_frontier.reached &&
@@ -3618,9 +3621,9 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         for (const auto& binding : process_image_->bindings())
         {
             if (!binding.provider_address || !binding.applied) continue;
-            result.provider_guest_code_entered |= std::find(
-                result.executed_functions.begin(), result.executed_functions.end(),
-                binding.provider_address.value()) != result.executed_functions.end();
+            result.provider_guest_code_entered |=
+                executed_function_index_.find(binding.provider_address.value()) !=
+                executed_function_index_.end();
         }
     }
     result.runtime.dso_modules_registered = runtime_state_.dso_modules_registered();

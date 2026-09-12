@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace switchrecomp::execution
@@ -666,6 +667,11 @@ class ExecutionSession
     ExecutionSessionOptions options_;
     ExecutionLoadSummary load_summary_;
     std::map<memory::GuestAddress, LiftCacheEntry> lift_cache_;
+    // The vector in ExecutionSessionResult is the deterministic execution
+    // history. Keep a separate index for repeated membership queries so
+    // reporting does not turn into an O(history * bindings) scan.
+    std::unordered_set<memory::GuestAddress> executed_function_index_;
+    std::unordered_set<memory::GuestAddress> instruction_evidence_index_;
     std::vector<memory::GuestAddress> observation_targets_;
     std::vector<memory::GuestAddress> instruction_observation_targets_;
     std::vector<SessionFrame> suspended_frames_;
