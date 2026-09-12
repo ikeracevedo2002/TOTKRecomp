@@ -465,6 +465,7 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/milestone32_candidate_assessment_resource_tests.cpp
         tests/milestone33_refinement_transaction_resource_tests.cpp
         tests/milestone34_execution_observability_tests.cpp
+        tests/milestone35_fp_simd_convergence_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE

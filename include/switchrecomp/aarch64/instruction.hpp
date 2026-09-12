@@ -15,10 +15,10 @@ using GuestAddress = memory::GuestAddress;
 
 enum class SimdOperation : std::uint8_t
 {
-    None, Fmov, Fadd, Fsub, Fmul, Fdiv, Fneg, Fabs, Fsqrt, Fmin, Fmax, Fcmp, Fcmpe,
+    None, Fmov, Movi, Fadd, Fsub, Fmul, Fdiv, Fneg, Fabs, Fsqrt, Fmin, Fmax, Fcmp, Fcmpe,
     Fcsel, Scvtf, Ucvtf, Fcvtzs, Fcvtzu, Fcvt, Frintn, Frintp, Frintm, Frintz,
     Fmadd, Fmsub, Fnmadd, Fnmsub, Dup, Ins, Umov, Smov, Ext, Zip1, Zip2, Uzp1, Uzp2,
-    Trn1, Trn2, Fcmeq, Fcmgt, Fcmge, Cmeq, Cmgt, Cmge, Cmhi, Cmhs,
+    Trn1, Trn2, Fcmeq, Fcmgt, Fcmge, Cmeq, Cmgt, Cmge, Cmhi, Cmhs, St1,
 };
 
 enum class AtomicMemoryOrder : std::uint8_t { Relaxed, Acquire, Release };

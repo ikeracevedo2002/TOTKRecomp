@@ -234,6 +234,7 @@ std::string_view simd_operation_name(SimdOperation operation) noexcept
     {
     case SimdOperation::None: return "none";
     case SimdOperation::Fmov: return "fmov";
+    case SimdOperation::Movi: return "movi";
     case SimdOperation::Fadd: return "fadd";
     case SimdOperation::Fsub: return "fsub";
     case SimdOperation::Fmul: return "fmul";
@@ -278,6 +279,7 @@ std::string_view simd_operation_name(SimdOperation operation) noexcept
     case SimdOperation::Cmge: return "cmge";
     case SimdOperation::Cmhi: return "cmhi";
     case SimdOperation::Cmhs: return "cmhs";
+    case SimdOperation::St1: return "st1";
     }
     return "unknown";
 }

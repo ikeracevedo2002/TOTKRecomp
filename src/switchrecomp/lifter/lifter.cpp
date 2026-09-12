@@ -867,8 +867,60 @@ class FunctionLifter
             return instruction.operands[0].reg.width == aarch64::RegisterWidth::S32
                        ? ir::f32_type()
                        : instruction.operands[0].reg.width == aarch64::RegisterWidth::D64 ? ir::f64_type()
-                                                                                            : ir::void_type();
+                                                                                          : ir::void_type();
         };
+        if (op == Op::Movi)
+        {
+            if (instruction.operands.size() != 2U || !destination_is_vector ||
+                instruction.operands[1].kind != aarch64::OperandKind::Immediate)
+            {
+                return Result<void>::failure(
+                    unsupported(instruction, "MOVI requires a vector destination and immediate"));
+            }
+            const auto arrangement = vector_arrangement(instruction.operands[0], instruction);
+            if (!arrangement || arrangement.value() == ir::VectorArrangement::Raw128)
+            {
+                return Result<void>::failure(
+                    !arrangement ? arrangement.error()
+                                 : unsupported(instruction, "MOVI requires a B/H/S/D arrangement"));
+            }
+            const auto bits = arrangement.value() == ir::VectorArrangement::B8 ||
+                                      arrangement.value() == ir::VectorArrangement::B16
+                                  ? 8U
+                                  : arrangement.value() == ir::VectorArrangement::H4 ||
+                                            arrangement.value() == ir::VectorArrangement::H8
+                                        ? 16U
+                                        : arrangement.value() == ir::VectorArrangement::S2 ||
+                                                  arrangement.value() == ir::VectorArrangement::S4
+                                            ? 32U
+                                            : 64U;
+            const auto type = bits == 8U ? ir::i8_type()
+                              : bits == 16U ? ir::i16_type()
+                              : bits == 32U ? ir::i32_type()
+                                            : ir::i64_type();
+            const auto mask = bits == 64U ? std::numeric_limits<std::uint64_t>::max()
+                                          : (std::uint64_t{1} << bits) - 1U;
+            const auto lane = constant(type,
+                                       static_cast<std::uint64_t>(instruction.operands[1].immediate) & mask,
+                                       instruction);
+            if (!lane)
+            {
+                return Result<void>::failure(lane.error());
+            }
+            ir::Instruction broadcast;
+            broadcast.opcode = ir::Opcode::VectorBroadcast;
+            broadcast.result_type = ir::v128_type();
+            broadcast.operands = {lane.value()};
+            broadcast.arrangement = arrangement.value();
+            broadcast.source = source_location(instruction);
+            const auto value = emit_value(std::move(broadcast));
+            return value ? write_vector(instruction.operands[0].reg, value.value(), instruction)
+                         : Result<void>::failure(value.error());
+        }
+        if (op == Op::St1)
+        {
+            return lift_vector_lane_store(instruction);
+        }
         const auto scalar_binary = [&](ir::FpBinaryOperation operation) -> Result<void> {
             if (instruction.operands.size() != 3U || !destination_is_vector)
             {
@@ -1024,6 +1076,37 @@ class FunctionLifter
             const auto& source = instruction.operands[1];
             if (destination.kind == aarch64::RegisterKind::Vector)
             {
+                if (source.kind == aarch64::OperandKind::FloatingImmediate)
+                {
+                    const auto arrangement = vector_arrangement(instruction.operands[0], instruction);
+                    if (!arrangement)
+                        return Result<void>::failure(arrangement.error());
+                    const auto vector_arrangement = arrangement.value();
+                    const bool is_single = vector_arrangement == ir::VectorArrangement::S2 ||
+                                           vector_arrangement == ir::VectorArrangement::S4;
+                    const bool is_double = vector_arrangement == ir::VectorArrangement::D2;
+                    if (!is_single && !is_double)
+                    {
+                        return Result<void>::failure(unsupported(
+                            instruction,
+                            "FMOV vector immediate requires a .2S, .4S, or .2D arrangement"));
+                    }
+                    const auto scalar = scalar_operand(
+                        source, is_single ? ir::f32_type() : ir::f64_type(), instruction);
+                    if (!scalar) return Result<void>::failure(scalar.error());
+                    const auto bits = bitcast(
+                        scalar.value(), is_single ? ir::i32_type() : ir::i64_type(), instruction);
+                    if (!bits) return Result<void>::failure(bits.error());
+                    ir::Instruction broadcast;
+                    broadcast.opcode = ir::Opcode::VectorBroadcast;
+                    broadcast.result_type = ir::v128_type();
+                    broadcast.operands = {bits.value()};
+                    broadcast.arrangement = vector_arrangement;
+                    broadcast.source = source_location(instruction);
+                    const auto value = emit_value(std::move(broadcast));
+                    return value ? write_vector(destination, value.value(), instruction)
+                                 : Result<void>::failure(value.error());
+                }
                 if (source.kind == aarch64::OperandKind::Register && source.reg.kind == aarch64::RegisterKind::Vector)
                 {
                     if (destination.width == aarch64::RegisterWidth::Q128 || source.reg.width == aarch64::RegisterWidth::Q128)
@@ -2165,6 +2248,74 @@ class FunctionLifter
         return writeback_memory(memory_operand, base.value(), false, instruction);
     }
 
+    [[nodiscard]] Result<void> lift_vector_lane_store(const DecodedInstruction& instruction)
+    {
+        if (instruction.operands.size() != 2U ||
+            instruction.operands[0].kind != aarch64::OperandKind::Register ||
+            instruction.operands[1].kind != aarch64::OperandKind::Memory ||
+            !is_vector_register(instruction.operands[0].reg) ||
+            instruction.operands[0].arrangement == aarch64::VectorArrangement::Invalid ||
+            instruction.operands[0].vector_index < 0)
+        {
+            return Result<void>::failure(
+                unsupported(instruction, "ST1 single-lane store requires a typed vector lane and memory operand"));
+        }
+
+        const auto arrangement = ir_arrangement(instruction.operands[0].arrangement);
+        if (arrangement == ir::VectorArrangement::Raw128)
+        {
+            return Result<void>::failure(
+                unsupported(instruction, "ST1 single-lane store requires a B/H/S/D arrangement"));
+        }
+        const auto lane = static_cast<std::uint8_t>(instruction.operands[0].vector_index);
+        const auto lanes = aarch64::vector_lane_count(instruction.operands[0].arrangement);
+        if (lane >= lanes)
+        {
+            return Result<void>::failure(unsupported(instruction, "ST1 lane index is outside the arrangement"));
+        }
+        const auto element_bits = aarch64::vector_element_bits(instruction.operands[0].arrangement);
+        if (element_bits == 0U || (element_bits % 8U) != 0U)
+        {
+            return Result<void>::failure(unsupported(instruction, "ST1 arrangement has no byte-sized element"));
+        }
+
+        const auto& memory_operand = instruction.operands[1];
+        const auto address = address_for_memory(memory_operand, instruction);
+        const auto base = read_register(memory_operand.memory.base, instruction);
+        if (!address || !base)
+        {
+            return Result<void>::failure(!address ? address.error() : base.error());
+        }
+        const auto pre_writeback = writeback_memory(memory_operand, base.value(), true, instruction);
+        if (!pre_writeback)
+        {
+            return pre_writeback;
+        }
+
+        const auto vector = read_vector(instruction.operands[0].reg, instruction);
+        if (!vector)
+        {
+            return Result<void>::failure(vector.error());
+        }
+        const auto value = vector_extract(vector.value(), arrangement, lane, instruction);
+        if (!value)
+        {
+            return Result<void>::failure(value.error());
+        }
+        ir::Instruction memory;
+        memory.opcode = ir::Opcode::GuestStore;
+        memory.result_type = ir::void_type();
+        memory.operands = {address.value(), value.value()};
+        memory.memory_size = static_cast<std::uint8_t>(element_bits / 8U);
+        memory.source = source_location(instruction);
+        const auto stored = emit_void(std::move(memory));
+        if (!stored)
+        {
+            return stored;
+        }
+        return writeback_memory(memory_operand, base.value(), false, instruction);
+    }
+
     [[nodiscard]] Result<void> lift_memory(const DecodedInstruction& instruction, bool store)
     {
         if (instruction.operands.size() != 2U || instruction.operands[0].kind !=
@@ -3283,6 +3434,19 @@ bool is_instruction_liftable(const aarch64::DecodedInstruction& instruction) noe
     case aarch64::SimdOperation::Cmhi:
     case aarch64::SimdOperation::Cmhs:
         return true;
+    case aarch64::SimdOperation::Movi:
+        return instruction.operands.size() == 2U &&
+               instruction.operands[0].kind == aarch64::OperandKind::Register &&
+               instruction.operands[0].reg.kind == aarch64::RegisterKind::Vector &&
+               instruction.operands[0].arrangement != aarch64::VectorArrangement::Invalid &&
+               instruction.operands[1].kind == aarch64::OperandKind::Immediate;
+    case aarch64::SimdOperation::St1:
+        return instruction.operands.size() == 2U &&
+               instruction.operands[0].kind == aarch64::OperandKind::Register &&
+               instruction.operands[0].reg.kind == aarch64::RegisterKind::Vector &&
+               instruction.operands[0].arrangement != aarch64::VectorArrangement::Invalid &&
+               instruction.operands[0].vector_index >= 0 &&
+               instruction.operands[1].kind == aarch64::OperandKind::Memory;
     case aarch64::SimdOperation::None:
     case aarch64::SimdOperation::Fmadd:
     case aarch64::SimdOperation::Fmsub:
