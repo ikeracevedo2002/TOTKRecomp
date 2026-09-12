@@ -130,7 +130,7 @@ void help(std::ostream& output)
               "  --entry KIND                   dt-init, dt-fini, text-start, process.\n"
               "  --entry-address ADDR           Unverified analyst address.\n"
               "  --analysis-focus-symbol NAME  Analyze only the bounded startup/provider closure for NAME.\n"
-              "  --analysis-workers N          Bounded independent refinement-analysis workers.\n"
+              "  --analysis-workers N          Bounded independent function/refinement workers.\n"
               "  --backend interpreter           M11 reference backend.\n"
               "  --stack-size N                 Synthetic guest stack size.\n"
               "  --report PATH                  Write deterministic JSON report.\n"
@@ -1361,6 +1361,7 @@ int main(int argc, char** argv)
         {
             std::vector<analysis::FunctionSeed> seeds = module.seeds;
             analysis::FunctionMapOptions module_function_options = function_options;
+            module_function_options.analysis_workers = analysis_workers;
             const bool execution_closure =
                 module_function_options.budgets.strategy == analysis::AnalysisStrategy::ExecutionClosure ||
                 !analysis_focus_symbol.empty();
@@ -1806,6 +1807,7 @@ int main(int argc, char** argv)
         return static_cast<int>(ExitCode::InfrastructureFailure);
     }
     analysis::FunctionMapOptions module_function_options = function_options;
+    module_function_options.analysis_workers = analysis_workers;
     std::vector<analysis::FunctionSeed> seeds = loaded.value().seeds;
     if (module_function_options.budgets.strategy == analysis::AnalysisStrategy::ExecutionClosure)
     {

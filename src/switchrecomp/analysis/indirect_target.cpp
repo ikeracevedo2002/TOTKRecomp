@@ -706,6 +706,7 @@ void account_cfg(const ControlFlowGraph& cfg, IndirectTargetValidation& validati
     result.budgets = options.budgets;
     result.cfg = options.cfg;
     result.continue_after_function_failure = false;
+    result.analysis_workers = options.refinement_workers;
     return result;
 }
 
@@ -2075,6 +2076,13 @@ Result<ProcessFunctionMapBatchRefinement> refine_process_function_map_batch(
         set_rebuild_roots(task.options, task.seeds);
         task.options.reuse_map = existing_module_map;
         tasks.push_back(std::move(task));
+    }
+    // Keep the configured worker count bounded across both levels: when
+    // multiple modules are built concurrently, each module uses its owning
+    // module worker rather than creating a nested pool.
+    if (options.refinement_workers > 1U && tasks.size() > 1U)
+    {
+        for (auto& task : tasks) task.options.analysis_workers = 1U;
     }
 
     std::vector<std::optional<Result<FinalizedFunctionMap>>> rebuilt_modules(tasks.size());

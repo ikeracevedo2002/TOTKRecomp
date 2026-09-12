@@ -76,7 +76,8 @@ void write_u32(std::vector<std::byte>& bytes, std::size_t offset, std::uint32_t 
 
 [[nodiscard]] analysis::FinalizedFunctionMap make_map_from_identity(
     const memory::GuestMemory& memory, analysis::ModuleIdentity identity,
-    std::initializer_list<memory::GuestAddress> entries)
+    std::initializer_list<memory::GuestAddress> entries,
+    const analysis::FunctionMapOptions& options = {})
 {
     std::vector<analysis::FunctionSeed> seeds;
     for (const auto entry : entries)
@@ -89,7 +90,7 @@ void write_u32(std::vector<std::byte>& bytes, std::size_t offset, std::uint32_t 
                          "synthetic M37 entry"});
     }
     const auto result = analysis::FunctionMapBuilder::build(
-        analysis::ModuleAnalysisInput{std::move(identity), &memory, std::move(seeds)});
+        analysis::ModuleAnalysisInput{std::move(identity), &memory, std::move(seeds)}, options);
     REQUIRE(result);
     return std::move(result).value();
 }
@@ -175,6 +176,45 @@ TEST_CASE("M37 replacing one module preserves immutable untouched maps and looku
     REQUIRE(refined.value().map_for(0x100008U) != main_before);
     REQUIRE(process.value().find(0x10000cU) == nullptr);
     REQUIRE(process.value().find(0x200008U) != nullptr);
+}
+
+TEST_CASE("M37 independent function CFG builds are deterministic with multiple workers")
+{
+    const auto bytes = minimal_nso();
+    const std::array<analysis::ProcessModuleInput, 1U> inputs{
+        analysis::ProcessModuleInput{"main", bytes, 0x100000U}};
+    analysis::ProcessImageOptions image_options;
+    image_options.primary_module = "main";
+    image_options.module_options.seed_text_entry = false;
+    const auto image = analysis::load_process_image(inputs, image_options);
+    REQUIRE(image);
+    const auto* module = image.value().module("main");
+    REQUIRE(module != nullptr);
+
+    analysis::FunctionMapOptions serial_options;
+    serial_options.analysis_workers = 1U;
+    const auto serial = make_map_from_identity(
+        image.value().memory(), module->identity,
+        {0x100008U, 0x10000cU, 0x100010U}, serial_options);
+
+    analysis::FunctionMapOptions parallel_options = serial_options;
+    parallel_options.analysis_workers = 2U;
+    const auto parallel = make_map_from_identity(
+        image.value().memory(), module->identity,
+        {0x100008U, 0x10000cU, 0x100010U}, parallel_options);
+
+    REQUIRE(parallel.functions().size() == serial.functions().size());
+    REQUIRE(parallel.accounting().functions_cfg_analyzed ==
+            serial.accounting().functions_cfg_analyzed);
+    REQUIRE(parallel.accounting().instructions_consumed ==
+            serial.accounting().instructions_consumed);
+    for (std::size_t index = 0U; index < serial.functions().size(); ++index)
+    {
+        REQUIRE(parallel.functions()[index].canonical_entry ==
+                serial.functions()[index].canonical_entry);
+        REQUIRE(parallel.functions()[index].owned_code_ranges ==
+                serial.functions()[index].owned_code_ranges);
+    }
 }
 
 TEST_CASE("M37 independent module map builds are deterministic with multiple workers")

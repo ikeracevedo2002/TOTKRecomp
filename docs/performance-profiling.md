@@ -30,8 +30,8 @@ Candidate accounting and resource budgets charge each assessment and the
 aggregate analysis work exactly once, while the map-rebuild counter charges one
 publication per successful batch.
 
-Independent assessment and independent touched-module map construction can
-use the same bounded worker setting:
+Independent assessment, full function CFG discovery, and independent
+touched-module map construction can use the same bounded worker setting:
 
 ```text
 build/run-entry --analysis-workers 1 ...
@@ -41,10 +41,13 @@ build/run-entry --analysis-workers 4 ...
 `1` is the serial reference behavior. The default is the lesser of four and
 the host-reported hardware concurrency. Workers receive immutable memory,
 process-image, and process-map inputs and write fixed-index result slots; the
-coordinator merges those slots in input/module order and publishes the process
-map deterministically. Worker count is emitted only in the diagnostic profile
-stream, not in the stable JSON report. A failed parallel map build is reported
-without publishing a partial process map.
+coordinator merges those slots in input/module/function order and publishes
+maps deterministically. Full function discovery analyzes bounded waves of
+independent entries and merges direct-call discoveries between waves. Nested
+module/function pools are avoided so the configured worker count remains a
+bound. Worker count is emitted only in the diagnostic profile stream, not in
+the stable JSON report. A failed parallel map build is reported without
+publishing a partial process map.
 
 The optional stderr stream additionally marks refinement wall time, rounds and
 transactions, target classification, IR verification, interpreter boundary
