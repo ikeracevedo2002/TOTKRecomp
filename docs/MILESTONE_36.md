@@ -171,8 +171,10 @@ recorded as verifier unavailable; it is not treated as a review approval.
 The heavy remote CI lane passed on the final code checkpoint: Change
 classification, Linux/GCC, Linux/GCC with LLVM 18, ASan/UBSan, TSan,
 Windows/MSVC, and CI Gate all succeeded. The light documentation lane was
-correctly skipped for the executable checkpoint. A later allowlisted
-documentation-only follow-up is used to verify the carry-forward/light lane.
+correctly skipped for the executable checkpoint. The allowlisted
+documentation-only follow-up then classified the delta as light, passed its
+documentation and repository-invariant checks, skipped all five heavy jobs,
+and passed CI Gate.
 
 ## Privacy and dependencies
 
