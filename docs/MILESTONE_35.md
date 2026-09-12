@@ -224,15 +224,25 @@ host-only AppleClang compatibility workaround for an existing structured
 binding was applied temporarily during compilation and is not part of this
 branch.
 
-Completed before final review:
+Completed final validation:
 
 ```text
-M35 focused tests: 16/16
+M35 focused tests: 17/17
 M8/relevant FP/SIMD regressions: 8/8
+standard suite: 373/373 tests, 36,878 assertions
+ASan/UBSan: 373/373
+TSan practical set (M29-M35): 76/76
+private ordinary determinism A/B: byte-identical reports, size 52,808,340,
+  SHA-256 98f595160a00e98c83a5ab9558b115d8c287d37dc64c9217310b7bb687a76014
 ```
 
-The final standard suite, sanitizers, Pi review, and remote CI are recorded in
-the final handoff and updated here after those steps complete.
+ASan/UBSan and TSan reported no findings. The local LLVM 18 backend is not
+available on this host, so LLVM parity is covered by the conditional public
+tests and remains part of the remote CI matrix.
+
+Pi accepted the exact semantic checkpoint before this final documentation-only
+update. Remote CI is the remaining final handoff step; transient workflow IDs
+are intentionally kept out of tracked documentation.
 
 Expected new dependency count is `0`. No private Nintendo/recovery artifacts,
 keys, firmware, binaries, local configuration, private reports, build output,
@@ -241,8 +251,19 @@ tests remain independent of the private recovery workspace.
 
 ## Pi verification
 
-Pending the required independent review of the committed M35 checkpoint. The
-external prompt, report, and logs remain outside the repository.
+```text
+Reviewed SHAs:
+3218834fc8e01d0e7e6ffeb8e7372e1903a4524b
+d90efc99f96c343086a0a6790b5ff6051ce51197
+Prompt SHA-256: c8a7d4cf1b9d305aea8a08d7d67c5528c76f55334e32c0427bb7b9a4ed504a3f
+Rounds: 2
+Final verdict: PASS WITH NON-BLOCKING FINDINGS
+Blocking findings: none unresolved
+Fixed blocker: MOVI cmode 0xC/0xD MSL classification and exact tests
+Non-blocking finding: stale 16/16 documentation count, corrected in this commit
+```
+
+The external prompt, reports, and logs remain outside the repository.
 
 ## Documentation
 
