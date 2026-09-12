@@ -5,6 +5,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstdlib>
+#include <iostream>
 #include <bit>
 #include <exception>
 #include <iomanip>
@@ -29,6 +32,79 @@ using json = nlohmann::json;
     std::ostringstream output;
     output << "0x" << std::hex << std::setw(16) << std::setfill('0') << address;
     return output.str();
+}
+
+[[nodiscard]] bool profiling_enabled() noexcept
+{
+    const auto* value = std::getenv("SWITCHRECOMP_PROFILE");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+class ProfileTimer
+{
+  public:
+    explicit ProfileTimer(const char* name)
+        : name_(name), enabled_(profiling_enabled()),
+          start_(enabled_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+    ProfileTimer(const char* name, std::uint64_t* elapsed_us, std::size_t* calls)
+        : name_(name), enabled_(profiling_enabled()), elapsed_us_(elapsed_us), calls_(calls),
+          start_(enabled_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+    ~ProfileTimer() noexcept
+    {
+        if (!enabled_) return;
+        const auto elapsed = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start_)
+                .count());
+        if (elapsed_us_ != nullptr)
+        {
+            *elapsed_us_ += elapsed;
+            if (calls_ != nullptr) ++*calls_;
+            return;
+        }
+        std::cerr << "[switchrecomp profile] phase=" << name_ << " elapsed_us=" << elapsed << "\n";
+    }
+
+  private:
+    const char* name_;
+    bool enabled_;
+    std::uint64_t* elapsed_us_ = nullptr;
+    std::size_t* calls_ = nullptr;
+    std::chrono::steady_clock::time_point start_;
+};
+
+void profile_counter(const char* name, std::size_t value) noexcept
+{
+    if (profiling_enabled())
+        std::cerr << "[switchrecomp profile] counter=" << name << " value=" << value << "\n";
+}
+
+[[nodiscard]] std::uint64_t cfg_identity(const analysis::ControlFlowGraph& cfg) noexcept
+{
+    std::uint64_t hash = 1469598103934665603ULL;
+    const auto add = [&hash](std::uint64_t value) {
+        hash ^= value;
+        hash *= 1099511628211ULL;
+    };
+    add(cfg.entry);
+    for (const auto& [address, block] : cfg.blocks)
+    {
+        add(address);
+        for (const auto& instruction : block.instructions)
+        {
+            add(instruction.address);
+            add(instruction.opcode);
+            add(static_cast<std::uint64_t>(instruction.id));
+        }
+        for (const auto& edge : block.successors)
+        {
+            add(edge.source);
+            add(edge.target);
+            add(static_cast<std::uint64_t>(edge.kind));
+            add(edge.internal ? 1U : 0U);
+        }
+    }
+    return hash;
 }
 
 [[nodiscard]] std::uint64_t independent_umulh_oracle(std::uint64_t left,
@@ -2131,19 +2207,31 @@ Result<void> ExecutionSession::map_stack(ExecutionSessionResult& result)
 Result<const ir::Function*> ExecutionSession::lift_for_execution(
     GuestAddress entry, ExecutionSessionResult& result)
 {
+    ProfileTimer timer("execution.lift_for_execution", &profile_totals_.lift_elapsed_us,
+                       &profile_totals_.lift_calls);
+    const auto* map = function_map_for(entry);
+    const auto* record = function_record(entry);
+    const auto identity = record != nullptr && record->cfg ? cfg_identity(record->cfg.value()) : 0U;
     const auto found = lift_cache_.find(entry);
-    if (found != lift_cache_.end())
+    if (found != lift_cache_.end() && found->second.function_map == map &&
+        found->second.cfg_identity == identity)
     {
+        ++result.performance.lift_cache_hits;
         if (found->second.function) return Result<const ir::Function*>::success(&found->second.function.value());
         return Result<const ir::Function*>::failure(found->second.error.value());
     }
+    if (found != lift_cache_.end())
+    {
+        ++result.performance.lift_cache_invalidations;
+        lift_cache_.erase(found);
+    }
+    ++result.performance.lift_cache_misses;
 
-    const auto* record = function_record(entry);
     if (record == nullptr)
     {
         const auto error = make_error(ErrorCode::UnknownGuestFunction,
                                       "guest address is not an exact finalized function entry");
-        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error});
+        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error, map, identity});
         return Result<const ir::Function*>::failure(error);
     }
     if (record->translation_status == analysis::TranslationStatus::Conflict)
@@ -2168,7 +2256,7 @@ Result<const ir::Function*> ExecutionSession::lift_for_execution(
             }
         }
         const auto error = make_error(ErrorCode::FunctionBoundaryConflict, message.str());
-        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error});
+        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error, map, identity});
         return Result<const ir::Function*>::failure(error);
     }
     if (!record->cfg)
@@ -2176,7 +2264,7 @@ Result<const ir::Function*> ExecutionSession::lift_for_execution(
         const auto error = make_error(
             ErrorCode::UnsupportedInstruction,
             "finalized function has no executable CFG: " + hex_address(entry));
-        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error});
+        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error, map, identity});
         return Result<const ir::Function*>::failure(error);
     }
     lifter::LiftOptions lift_options;
@@ -2184,11 +2272,11 @@ Result<const ir::Function*> ExecutionSession::lift_for_execution(
     const auto lifted = lifter::lift_function(record->cfg.value(), lift_options);
     if (!lifted)
     {
-        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, lifted.error()});
+        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, lifted.error(), map, identity});
         return Result<const ir::Function*>::failure(lifted.error());
     }
-    auto inserted = lift_cache_.emplace(entry, LiftCacheEntry{lifted.value(), std::nullopt});
-    (void)result;
+    auto inserted = lift_cache_.emplace(entry, LiftCacheEntry{lifted.value(), std::nullopt, map, identity});
+    ++result.performance.functions_lifted;
     return Result<const ir::Function*>::success(&inserted.first->second.function.value());
 }
 
@@ -2418,6 +2506,7 @@ void ExecutionSession::append_transition(const TransitionRequest& request, Guest
         accounting.history.push_back(std::move(evidence));
     }
     result.executed_functions.push_back(target);
+    executed_function_index_.insert(target);
     result.executed_function_modules.push_back(module_name_for(target));
 }
 
@@ -2587,7 +2676,8 @@ Result<void> ExecutionSession::classify_target(const runtime::ExecutionResult& b
     if (payload.has_provenance_address) observed.guest_load_address = payload.provenance_address;
     const auto assessment = analysis::assess_indirect_target(
         observed, *memory_, function_map_, process_function_map_, process_image_);
-    if (assessment) result.indirect_target_discovery.push_back(assessment.value());
+    if (assessment)
+        result.indirect_target_discovery.push_back(assessment.value());
     const auto* record = function_record(target);
     if (process_image_ != nullptr && process_image_->module_for_address(target, 4U) == nullptr)
     {
@@ -3060,6 +3150,7 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         return Result<ExecutionSessionResult>::failure(
             make_error(ErrorCode::InvalidGuestAddress, "selected execution entry is invalid"));
     }
+    ProfileTimer timer("execution.run");
 
     // A second run on the same session replaces the previous logical
     // generation. The first run's stack was kept alive through its caller's
@@ -3074,6 +3165,9 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     suspended_frames_.clear();
     current_ = SessionFrame{};
     lift_cache_.clear();
+    profile_totals_ = ProfileTotals{};
+    executed_function_index_.clear();
+    instruction_evidence_index_.clear();
     runtime_state_.reset();
     ExecutionSessionResult result;
     result.identity = function_map_->identity();
@@ -3308,8 +3402,20 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         interpreter_options.observed_guest_pcs =
             std::span<const memory::GuestAddress>(instruction_observation_targets_);
         interpreter_options.max_observed_guest_pcs = 32U;
+        const auto verification_elapsed_before =
+            current_.interpreter.profile_ir_verification_elapsed_us;
+        const auto verification_calls_before = current_.interpreter.profile_ir_verification_calls;
+        ProfileTimer interpreter_timer("execute_until_boundary", &profile_totals_.boundary_elapsed_us,
+                                      &profile_totals_.boundary_calls);
         const auto step = interpreter::execute_until_boundary(
             *function, cpu_, runtime_, current_.interpreter, interpreter_options);
+        if (profiling_enabled())
+        {
+            result.performance.ir_verification_elapsed_us +=
+                current_.interpreter.profile_ir_verification_elapsed_us - verification_elapsed_before;
+            result.performance.ir_verification_calls +=
+                current_.interpreter.profile_ir_verification_calls - verification_calls_before;
+        }
         if (!step)
         {
             const auto stopped = stop(result, classify_error(step.error()), step.error().message);
@@ -3377,14 +3483,14 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         }
         for (const auto& observed_execution : step.value().observed_instruction_executions)
         {
-            const auto already_recorded = std::find_if(
-                result.instruction_evidence.begin(), result.instruction_evidence.end(),
-                [&](const auto& observed) { return observed.guest_pc == observed_execution.guest_pc; });
-            if (already_recorded != result.instruction_evidence.end()) continue;
+            if (instruction_evidence_index_.find(observed_execution.guest_pc) !=
+                instruction_evidence_index_.end())
+                continue;
             if (const auto observed = describe_observed_instruction(observed_execution,
                                                                     current_.call_depth))
             {
                 result.instruction_evidence.push_back(observed.value());
+                instruction_evidence_index_.insert(observed->guest_pc);
                 if (observed->instruction_id == "umulh" || observed->instruction_id == "smulh")
                     result.executed_guest_instructions.push_back(observed.value());
                 if (observed->instruction_id == "smulh" && !result.smulh_frontier.reached &&
@@ -3618,9 +3724,9 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         for (const auto& binding : process_image_->bindings())
         {
             if (!binding.provider_address || !binding.applied) continue;
-            result.provider_guest_code_entered |= std::find(
-                result.executed_functions.begin(), result.executed_functions.end(),
-                binding.provider_address.value()) != result.executed_functions.end();
+            result.provider_guest_code_entered |=
+                executed_function_index_.find(binding.provider_address.value()) !=
+                executed_function_index_.end();
         }
     }
     result.runtime.dso_modules_registered = runtime_state_.dso_modules_registered();
@@ -3629,11 +3735,30 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         running_ = false;
     }
     result.guest_memory = memory_->accounting();
+    if (profiling_enabled())
+    {
+        std::cerr << "[switchrecomp profile] cache hits=" << result.performance.lift_cache_hits
+                  << " misses=" << result.performance.lift_cache_misses
+                  << " invalidations=" << result.performance.lift_cache_invalidations << "\n";
+        std::cerr << "[switchrecomp profile] phase=execution.lift_for_execution elapsed_us="
+                  << profile_totals_.lift_elapsed_us << " calls=" << profile_totals_.lift_calls
+                  << "\n";
+        std::cerr << "[switchrecomp profile] phase=execute_until_boundary elapsed_us="
+                  << profile_totals_.boundary_elapsed_us << " calls="
+                  << profile_totals_.boundary_calls << "\n";
+        std::cerr << "[switchrecomp profile] phase=ir_verification elapsed_us="
+                  << result.performance.ir_verification_elapsed_us << " calls="
+                  << result.performance.ir_verification_calls << "\n";
+        profile_counter("functions_lifted", result.performance.functions_lifted);
+        profile_counter("execution_slices", result.execution_slices);
+        profile_counter("target_assessments", result.indirect_target_discovery.size());
+    }
     return Result<ExecutionSessionResult>::success(std::move(result));
 }
 
 std::string render_execution_report_json(const ExecutionSessionResult& result)
 {
+    ProfileTimer timer("report_generation");
     json executable_ranges = json::array();
     for (const auto& range : result.identity.executable_ranges)
     {

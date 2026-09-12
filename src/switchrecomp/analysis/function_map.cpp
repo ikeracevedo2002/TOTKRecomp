@@ -3,7 +3,10 @@
 #include "switchrecomp/common/checked_arithmetic.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <nlohmann/json.hpp>
@@ -1193,6 +1196,26 @@ std::vector<const FunctionRecord*> FinalizedFunctionMap::find_owners(
 Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput& input,
                                                         const FunctionMapOptions& options)
 {
+    const auto profile_start = std::chrono::steady_clock::now();
+    const auto profile_enabled = []() noexcept {
+        const auto* value = std::getenv("SWITCHRECOMP_PROFILE");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    };
+    const bool profiling = profile_enabled();
+    struct ProfileExit
+    {
+        bool enabled;
+        const std::chrono::steady_clock::time_point& start;
+        const ModuleAnalysisInput& input;
+        ~ProfileExit() noexcept
+        {
+            if (!enabled) return;
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            std::cerr << "[switchrecomp profile] phase=function_map_build module="
+                      << input.identity.module << " elapsed_us=" << elapsed << "\n";
+        }
+    } profile_exit{profiling, profile_start, input};
     const auto valid_input = validate_input(input, options);
     if (!valid_input)
     {
@@ -1223,6 +1246,12 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
     std::set<GuestAddress> pending;
     std::set<GuestAddress> processed;
     std::set<GuestAddress> known_function_entries = options.cfg.known_function_entries;
+    // A CFG only needs boundary finalization when a later-discovered strong
+    // entry falls inside its decoded ownership. Keep the additions in
+    // deterministic order and checkpoint each analysis instead of replaying
+    // every CFG on every finalization round.
+    std::vector<GuestAddress> discovered_boundary_entries;
+    std::map<GuestAddress, std::size_t> boundary_checkpoints;
     const bool reuse_enabled = options.reuse_map != nullptr;
     std::set<GuestAddress> reused_originals;
     std::set<GuestAddress> previous_canonical_entries;
@@ -1603,7 +1632,11 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
                     ++source.coalesced;
                     ++accounting.duplicate_coalesced_seed_count;
                 }
-                if (known_function_entries.insert(target).second) invalidate_reused(target);
+                if (known_function_entries.insert(target).second)
+                {
+                    invalidate_reused(target);
+                    discovered_boundary_entries.push_back(target);
+                }
                 cfg_options.known_function_entries = known_function_entries;
             }
         }
@@ -1623,6 +1656,26 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
         {
             if (reuse_enabled && reused_originals.contains(entry)) continue;
             if (!record.cfg && record.translation_status != TranslationStatus::Discovered)
+            {
+                continue;
+            }
+            const auto checkpoint = boundary_checkpoints.find(entry);
+            const auto first_new_boundary = checkpoint == boundary_checkpoints.end()
+                                                ? std::size_t{0U}
+                                                : checkpoint->second;
+            bool boundary_changed = false;
+            for (std::size_t index = std::min(first_new_boundary,
+                                               discovered_boundary_entries.size());
+                 index < discovered_boundary_entries.size(); ++index)
+            {
+                if (contains_any(record.owned_code_ranges, discovered_boundary_entries[index], 4U))
+                {
+                    boundary_changed = true;
+                    break;
+                }
+            }
+            if (record.cfg && record.translation_status == TranslationStatus::Analyzed &&
+                checkpoint != boundary_checkpoints.end() && !boundary_changed)
             {
                 continue;
             }
@@ -1691,6 +1744,7 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
             }
             populate_boundary_dependencies(record, known_function_entries);
             record.translation_status = TranslationStatus::Analyzed;
+            boundary_checkpoints[entry] = discovered_boundary_entries.size();
             for (const auto target : record.direct_calls)
             {
                 ++accounting.direct_call_discoveries;
@@ -1722,6 +1776,7 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
                 if (known_function_entries.insert(target).second)
                 {
                     invalidate_reused(target);
+                    discovered_boundary_entries.push_back(target);
                     boundary_set_changed = true;
                 }
             }
@@ -1906,6 +1961,13 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
     if (!valid)
     {
         return Result<FinalizedFunctionMap>::failure(valid.error());
+    }
+    if (profiling)
+    {
+        std::cerr << "[switchrecomp profile] map_build module=" << input.identity.module
+                  << " map_builds=1 functions_analyzed=" << result.accounting_.functions_cfg_analyzed
+                  << " functions_lifted=0 candidate_assessments=0 refinement_transactions="
+                  << result.accounting_.refinement_transactions << "\n";
     }
     return Result<FinalizedFunctionMap>::success(std::move(result));
 }

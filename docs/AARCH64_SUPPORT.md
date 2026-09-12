@@ -25,8 +25,10 @@ backend; the optional LLVM backend lowers the same IR primitives.
 | UDIV/SDIV | yes | no | no | deferred until a shared divide-by-zero model is added |
 | Scalar FP: FMOV/FADD/FSUB/FMUL/FDIV/FNEG/FABS/FCMP/FCSEL/SCVTF/UCVTF/FCVTZS/FCVTZU/FCVT/FRINT | yes | yes | yes | S/D forms; raw IEEE bit patterns and sticky FPSR state |
 | Scalar FP: FSQRT/FMIN/FMAX | yes | yes | yes | reference runtime semantics, explicit NaN and signed-zero handling |
+| AdvSIMD immediate moves | yes | yes | yes | FMOV vector immediate `.2S`/`.4S`/`.2D`; MOVI expanded architectural immediates with exact lane broadcasts |
 | NEON DUP/INS/UMOV/SMOV/EXT and ZIP/UZP/TRN | yes | yes | yes | normalized arrangements and lane indices |
 | NEON logical/integer/FP vector arithmetic and comparisons | yes | yes | yes | B/H/S/D arrangements; FP vector operations use the reference runtime |
+| AdvSIMD ST1 single-lane store | yes | yes | yes | B/H/S/D lane extraction through checked little-endian guest memory; multiple-register forms remain explicit unsupported |
 | S/D/Q LDR/STR and LDP/STP | yes | yes | yes | checked guest memory; Q uses 16-byte vector helpers |
 | FP/SIMD fused multiply-add | yes | no | no | explicit unsupported behavior |
 | LDXR/STXR (B/H/W/X) | yes | yes | yes | per-thread monitor; deterministic 64-byte reservation granules |

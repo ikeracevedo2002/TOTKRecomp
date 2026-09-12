@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace switchrecomp::execution
@@ -479,6 +480,16 @@ struct SmulhFrontierEvidence
     std::optional<memory::GuestAddress> next_guest_pc;
 };
 
+struct ExecutionPerformanceCounters
+{
+    std::size_t lift_cache_hits = 0U;
+    std::size_t lift_cache_misses = 0U;
+    std::size_t lift_cache_invalidations = 0U;
+    std::size_t functions_lifted = 0U;
+    std::uint64_t ir_verification_elapsed_us = 0U;
+    std::size_t ir_verification_calls = 0U;
+};
+
 struct ExecutionSessionResult
 {
     // M26 separates productive refinement progress from independently
@@ -551,6 +562,9 @@ struct ExecutionSessionResult
     ExecutionEventResource event_resource;
     std::vector<ExecutionEvent> events;
     RuntimeExecutionSummary runtime;
+    // Kept out of the stable JSON report so optional profiling remains
+    // observational and does not alter the execution schema.
+    ExecutionPerformanceCounters performance;
 };
 
 class ExecutionSession
@@ -585,6 +599,16 @@ class ExecutionSession
     {
         std::optional<ir::Function> function;
         std::optional<Error> error;
+        const analysis::FinalizedFunctionMap* function_map = nullptr;
+        std::uint64_t cfg_identity = 0U;
+    };
+
+    struct ProfileTotals
+    {
+        std::uint64_t lift_elapsed_us = 0U;
+        std::size_t lift_calls = 0U;
+        std::uint64_t boundary_elapsed_us = 0U;
+        std::size_t boundary_calls = 0U;
     };
 
     struct SessionFrame
@@ -666,6 +690,12 @@ class ExecutionSession
     ExecutionSessionOptions options_;
     ExecutionLoadSummary load_summary_;
     std::map<memory::GuestAddress, LiftCacheEntry> lift_cache_;
+    ProfileTotals profile_totals_;
+    // The vector in ExecutionSessionResult is the deterministic execution
+    // history. Keep a separate index for repeated membership queries so
+    // reporting does not turn into an O(history * bindings) scan.
+    std::unordered_set<memory::GuestAddress> executed_function_index_;
+    std::unordered_set<memory::GuestAddress> instruction_evidence_index_;
     std::vector<memory::GuestAddress> observation_targets_;
     std::vector<memory::GuestAddress> instruction_observation_targets_;
     std::vector<SessionFrame> suspended_frames_;

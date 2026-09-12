@@ -6,6 +6,7 @@
 #include "switchrecomp/runtime/execution.hpp"
 
 #include <array>
+#include <cstdint>
 #include <vector>
 
 namespace switchrecomp::interpreter
@@ -36,6 +37,8 @@ struct InterpreterFrame
     // the full verifier on every internal slice while retaining verification
     // before the first operation of each function generation.
     bool function_verified = false;
+    std::uint64_t profile_ir_verification_elapsed_us = 0U;
+    std::size_t profile_ir_verification_calls = 0U;
     ir::BlockId counted_block = ir::invalid_block;
     std::size_t block_entry_serial = 0U;
     ir::BlockId completed_block = ir::invalid_block;

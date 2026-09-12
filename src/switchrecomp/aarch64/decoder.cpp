@@ -289,6 +289,84 @@ namespace
     }
 }
 
+[[nodiscard]] VectorArrangement st1_lane_arrangement(std::uint32_t opcode) noexcept
+{
+    // Capstone exposes the lane index for ST1 single-structure operands but
+    // leaves the arrangement invalid. Recover it from architectural fields,
+    // rather than from the printed operand text.
+    const auto q = static_cast<std::uint8_t>((opcode >> 30U) & 1U);
+    const auto s = static_cast<std::uint8_t>((opcode >> 12U) & 1U);
+    const auto size = static_cast<std::uint8_t>((opcode >> 10U) & 0x3U);
+    switch ((opcode >> 13U) & 0x7U)
+    {
+    case 0U:
+        return q == 0U ? VectorArrangement::B8 : VectorArrangement::B16;
+    case 2U:
+        return size == 0U ? (q == 0U ? VectorArrangement::H4 : VectorArrangement::H8)
+                          : VectorArrangement::Invalid;
+    case 4U:
+        if (size == 0U)
+            return q == 0U ? VectorArrangement::S2 : VectorArrangement::S4;
+        if (s == 0U && size == 1U)
+            return q == 0U ? VectorArrangement::D1 : VectorArrangement::D2;
+        return VectorArrangement::Invalid;
+    default:
+        return VectorArrangement::Invalid;
+    }
+}
+
+[[nodiscard]] std::uint64_t replicate_movi_element(std::uint64_t value,
+                                                   std::uint8_t element_bits) noexcept
+{
+    if (element_bits == 8U)
+    {
+        value &= 0xffU;
+        return value | (value << 8U) | (value << 16U) | (value << 24U) |
+               (value << 32U) | (value << 40U) | (value << 48U) | (value << 56U);
+    }
+    if (element_bits == 16U)
+    {
+        value &= 0xffffU;
+        return value | (value << 16U) | (value << 32U) | (value << 48U);
+    }
+    value &= 0xffffffffU;
+    return value | (value << 32U);
+}
+
+[[nodiscard]] std::optional<std::uint64_t> movi_immediate(std::uint32_t opcode) noexcept
+{
+    const auto q = static_cast<std::uint8_t>((opcode >> 30U) & 1U);
+    const auto op = static_cast<std::uint8_t>((opcode >> 29U) & 1U);
+    const auto cmode = static_cast<std::uint8_t>((opcode >> 12U) & 0xfU);
+    const auto imm8 = static_cast<std::uint8_t>(((opcode >> 11U) & 0xe0U) |
+                                                ((opcode >> 5U) & 0x1fU));
+    if (op == 1U)
+    {
+        if (q == 0U || cmode != 0xeU)
+            return std::nullopt;
+        return replicate_movi_element(imm8, 8U);
+    }
+    if (cmode == 0xeU)
+        return replicate_movi_element(imm8, 8U);
+    if ((cmode & 0xeU) == 0xcU)
+    {
+        const auto shift = static_cast<std::uint8_t>((cmode & 1U) == 0U ? 8U : 16U);
+        const auto ones = (std::uint64_t{1} << shift) - 1U;
+        return replicate_movi_element((static_cast<std::uint64_t>(imm8) << shift) | ones, 32U);
+    }
+    if ((cmode & 0x9U) == 0x8U)
+    {
+        const auto shift = static_cast<std::uint8_t>(((cmode >> 1U) & 1U) * 8U);
+        return replicate_movi_element(static_cast<std::uint64_t>(imm8) << shift, 16U);
+    }
+    if ((cmode & 0x9U) == 0U)
+    {
+        const auto shift = static_cast<std::uint8_t>(((cmode >> 1U) & 0x3U) * 8U);
+        return replicate_movi_element(static_cast<std::uint64_t>(imm8) << shift, 32U);
+    }
+    return std::nullopt;
+}
+
 [[nodiscard]] ConditionCode from_capstone_condition(arm64_cc value)
 {
     switch (value)
@@ -688,6 +766,7 @@ namespace
     switch (instruction.id)
     {
     case ARM64_INS_FMOV: return SimdOperation::Fmov;
+    case ARM64_INS_MOVI: return SimdOperation::Movi;
     case ARM64_INS_FADD: return SimdOperation::Fadd;
     case ARM64_INS_FSUB: return SimdOperation::Fsub;
     case ARM64_INS_FMUL: return SimdOperation::Fmul;
@@ -734,6 +813,7 @@ namespace
     case ARM64_INS_CMGE: return SimdOperation::Cmge;
     case ARM64_INS_CMHI: return SimdOperation::Cmhi;
     case ARM64_INS_CMHS: return SimdOperation::Cmhs;
+    case ARM64_INS_ST1: return SimdOperation::St1;
     default: return SimdOperation::None;
     }
 }
@@ -1029,6 +1109,36 @@ Result<DecodedInstruction> AArch64Decoder::decode(GuestAddress address,
     for (std::uint8_t index = 0U; index < detail.op_count; ++index)
     {
         result.operands.push_back(normalize_operand(detail.operands[index], detail, result.id, opcode));
+    }
+    if (result.simd_operation == SimdOperation::St1 && result.operands.size() >= 2U &&
+        result.operands[0].kind == OperandKind::Register &&
+        result.operands[0].reg.kind == RegisterKind::Vector &&
+        result.operands[0].vector_index >= 0)
+    {
+        const auto arrangement = st1_lane_arrangement(opcode);
+        const auto lane = static_cast<std::uint8_t>(result.operands[0].vector_index);
+        if (arrangement == VectorArrangement::Invalid ||
+            lane >= vector_lane_count(arrangement))
+        {
+            result.normalized = false;
+        }
+        else
+        {
+            result.operands[0].arrangement = arrangement;
+        }
+    }
+    if (result.simd_operation == SimdOperation::Movi && result.operands.size() >= 2U &&
+        result.operands[1].kind == OperandKind::Immediate)
+    {
+        const auto expanded = movi_immediate(opcode);
+        if (!expanded)
+        {
+            result.normalized = false;
+        }
+        else
+        {
+            result.operands[1].immediate = static_cast<std::int64_t>(expanded.value());
+        }
     }
     for (std::size_t index = 0U; index < result.operands.size(); ++index)
     {

@@ -451,6 +451,13 @@ class ModuleLowerer
                                                           ConstantInt::get(Type::getInt64Ty(context_), instruction.constant_high)}));
             }
             return Result<void>::success();
+        case ir::Opcode::BitCast:
+        {
+            const auto source = require_value(instruction.operands[0]);
+            if (!source) return Result<void>::failure(source.error());
+            assign(instruction, builder_.CreateBitCast(source.value(), result_type, "bitcast"));
+            return Result<void>::success();
+        }
         case ir::Opcode::Nop:
             return Result<void>::success();
         case ir::Opcode::SetPc:
