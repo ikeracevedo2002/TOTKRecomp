@@ -308,7 +308,7 @@ refinement_analysis_dimension_for_option(std::string_view argument)
     const analysis::IndirectTargetAssessment& left,
     const analysis::IndirectTargetAssessment& right) noexcept
 {
-    return left.observed.target_module != right.observed.target_module ||
+    return left.validation.target_module != right.validation.target_module ||
            !ranges_overlap(left.validation.candidate_owned_code_ranges,
                            right.validation.candidate_owned_code_ranges);
 }
