@@ -737,6 +737,15 @@ struct IndirectTargetDiscoveryOptions
     bool require_independent_static_evidence = false;
 };
 
+// Assess a stable candidate sequence against one immutable process-map
+// generation. Worker completion order is intentionally hidden: the returned
+// vector always follows the input order, and workers only write isolated
+// result slots before coordinator publication.
+[[nodiscard]] Result<std::vector<IndirectTargetAssessment>> assess_indirect_targets(
+    std::span<const ObservedIndirectTarget> candidates, const memory::GuestMemory& memory,
+    const ProcessFunctionMap& process_map, const ProcessImage& process_image,
+    const IndirectTargetDiscoveryOptions& options = {}, std::size_t workers = 1U);
+
 struct FunctionMapRefinement
 {
     FinalizedFunctionMap map;

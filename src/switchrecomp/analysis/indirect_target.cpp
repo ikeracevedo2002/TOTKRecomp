@@ -5,11 +5,15 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <exception>
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <new>
 #include <set>
 #include <sstream>
+#include <thread>
 #include <tuple>
 #include <utility>
 
@@ -1660,6 +1664,108 @@ Result<IndirectTargetAssessment> assess_indirect_target(
                                  ? "runtime observation plus bounded executable CFG has no ownership conflict"
                                  : "runtime observation plus bounded executable CFG is structurally valid; unresolved indirect flow remains explicit");
     return complete_assessment(std::move(assessment));
+}
+
+Result<std::vector<IndirectTargetAssessment>> assess_indirect_targets(
+    std::span<const ObservedIndirectTarget> candidates, const memory::GuestMemory& memory,
+    const ProcessFunctionMap& process_map, const ProcessImage& process_image,
+    const IndirectTargetDiscoveryOptions& options, std::size_t workers)
+{
+    try
+    {
+        std::vector<IndirectTargetAssessment> results;
+        results.reserve(candidates.size());
+        if (workers <= 1U || candidates.size() <= 1U)
+        {
+            for (const auto& candidate : candidates)
+            {
+                const auto assessment = assess_indirect_target(
+                    candidate, memory, nullptr, &process_map, &process_image, options);
+                if (!assessment)
+                    return Result<std::vector<IndirectTargetAssessment>>::failure(
+                        assessment.error());
+                results.push_back(std::move(assessment).value());
+            }
+            return Result<std::vector<IndirectTargetAssessment>>::success(std::move(results));
+        }
+
+        const auto worker_count = std::min(workers, candidates.size());
+        std::vector<std::optional<Result<IndirectTargetAssessment>>> worker_results(
+            candidates.size());
+        std::atomic<std::size_t> next{0U};
+        std::vector<std::thread> worker_threads;
+        worker_threads.reserve(worker_count);
+        const auto join_workers = [&]() noexcept {
+            for (auto& worker : worker_threads)
+                if (worker.joinable()) worker.join();
+        };
+        try
+        {
+            for (std::size_t worker = 0U; worker < worker_count; ++worker)
+            {
+                worker_threads.emplace_back([&]() {
+                    for (;;)
+                    {
+                        const auto index = next.fetch_add(1U, std::memory_order_relaxed);
+                        if (index >= candidates.size()) return;
+                        try
+                        {
+                            worker_results[index] = assess_indirect_target(
+                                candidates[index], memory, nullptr, &process_map,
+                                &process_image, options);
+                        }
+                        catch (const std::bad_alloc&)
+                        {
+                            worker_results[index] = Result<IndirectTargetAssessment>::failure(
+                                make_error(ErrorCode::ResourceLimit,
+                                           "parallel indirect-target assessment allocation failed"));
+                        }
+                        catch (...)
+                        {
+                            worker_results[index] = Result<IndirectTargetAssessment>::failure(
+                                make_error(ErrorCode::ThreadCreationFailed,
+                                           "parallel indirect-target assessment failed unexpectedly"));
+                        }
+                    }
+                });
+            }
+        }
+        catch (const std::exception&)
+        {
+            join_workers();
+            return Result<std::vector<IndirectTargetAssessment>>::failure(
+                make_error(ErrorCode::ThreadCreationFailed,
+                           "unable to create the bounded analysis worker pool"));
+        }
+        catch (...)
+        {
+            join_workers();
+            return Result<std::vector<IndirectTargetAssessment>>::failure(
+                make_error(ErrorCode::ThreadCreationFailed,
+                           "unable to create the bounded analysis worker pool"));
+        }
+        join_workers();
+        for (auto& result : worker_results)
+        {
+            if (!result)
+            {
+                return Result<std::vector<IndirectTargetAssessment>>::failure(
+                    make_error(ErrorCode::ThreadCreationFailed,
+                               "analysis worker did not publish a result"));
+            }
+            if (!result->has_value())
+                return Result<std::vector<IndirectTargetAssessment>>::failure(
+                    result->error());
+            results.push_back(std::move(result->value()));
+        }
+        return Result<std::vector<IndirectTargetAssessment>>::success(std::move(results));
+    }
+    catch (const std::bad_alloc&)
+    {
+        return Result<std::vector<IndirectTargetAssessment>>::failure(
+            make_error(ErrorCode::ResourceLimit,
+                       "unable to allocate indirect-target assessment results"));
+    }
 }
 
 Result<FunctionMapRefinement> refine_function_map(

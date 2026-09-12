@@ -6,7 +6,6 @@
 #include "switchrecomp/version.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <charconv>
 #include <cstddef>
@@ -18,7 +17,6 @@
 #include <limits>
 #include <map>
 #include <nlohmann/json.hpp>
-#include <new>
 #include <optional>
 #include <set>
 #include <span>
@@ -284,58 +282,6 @@ refinement_analysis_dimension_for_option(std::string_view argument)
     const auto hardware = std::thread::hardware_concurrency();
     if (hardware == 0U) return 1U;
     return std::min<std::size_t>(4U, hardware);
-}
-
-[[nodiscard]] std::vector<Result<analysis::IndirectTargetAssessment>> assess_candidates_parallel(
-    std::span<const analysis::ObservedIndirectTarget> candidates,
-    const analysis::ProcessFunctionMap& process_map,
-    const analysis::ProcessImage& process_image,
-    const analysis::IndirectTargetDiscoveryOptions& options,
-    std::size_t requested_workers)
-{
-    std::vector<Result<analysis::IndirectTargetAssessment>> results;
-    results.reserve(candidates.size());
-    if (requested_workers <= 1U || candidates.size() <= 1U)
-    {
-        for (const auto& candidate : candidates)
-            results.push_back(analysis::assess_indirect_target(
-                candidate, process_image.memory(), nullptr, &process_map,
-                &process_image, options));
-        return results;
-    }
-
-    std::vector<std::optional<Result<analysis::IndirectTargetAssessment>>> worker_results(
-        candidates.size());
-    const auto worker_count = std::min(requested_workers, candidates.size());
-    std::atomic<std::size_t> next{0U};
-    std::vector<std::thread> workers;
-    workers.reserve(worker_count);
-    for (std::size_t worker = 0U; worker < worker_count; ++worker)
-    {
-        workers.emplace_back([&]() {
-            for (;;)
-            {
-                const auto index = next.fetch_add(1U, std::memory_order_relaxed);
-                if (index >= candidates.size()) return;
-                try
-                {
-                    worker_results[index] = analysis::assess_indirect_target(
-                        candidates[index], process_image.memory(), nullptr, &process_map,
-                        &process_image, options);
-                }
-                catch (const std::bad_alloc&)
-                {
-                    worker_results[index] = Result<analysis::IndirectTargetAssessment>::failure(
-                        make_error(ErrorCode::ResourceLimit,
-                                   "parallel indirect-target assessment allocation failed"));
-                }
-            }
-        });
-    }
-    for (auto& worker : workers) worker.join();
-    for (auto& result : worker_results)
-        results.push_back(std::move(result.value()));
-    return results;
 }
 
 [[nodiscard]] bool ranges_overlap(
@@ -1576,22 +1522,17 @@ int main(int argc, char** argv)
                 assessment_candidates.push_back(candidate);
             }
             const auto assessment_start = std::chrono::steady_clock::now();
-            auto assessed = assess_candidates_parallel(
-                assessment_candidates, process_map, process.value(), discovery_options,
-                analysis_workers);
+            auto assessed = analysis::assess_indirect_targets(
+                assessment_candidates, process.value().memory(), process_map, process.value(),
+                discovery_options, analysis_workers);
             assessment_elapsed_us += std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - assessment_start).count();
-            std::vector<analysis::IndirectTargetAssessment> assessments;
-            assessments.reserve(assessed.size());
-            for (auto& candidate : assessed)
+            if (!assessed)
             {
-                if (!candidate)
-                {
-                    print_error(candidate.error());
-                    return static_cast<int>(ExitCode::InfrastructureFailure);
-                }
-                assessments.push_back(std::move(candidate).value());
+                print_error(assessed.error());
+                return static_cast<int>(ExitCode::InfrastructureFailure);
             }
+            auto assessments = std::move(assessed).value();
             std::vector<std::size_t> selected_indices;
             for (std::size_t index = 0U; index < assessments.size(); ++index)
             {
