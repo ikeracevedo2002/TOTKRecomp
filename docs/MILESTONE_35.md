@@ -277,9 +277,9 @@ ASan/UBSan and TSan reported no findings. The local LLVM 18 backend is not
 available on this host, so LLVM parity is covered by the conditional public
 tests and remains part of the remote CI matrix.
 
-Pi accepted the exact integrated performance checkpoint `7e3e292`; remote CI
-is the remaining final handoff step. Transient workflow IDs are intentionally
-kept out of tracked documentation.
+Pi accepted the exact integrated performance checkpoint `7e3e292`; the heavy
+remote CI matrix and CI Gate passed for the final code checkpoint. Transient
+workflow IDs are intentionally kept out of tracked documentation.
 
 Expected new dependency count is `0`. No private Nintendo/recovery artifacts,
 keys, firmware, binaries, local configuration, private reports, build output,
