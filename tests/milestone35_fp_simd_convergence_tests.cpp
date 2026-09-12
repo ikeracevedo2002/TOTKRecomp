@@ -173,6 +173,36 @@ TEST_CASE("M35 FMOV vector immediates preserve negative and varied exponent/frac
     REQUIRE(runtime::read_lane_bits(varied_cpu.vreg[1], 32U, 3U) == 0x3f000000U);
 }
 
+TEST_CASE("M35 scalar FMOV immediates remain scalar after vector FMOV support")
+{
+    auto single = lift_program({0x1e2e1000U, ret}); // fmov s0, #1.0
+    REQUIRE(single);
+    runtime::CpuState single_cpu;
+    single_cpu.vreg[0] = runtime::Vector128{0xaaaaaaaa00000000ULL, 0xbbbbbbbbbbbbbbbbULL};
+    single_cpu.fpcr = 0x12345678U;
+    single_cpu.fpsr = 0x0000001fU;
+    single_cpu.n = 1U;
+    single_cpu.z = 0U;
+    single_cpu.c = 1U;
+    single_cpu.v = 1U;
+    const auto single_before = single_cpu;
+    REQUIRE(execute_program(single.value(), single_cpu));
+    REQUIRE(single_cpu.vreg[0] == (runtime::Vector128{0x000000003f800000ULL, 0U}));
+    REQUIRE(single_cpu.fpcr == single_before.fpcr);
+    REQUIRE(single_cpu.fpsr == single_before.fpsr);
+    REQUIRE(single_cpu.n == single_before.n);
+    REQUIRE(single_cpu.z == single_before.z);
+    REQUIRE(single_cpu.c == single_before.c);
+    REQUIRE(single_cpu.v == single_before.v);
+
+    auto double_precision = lift_program({0x1e6e1001U, ret}); // fmov d1, #1.0
+    REQUIRE(double_precision);
+    runtime::CpuState double_cpu;
+    double_cpu.vreg[1] = runtime::Vector128{0xaaaaaaaaaaaaaaaaULL, 0xbbbbbbbbbbbbbbbbULL};
+    REQUIRE(execute_program(double_precision.value(), double_cpu));
+    REQUIRE(double_cpu.vreg[1] == (runtime::Vector128{0x3ff0000000000000ULL, 0U}));
+}
+
 TEST_CASE("M35 reserved vector FMOV encoding is not normalized as a legal form")
 {
     const auto decoder = aarch64::AArch64Decoder::create();

@@ -1076,15 +1076,19 @@ class FunctionLifter
             const auto& source = instruction.operands[1];
             if (destination.kind == aarch64::RegisterKind::Vector)
             {
-                if (source.kind == aarch64::OperandKind::FloatingImmediate)
+                const auto decoded_arrangement = instruction.operands[0].arrangement;
+                const bool has_explicit_vector_arrangement =
+                    decoded_arrangement == aarch64::VectorArrangement::S2 ||
+                    decoded_arrangement == aarch64::VectorArrangement::S4 ||
+                    decoded_arrangement == aarch64::VectorArrangement::D2;
+                if (source.kind == aarch64::OperandKind::FloatingImmediate && has_explicit_vector_arrangement)
                 {
                     const auto arrangement = vector_arrangement(instruction.operands[0], instruction);
                     if (!arrangement)
                         return Result<void>::failure(arrangement.error());
-                    const auto vector_arrangement = arrangement.value();
-                    const bool is_single = vector_arrangement == ir::VectorArrangement::S2 ||
-                                           vector_arrangement == ir::VectorArrangement::S4;
-                    const bool is_double = vector_arrangement == ir::VectorArrangement::D2;
+                    const bool is_single = arrangement.value() == ir::VectorArrangement::S2 ||
+                                           arrangement.value() == ir::VectorArrangement::S4;
+                    const bool is_double = arrangement.value() == ir::VectorArrangement::D2;
                     if (!is_single && !is_double)
                     {
                         return Result<void>::failure(unsupported(
@@ -1101,7 +1105,7 @@ class FunctionLifter
                     broadcast.opcode = ir::Opcode::VectorBroadcast;
                     broadcast.result_type = ir::v128_type();
                     broadcast.operands = {bits.value()};
-                    broadcast.arrangement = vector_arrangement;
+                    broadcast.arrangement = arrangement.value();
                     broadcast.source = source_location(instruction);
                     const auto value = emit_value(std::move(broadcast));
                     return value ? write_vector(destination, value.value(), instruction)
