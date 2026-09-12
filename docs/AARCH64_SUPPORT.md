@@ -11,7 +11,8 @@ backend; the optional LLVM backend lowers the same IR primitives.
 | CCMP/CCMN | yes | no | no | explicit deferred fallback-NZCV semantics |
 | AND/ANDS/ORR/ORN/EOR/EON/BIC/BICS/TST | yes | yes | yes | logical flag writes set N/Z and clear C/V |
 | MOV/MVN, MOVZ/MOVK/MOVN | yes | yes | yes | W/X aliases and all valid move-wide lanes |
-| LSL/LSR/ASR/ROR, UBFM/SBFM/BFM aliases | yes | yes | yes | common immediate bitfield forms |
+| LSL/LSR/ASR/ROR, UBFM/SBFM/BFM aliases | yes | yes | yes | W/X immediate and register-controlled shifts; width-masked amounts and wrapped bitfield masks |
+| EXTR | yes | yes | yes | W/X double-register extract with architectural immediate range checks |
 | CSEL family | yes | yes | yes | CSEL/CSINC/CSINV/CSNEG and common aliases |
 | MUL/MADD/MSUB/MNEG | yes | yes | yes | modulo-width integer multiplication |
 | UMULH | yes | yes | yes | scalar A64 unsigned high multiply; i64/X-register form only; NZCV unchanged |
@@ -41,6 +42,23 @@ backend; the optional LLVM backend lowers the same IR primitives.
 | LDXP/LDAXP/STXP/STLXP, LSE atomics | yes | no | no | explicitly deferred pair/LSE semantics |
 
 ## Architectural state
+
+## M36 scalar integer convergence
+
+The measured `lsl w8, w8, w19` encoding (`0x1ad32108`) is normalized as the
+canonical `Lsl` instruction with a register-controlled shift amount. The same
+semantic primitive covers `LSL`, `LSR`, `ASR`, and `ROR` register forms plus
+their immediate aliases. Register amounts are masked to five bits for W
+registers and six bits for X registers; immediate amounts are range-checked.
+
+The scalar bitfield family uses the architectural wrapped `wmask`/`tmask`
+model for `UBFM`, `SBFM`, and `BFM`, including sign fill and destination
+preservation. `EXTR` is represented by the same scalar IR shift/rotate
+operations. These forms write only their scalar destination and leave NZCV,
+FPCR, FPSR, and V-register state unchanged. Reserved width/encoding forms are
+rejected by the lifter. The interpreter and optional LLVM lowering consume the
+same verified IR; LLVM rotate lowering masks the inverse amount so a zero
+rotate does not create a host shift-by-width poison value.
 
 `runtime::CpuState` stores X0-X30, SP, PC, independent N/Z/C/V fields, FPCR,
 FPSR, 32 shared 128-bit V registers, and TPIDR_EL0/TPIDRRO_EL0. Each native
