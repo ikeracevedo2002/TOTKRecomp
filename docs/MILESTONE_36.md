@@ -18,7 +18,7 @@ run crossed the M35 frontier.
 Base lineage: infra-agent-orchestration-ci
 Parent: ca60575d5989403985d702f72d7fa953856b33ab
 Branch: milestone-36-scalar-integer-refinement-acceleration
-PR: not opened in this local checkpoint
+PR: #44
 Merge status: not merged
 ```
 
@@ -163,10 +163,16 @@ supplied recovery set does not reach it.
 
 ## Pi verification and remote CI
 
-Pi review and the heavy remote CI matrix were not available from this local
-checkpoint. No pass is claimed for either. The required next acceptance step is
-to run them on the reviewed final commit, then record only the resulting status
-and blocking/non-blocking findings.
+The repository Pi verifier was launched against the exact final code
+checkpoint in a clean detached worktree. It remained in a silent HTTPS wait for
+18 minutes and was terminated without producing a report or finding. This is
+recorded as verifier unavailable; it is not treated as a review approval.
+
+The heavy remote CI lane passed on the final code checkpoint: Change
+classification, Linux/GCC, Linux/GCC with LLVM 18, ASan/UBSan, TSan,
+Windows/MSVC, and CI Gate all succeeded. The light documentation lane was
+correctly skipped for the executable checkpoint. A later allowlisted
+documentation-only follow-up is used to verify the carry-forward/light lane.
 
 ## Privacy and dependencies
 
