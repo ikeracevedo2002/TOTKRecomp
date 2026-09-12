@@ -3,7 +3,10 @@
 #include "switchrecomp/common/checked_arithmetic.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <nlohmann/json.hpp>
@@ -1193,6 +1196,25 @@ std::vector<const FunctionRecord*> FinalizedFunctionMap::find_owners(
 Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput& input,
                                                         const FunctionMapOptions& options)
 {
+    const auto profile_start = std::chrono::steady_clock::now();
+    const auto profile_enabled = []() noexcept {
+        const auto* value = std::getenv("SWITCHRECOMP_PROFILE");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    };
+    struct ProfileExit
+    {
+        decltype(profile_enabled)& enabled;
+        const std::chrono::steady_clock::time_point& start;
+        const ModuleAnalysisInput& input;
+        ~ProfileExit() noexcept
+        {
+            if (!enabled()) return;
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            std::cerr << "[switchrecomp profile] function_map.build module="
+                      << input.identity.module << " " << elapsed << " us\n";
+        }
+    } profile_exit{profile_enabled, profile_start, input};
     const auto valid_input = validate_input(input, options);
     if (!valid_input)
     {

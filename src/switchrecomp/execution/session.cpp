@@ -5,6 +5,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstdlib>
+#include <iostream>
 #include <bit>
 #include <exception>
 #include <iomanip>
@@ -29,6 +32,57 @@ using json = nlohmann::json;
     std::ostringstream output;
     output << "0x" << std::hex << std::setw(16) << std::setfill('0') << address;
     return output.str();
+}
+
+[[nodiscard]] bool profiling_enabled() noexcept
+{
+    const auto* value = std::getenv("SWITCHRECOMP_PROFILE");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+class ProfileTimer
+{
+  public:
+    explicit ProfileTimer(const char* name) : name_(name), start_(std::chrono::steady_clock::now()) {}
+    ~ProfileTimer() noexcept
+    {
+        if (!profiling_enabled()) return;
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start_).count();
+        std::cerr << "[switchrecomp profile] " << name_ << " " << elapsed << " us\n";
+    }
+
+  private:
+    const char* name_;
+    std::chrono::steady_clock::time_point start_;
+};
+
+[[nodiscard]] std::uint64_t cfg_identity(const analysis::ControlFlowGraph& cfg) noexcept
+{
+    std::uint64_t hash = 1469598103934665603ULL;
+    const auto add = [&hash](std::uint64_t value) {
+        hash ^= value;
+        hash *= 1099511628211ULL;
+    };
+    add(cfg.entry);
+    for (const auto& [address, block] : cfg.blocks)
+    {
+        add(address);
+        for (const auto& instruction : block.instructions)
+        {
+            add(instruction.address);
+            add(instruction.opcode);
+            add(static_cast<std::uint64_t>(instruction.id));
+        }
+        for (const auto& edge : block.successors)
+        {
+            add(edge.source);
+            add(edge.target);
+            add(static_cast<std::uint64_t>(edge.kind));
+            add(edge.internal ? 1U : 0U);
+        }
+    }
+    return hash;
 }
 
 [[nodiscard]] std::uint64_t independent_umulh_oracle(std::uint64_t left,
@@ -2131,19 +2185,30 @@ Result<void> ExecutionSession::map_stack(ExecutionSessionResult& result)
 Result<const ir::Function*> ExecutionSession::lift_for_execution(
     GuestAddress entry, ExecutionSessionResult& result)
 {
+    ProfileTimer timer("execution.lift_for_execution");
+    const auto* map = function_map_for(entry);
+    const auto* record = function_record(entry);
+    const auto identity = record != nullptr && record->cfg ? cfg_identity(record->cfg.value()) : 0U;
     const auto found = lift_cache_.find(entry);
-    if (found != lift_cache_.end())
+    if (found != lift_cache_.end() && found->second.function_map == map &&
+        found->second.cfg_identity == identity)
     {
+        ++result.performance.lift_cache_hits;
         if (found->second.function) return Result<const ir::Function*>::success(&found->second.function.value());
         return Result<const ir::Function*>::failure(found->second.error.value());
     }
+    if (found != lift_cache_.end())
+    {
+        ++result.performance.lift_cache_invalidations;
+        lift_cache_.erase(found);
+    }
+    ++result.performance.lift_cache_misses;
 
-    const auto* record = function_record(entry);
     if (record == nullptr)
     {
         const auto error = make_error(ErrorCode::UnknownGuestFunction,
                                       "guest address is not an exact finalized function entry");
-        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error});
+        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error, map, identity});
         return Result<const ir::Function*>::failure(error);
     }
     if (record->translation_status == analysis::TranslationStatus::Conflict)
@@ -2168,7 +2233,7 @@ Result<const ir::Function*> ExecutionSession::lift_for_execution(
             }
         }
         const auto error = make_error(ErrorCode::FunctionBoundaryConflict, message.str());
-        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error});
+        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error, map, identity});
         return Result<const ir::Function*>::failure(error);
     }
     if (!record->cfg)
@@ -2176,7 +2241,7 @@ Result<const ir::Function*> ExecutionSession::lift_for_execution(
         const auto error = make_error(
             ErrorCode::UnsupportedInstruction,
             "finalized function has no executable CFG: " + hex_address(entry));
-        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error});
+        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error, map, identity});
         return Result<const ir::Function*>::failure(error);
     }
     lifter::LiftOptions lift_options;
@@ -2184,11 +2249,11 @@ Result<const ir::Function*> ExecutionSession::lift_for_execution(
     const auto lifted = lifter::lift_function(record->cfg.value(), lift_options);
     if (!lifted)
     {
-        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, lifted.error()});
+        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, lifted.error(), map, identity});
         return Result<const ir::Function*>::failure(lifted.error());
     }
-    auto inserted = lift_cache_.emplace(entry, LiftCacheEntry{lifted.value(), std::nullopt});
-    (void)result;
+    auto inserted = lift_cache_.emplace(entry, LiftCacheEntry{lifted.value(), std::nullopt, map, identity});
+    ++result.performance.functions_lifted;
     return Result<const ir::Function*>::success(&inserted.first->second.function.value());
 }
 
@@ -3061,6 +3126,7 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         return Result<ExecutionSessionResult>::failure(
             make_error(ErrorCode::InvalidGuestAddress, "selected execution entry is invalid"));
     }
+    ProfileTimer timer("execution.run");
 
     // A second run on the same session replaces the previous logical
     // generation. The first run's stack was kept alive through its caller's
@@ -3632,6 +3698,15 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         running_ = false;
     }
     result.guest_memory = memory_->accounting();
+    if (profiling_enabled())
+    {
+        std::cerr << "[switchrecomp profile] execution.lift_cache hits="
+                  << result.performance.lift_cache_hits << " misses="
+                  << result.performance.lift_cache_misses << " invalidations="
+                  << result.performance.lift_cache_invalidations << " lifted="
+                  << result.performance.functions_lifted << " slices="
+                  << result.execution_slices << "\n";
+    }
     return Result<ExecutionSessionResult>::success(std::move(result));
 }
 

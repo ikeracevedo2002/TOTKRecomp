@@ -126,6 +126,11 @@ TEST_CASE("M11 simple controlled entry returns with deterministic state")
     REQUIRE(result.value().final_cpu.x[30U] == result.value().synthetic_lr_sentinel);
     REQUIRE(result.value().maximum_call_depth == 0U);
     REQUIRE(result.value().events.front().kind == execution::ExecutionEventKind::SessionStart);
+    // The execution loop revisits the immutable entry between boundaries; the
+    // second lookup must use the per-session lift cache.
+    REQUIRE(result.value().performance.lift_cache_misses == 1U);
+    REQUIRE(result.value().performance.functions_lifted == 1U);
+    REQUIRE(result.value().performance.lift_cache_hits >= 1U);
 }
 
 TEST_CASE("M11 direct guest call resumes caller and preserves BL link semantics")
