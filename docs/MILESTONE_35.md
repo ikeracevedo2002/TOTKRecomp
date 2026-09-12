@@ -217,6 +217,36 @@ It is scalar integer `LSL W8, W8, W19`, not a remaining FMOV/MOVI/ST1 or
 adjacent FP/SIMD capability. M35 therefore stops at the measured subsystem
 boundary and does not begin integer-shift work.
 
+## Run-entry performance pass
+
+The frontier loop was paused after the M35 functional checkpoint while an
+independent performance worktree was used. The checkpoint was based on the
+M35 state, then integrated as commits `e1a0570`, `d8316a6`, `ebdb169`,
+`f4d4b9c`, and `7e3e292`. The pass preserved the guest execution thread and
+did not change report schema, event accounting, budgets, or semantic JSON.
+
+Implemented improvements were:
+
+- deterministic auxiliary hash indices for repeated execution-history
+  membership queries while retaining the ordered vectors;
+- lift-cache validation by finalized-map identity and deterministic CFG
+  fingerprint, with hit/miss/invalidation counters;
+- optional stderr phase profiling via `SWITCHRECOMP_PROFILE=1`;
+- boundary-finalization checkpoints that skip CFG reanalysis when no newly
+  discovered callable boundary intersects that function's precise ownership.
+
+The synthetic 512-transaction M33 fixture was unchanged within measurement
+noise (`37.13 s` before versus `37.08 s` after). The real ordinary run on the
+integrated checkpoint reached the same frontier and byte-identical report in
+`1284.14 s` real (`1255.99 s` user, `16.33 s` system), compared with the
+previous M35+performance run at `2160.64 s` real: an observed wall-clock
+reduction of approximately `40.6%`. Its profile reported `1191.78 s` in
+refinement, 728 rounds, 727 productive rounds, 726 transactions, 727 rebuilds,
+1,530 functions analyzed, and 6 functions reanalyzed. Execution remained
+single-threaded; a bounded analysis worker pool, deeper incremental map reuse,
+and copy/ownership reductions remain follow-up performance work rather than
+M35 prerequisites.
+
 ## Validation, privacy, and dependencies
 
 The standard local build ladder used a persistent normal build directory; the
@@ -234,15 +264,17 @@ ASan/UBSan: 373/373
 TSan practical set (M29-M35): 76/76
 private ordinary determinism A/B: byte-identical reports, size 52,808,340,
   SHA-256 98f595160a00e98c83a5ab9558b115d8c287d37dc64c9217310b7bb687a76014
+performance checkpoint ordinary run: 1,284.14 s real; same report/frontier
+  and SHA-256 as the prior M35 run
 ```
 
 ASan/UBSan and TSan reported no findings. The local LLVM 18 backend is not
 available on this host, so LLVM parity is covered by the conditional public
 tests and remains part of the remote CI matrix.
 
-Pi accepted the exact semantic checkpoint before this final documentation-only
-update. Remote CI is the remaining final handoff step; transient workflow IDs
-are intentionally kept out of tracked documentation.
+Pi accepted the exact integrated performance checkpoint `7e3e292`; remote CI
+is the remaining final handoff step. Transient workflow IDs are intentionally
+kept out of tracked documentation.
 
 Expected new dependency count is `0`. No private Nintendo/recovery artifacts,
 keys, firmware, binaries, local configuration, private reports, build output,
@@ -253,14 +285,13 @@ tests remain independent of the private recovery workspace.
 
 ```text
 Reviewed SHAs:
-3218834fc8e01d0e7e6ffeb8e7372e1903a4524b
-d90efc99f96c343086a0a6790b5ff6051ce51197
+7e3e2925e155adb40ad5adbe67e38885bbdc88de
 Prompt SHA-256: c8a7d4cf1b9d305aea8a08d7d67c5528c76f55334e32c0427bb7b9a4ed504a3f
-Rounds: 2
+Rounds: 1 performance checkpoint review (prior semantic review history retained externally)
 Final verdict: PASS WITH NON-BLOCKING FINDINGS
 Blocking findings: none unresolved
-Fixed blocker: MOVI cmode 0xC/0xD MSL classification and exact tests
-Non-blocking finding: stale 16/16 documentation count, corrected in this commit
+Non-blocking findings: LLVM 18 unavailable locally; profiling/performance scope
+  is broader than the minimum FMOV implementation but remains in scope
 ```
 
 The external prompt, reports, and logs remain outside the repository.
@@ -272,4 +303,5 @@ Tracked documentation changed:
 ```text
 docs/MILESTONE_35.md
 docs/AARCH64_SUPPORT.md
+docs/performance-profiling.md
 ```
