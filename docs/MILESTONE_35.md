@@ -193,6 +193,11 @@ runtime fallbacks: 0
 events total / retained / omitted: 7,546 / 4,096 / 3,450
 ```
 
+The final ordinary timings were `1221.28 s` real for run A (`1204.54 s`
+user, `13.42 s` system) and `1234.68 s` real for run B (`1218.09 s` user,
+`13.24 s` system). Both used the same binary, configuration, entry, and no
+profiling flag; `cmp` confirmed byte identity.
+
 The final refinement totals were 728 execution attempts, 727 productive
 rounds, 727 promotions, 727 candidate records, zero pending candidates, and
 664,043 observations. Aggregate analysis consumed 1,530 functions analyzed,
@@ -259,9 +264,9 @@ Completed final validation:
 ```text
 M35 focused tests: 17/17
 M8/relevant FP/SIMD regressions: 8/8
-standard suite: 373/373 tests, 36,878 assertions
-ASan/UBSan: 373/373
-TSan practical set (M29-M35): 76/76
+standard suite: 374/374 tests, 36,878 assertions
+ASan/UBSan: 374/374
+TSan practical set (M29-M35): 77/77
 private ordinary determinism A/B: byte-identical reports, size 52,808,340,
   SHA-256 98f595160a00e98c83a5ab9558b115d8c287d37dc64c9217310b7bb687a76014
 performance checkpoint ordinary run: 1,284.14 s real; same report/frontier
