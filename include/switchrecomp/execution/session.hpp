@@ -486,6 +486,8 @@ struct ExecutionPerformanceCounters
     std::size_t lift_cache_misses = 0U;
     std::size_t lift_cache_invalidations = 0U;
     std::size_t functions_lifted = 0U;
+    std::uint64_t ir_verification_elapsed_us = 0U;
+    std::size_t ir_verification_calls = 0U;
 };
 
 struct ExecutionSessionResult
@@ -601,6 +603,14 @@ class ExecutionSession
         std::uint64_t cfg_identity = 0U;
     };
 
+    struct ProfileTotals
+    {
+        std::uint64_t lift_elapsed_us = 0U;
+        std::size_t lift_calls = 0U;
+        std::uint64_t boundary_elapsed_us = 0U;
+        std::size_t boundary_calls = 0U;
+    };
+
     struct SessionFrame
     {
         memory::GuestAddress function_entry = 0U;
@@ -680,6 +690,7 @@ class ExecutionSession
     ExecutionSessionOptions options_;
     ExecutionLoadSummary load_summary_;
     std::map<memory::GuestAddress, LiftCacheEntry> lift_cache_;
+    ProfileTotals profile_totals_;
     // The vector in ExecutionSessionResult is the deterministic execution
     // history. Keep a separate index for repeated membership queries so
     // reporting does not turn into an O(history * bindings) scan.

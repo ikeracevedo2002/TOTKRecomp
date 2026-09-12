@@ -156,10 +156,11 @@ Result<runtime::ExecutionResult> execute_until_boundary(
         const auto verified = ir::verify(function);
         if (profiling_enabled())
         {
-            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - verify_start).count();
-            std::cerr << "[switchrecomp profile] phase=ir_verification elapsed_us=" << elapsed
-                      << " result=" << (verified ? "ok" : "failure") << "\n";
+            frame.profile_ir_verification_elapsed_us += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - verify_start)
+                    .count());
+            ++frame.profile_ir_verification_calls;
         }
         if (!verified)
         {

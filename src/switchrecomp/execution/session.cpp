@@ -46,17 +46,30 @@ class ProfileTimer
     explicit ProfileTimer(const char* name)
         : name_(name), enabled_(profiling_enabled()),
           start_(enabled_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+    ProfileTimer(const char* name, std::uint64_t* elapsed_us, std::size_t* calls)
+        : name_(name), enabled_(profiling_enabled()), elapsed_us_(elapsed_us), calls_(calls),
+          start_(enabled_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
     ~ProfileTimer() noexcept
     {
         if (!enabled_) return;
-        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - start_).count();
+        const auto elapsed = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start_)
+                .count());
+        if (elapsed_us_ != nullptr)
+        {
+            *elapsed_us_ += elapsed;
+            if (calls_ != nullptr) ++*calls_;
+            return;
+        }
         std::cerr << "[switchrecomp profile] phase=" << name_ << " elapsed_us=" << elapsed << "\n";
     }
 
   private:
     const char* name_;
     bool enabled_;
+    std::uint64_t* elapsed_us_ = nullptr;
+    std::size_t* calls_ = nullptr;
     std::chrono::steady_clock::time_point start_;
 };
 
@@ -2194,7 +2207,8 @@ Result<void> ExecutionSession::map_stack(ExecutionSessionResult& result)
 Result<const ir::Function*> ExecutionSession::lift_for_execution(
     GuestAddress entry, ExecutionSessionResult& result)
 {
-    ProfileTimer timer("execution.lift_for_execution");
+    ProfileTimer timer("execution.lift_for_execution", &profile_totals_.lift_elapsed_us,
+                       &profile_totals_.lift_calls);
     const auto* map = function_map_for(entry);
     const auto* record = function_record(entry);
     const auto identity = record != nullptr && record->cfg ? cfg_identity(record->cfg.value()) : 0U;
@@ -2663,19 +2677,7 @@ Result<void> ExecutionSession::classify_target(const runtime::ExecutionResult& b
     const auto assessment = analysis::assess_indirect_target(
         observed, *memory_, function_map_, process_function_map_, process_image_);
     if (assessment)
-    {
         result.indirect_target_discovery.push_back(assessment.value());
-        if (profiling_enabled())
-            std::cerr << "[switchrecomp profile] target_classification decision="
-                      << analysis::indirect_target_decision_name(assessment.value().decision.kind)
-                      << " ownership="
-                      << analysis::indirect_target_ownership_name(assessment.value().validation.ownership)
-                      << " cfg="
-                      << analysis::indirect_target_cfg_status_name(assessment.value().validation.cfg_status)
-                      << "\n";
-    }
-    else
-        profile_counter("target_assessments_failed", 1U);
     const auto* record = function_record(target);
     if (process_image_ != nullptr && process_image_->module_for_address(target, 4U) == nullptr)
     {
@@ -3163,6 +3165,7 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     suspended_frames_.clear();
     current_ = SessionFrame{};
     lift_cache_.clear();
+    profile_totals_ = ProfileTotals{};
     executed_function_index_.clear();
     instruction_evidence_index_.clear();
     runtime_state_.reset();
@@ -3399,9 +3402,20 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         interpreter_options.observed_guest_pcs =
             std::span<const memory::GuestAddress>(instruction_observation_targets_);
         interpreter_options.max_observed_guest_pcs = 32U;
-        ProfileTimer interpreter_timer("execute_until_boundary");
+        const auto verification_elapsed_before =
+            current_.interpreter.profile_ir_verification_elapsed_us;
+        const auto verification_calls_before = current_.interpreter.profile_ir_verification_calls;
+        ProfileTimer interpreter_timer("execute_until_boundary", &profile_totals_.boundary_elapsed_us,
+                                      &profile_totals_.boundary_calls);
         const auto step = interpreter::execute_until_boundary(
             *function, cpu_, runtime_, current_.interpreter, interpreter_options);
+        if (profiling_enabled())
+        {
+            result.performance.ir_verification_elapsed_us +=
+                current_.interpreter.profile_ir_verification_elapsed_us - verification_elapsed_before;
+            result.performance.ir_verification_calls +=
+                current_.interpreter.profile_ir_verification_calls - verification_calls_before;
+        }
         if (!step)
         {
             const auto stopped = stop(result, classify_error(step.error()), step.error().message);
@@ -3726,6 +3740,15 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         std::cerr << "[switchrecomp profile] cache hits=" << result.performance.lift_cache_hits
                   << " misses=" << result.performance.lift_cache_misses
                   << " invalidations=" << result.performance.lift_cache_invalidations << "\n";
+        std::cerr << "[switchrecomp profile] phase=execution.lift_for_execution elapsed_us="
+                  << profile_totals_.lift_elapsed_us << " calls=" << profile_totals_.lift_calls
+                  << "\n";
+        std::cerr << "[switchrecomp profile] phase=execute_until_boundary elapsed_us="
+                  << profile_totals_.boundary_elapsed_us << " calls="
+                  << profile_totals_.boundary_calls << "\n";
+        std::cerr << "[switchrecomp profile] phase=ir_verification elapsed_us="
+                  << result.performance.ir_verification_elapsed_us << " calls="
+                  << result.performance.ir_verification_calls << "\n";
         profile_counter("functions_lifted", result.performance.functions_lifted);
         profile_counter("execution_slices", result.execution_slices);
         profile_counter("target_assessments", result.indirect_target_discovery.size());
