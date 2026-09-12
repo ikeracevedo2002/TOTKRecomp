@@ -927,6 +927,23 @@ void profile_counter(const char* name, std::size_t value) noexcept
         {"map_rebuilds", summary.map_rebuilds},
         {"module_maps_rebuilt", summary.module_maps_rebuilt},
         {"module_maps_reused", summary.module_maps_reused},
+        {"batching",
+         json{{"batch_count", summary.refinement_batches},
+              {"candidates", summary.batch_candidates},
+              {"rebuilds_avoided", summary.rebuilds_avoided},
+              {"singleton_batches", summary.singleton_batches},
+              {"average_batch_width", summary.refinement_batches == 0U
+                                            ? 0.0
+                                            : static_cast<double>(summary.batch_candidates) /
+                                                  static_cast<double>(summary.refinement_batches)},
+              {"max_batch_width", summary.max_batch_width}}},
+        {"incremental_reuse",
+         json{{"finalized_functions_reused", summary.finalized_functions_reused},
+              {"cfgs_reused", summary.cfgs_reused},
+              {"functions_rebuilt", summary.functions_rebuilt},
+              {"modules_touched", summary.modules_touched},
+              {"incremental_updates", summary.incremental_updates},
+              {"full_rebuilds", summary.full_rebuilds}}},
         {"candidates_reconsidered_after_map_change",
          summary.candidates_reconsidered_after_map_change},
         {"map_generation", summary.map_generation},

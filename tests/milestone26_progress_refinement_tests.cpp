@@ -312,8 +312,14 @@ TEST_CASE("M26 target-only map refinement reuses unchanged frozen modules transa
     REQUIRE(process);
 
     std::vector<analysis::FunctionRecord> provider_before;
+    const analysis::FinalizedFunctionMap* provider_map_before = nullptr;
     for (const auto& map : process.value().maps())
-        if (map.identity().module == "provider") provider_before = map.functions();
+        if (map.identity().module == "provider")
+        {
+            provider_map_before = &map;
+            provider_before = map.functions();
+        }
+    REQUIRE(provider_map_before != nullptr);
 
     analysis::IndirectTargetDiscoveryOptions options;
     const auto refined = analysis::refine_process_function_map(
@@ -327,6 +333,7 @@ TEST_CASE("M26 target-only map refinement reuses unchanged frozen modules transa
     for (const auto& map : refined.value().map.maps())
         if (map.identity().module == "provider")
         {
+            REQUIRE(&map == provider_map_before);
             REQUIRE(map.functions().size() == provider_before.size());
             for (std::size_t index = 0U; index < provider_before.size(); ++index)
             {
@@ -336,6 +343,28 @@ TEST_CASE("M26 target-only map refinement reuses unchanged frozen modules transa
                         provider_before[index].owned_code_ranges);
             }
         }
+
+    const auto main_assessment = analysis::assess_indirect_target(
+        process_target(0x100000U + 0x0cU, 0x100000U), image.value().memory(), nullptr,
+        &process.value(), &image.value());
+    REQUIRE(main_assessment);
+    auto provider_observed = process_target(0x200000U + 0x0cU, 0x100000U);
+    provider_observed.target_module.clear();
+    const auto provider_assessment = analysis::assess_indirect_target(
+        provider_observed, image.value().memory(), nullptr, &process.value(), &image.value());
+    REQUIRE(provider_assessment);
+    REQUIRE(main_assessment.value().decision.eligible_for_promotion);
+    REQUIRE(provider_assessment.value().decision.eligible_for_promotion);
+    const std::array<analysis::IndirectTargetAssessment, 2U> batch_assessments{
+        main_assessment.value(), provider_assessment.value()};
+    const auto batched = analysis::refine_process_function_map_batch(
+        process.value(), image.value(), batch_assessments);
+    REQUIRE(batched);
+    REQUIRE(batched.value().all_promoted);
+    REQUIRE(batched.value().module_maps_rebuilt == 2U);
+    REQUIRE(batched.value().module_maps_reused == 0U);
+    REQUIRE(batched.value().map.find(0x100000U + 0x0cU) != nullptr);
+    REQUIRE(batched.value().map.find(0x200000U + 0x0cU) != nullptr);
 
     const auto failed = analysis::refine_process_function_map(
         process.value(), image.value(), process_target(0xdead0000U, 0x100000U), options);
