@@ -1,7 +1,11 @@
 # TotkRecomp Architecture and Implementation Plan
 
-> Status: Proposed architecture with Milestones 0–13 implemented
-> Repository snapshot: 2026-09-07
+> Status: Proposed architecture, reconciled against the implemented history
+> Original RFC snapshot: 2026-09-07 (described Milestones 0–13)
+> Reconciliation snapshot: current `main` after the M41–M43 checkpoint and
+> repository cleanup. The M42/M43 semantic changes, measurement-contract
+> verifier, operating-contract updates, and hygiene fixes are now part of the
+> merged history. See “Estado de reconciliación” below.
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
 > Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, MOD0/dynamic/RELA metadata discovery, dynamic symbol/relocation application, expanded AArch64 Semantic IR and lifting, deterministic whole-module function discovery/translation reporting, synthetic tests, and deterministic inspection/coverage reports are committed; no supported game build has been committed.
 
@@ -9,7 +13,109 @@ This document is the primary engineering RFC for TotkRecomp. It describes the in
 
 It is deliberately conservative. A proposed component is not evidence that the component exists, that TOTK uses a particular API, or that a complete port is feasible. Any item that depends on the exact game build or on reverse engineering is marked **Needs verification**.
 
-## 1. Scope and status vocabulary
+## 0. Estado de reconciliación (reconciliation status)
+
+Esta RFC se escribió al inicio del proyecto (snapshot 2026-09-07, hitos 0–13).
+El proyecto avanzó hasta M43 y tomó rumbos que el texto original no anticipó.
+Esta sección reconcilia el documento con el estado real del repositorio **sin
+borrar ninguna decisión antigua**: el texto histórico permanece intacto y se
+anota con etiquetas de estado.
+
+### Etiquetado y significado
+
+| Etiqueta | Significado |
+| --- | --- |
+| `[VIGENTE]` | La decisión sigue siendo la arquitectura real; se conserva intacta. |
+| `[SUPERADA por Mnn]` | El texto describía una decisión o métrica que el hito *Mnn* sustituyó. Se conserva como histórico; la decisión actual está indicada en la anotación. |
+| `[SIN VERIFICAR]` | No se pudo confirmar en este snapshot (commits, `docs/MILESTONE_*.md` o código). No se afirma ni se niega. |
+| `[BLOQUEADA]` | La capacidad depende de un bloqueo externo conocido y no está disponible; remains an honest boundary. |
+
+Reglas de esta reconciliación: ninguna sección se elimina; los números solo se
+afirman si aparecen en `docs/MILESTONE_*.md` del snapshot correspondiente; las
+referencias a M42/M43 se contrastan con sus documentos actuales y con el
+checkpoint combinado que los integró.
+
+### Las decisiones más afectadas
+
+1. **Cómo se mide el avance.** `[SUPERADA por M38..M43]` La idea original de que
+   el progreso se mide reduciendo el contador estático de *unsupported
+   instructions* ya no es la métrica de avance. El contador estático bajó de
+   **21608 → 11657** entre M42 y M43 (**−9951**, 46.05% de reducción; 0.104257%
+   de las instrucciones decodificadas siguen no liftables) **sin mover el frontier
+   real de ejecución huésped ni una instrucción**. Ver §11.1 y §34.
+2. **El cuello de botella real.** `[BLOQUEADA]` La ejecución real del huésped
+   sigue parada en el boundary del proveedor: el `run-entry` disponible termina con
+   `stop reason: unresolved_import`, `__nnmusl_init_dso`, PC `0x0000007202aa421c`,
+   `br x17`, clasificado como **`unresolved import / incomplete provider search`**
+   (`docs/MILESTONE_36.md`, reconfirmado como frontier invariante en
+   `docs/MILESTONE_38.md` y `docs/MILESTONE_39.md`). La causa raíz es que **el
+   conjunto de módulos declarado es incompleto**: su completitud nunca pasó de ser
+   una afirmación local (`declared_complete`, sin manifiesto que verifique el build
+   exacto, según `docs/MILESTONE_15.md` / `docs/MILESTONE_16.md`), de modo que la
+   búsqueda del proveedor no cierra. Qué módulo concreto falta en la configuración
+   de recuperación actual: `[SIN VERIFICAR]` en este snapshot. Nota histórica: M15
+   ya había situado la definición huésped elegible en `sdk` (símbolo dinámico 8767,
+   `st_value 0x8d880`, dirección huésped `0x7204717880`). Lo importante: **mientras
+   el set declarado no cierre, la ejecución real queda bloqueada con independencia
+   de cuanto se reduzca el contador estático**. Ver §4.3, §7.6, §16.
+3. **Dos frontier distintos, y no son intercambiables.** `[VIGENTE]` (recién hecho
+   explícito) Existe un **frontier REAL de ejecución** (dónde para `run-entry` en
+   tiempo de ejecución: 63 instrucciones huésped, 3 bloques, 319 operaciones IR,
+   1 llamada directa, profundidad máxima 1, según `docs/MILESTONE_36.md`) y un
+   **contador estático** de no liftables sobre el rango decodificado linealmente.
+   Durante M38..M43 solo se movió el segundo. Antes de esta reconciliación el
+   documento los trataba como si fueran la misma cosa.
+4. **Medición de cobertura.** `[SUPERADA por M38]` La cobertura ya no usa un
+   heurístico propio que discrepaba del lifter: `aarch64-analyze --coverage` es un
+   **escáner de decodificación lineal cuyo predicado de liftabilidad espeja
+   (mirror) el predicado del lifter**. `src/switchrecomp/analysis/coverage.cpp`
+   mantiene `common_liftable` / `fp_simd_liftable` como tabla espejo de
+   `lifter::is_instruction_liftable(DecodedInstruction)` (comentario explícito en
+   el código: la librería de análisis no puede enlazar el lifter). El heurístico
+   antiguo omitía UMULH/SMULH, atómicos, barreras y MRS/MSR y usaba una regla
+   FP/SIMD gruesa. Los worker de cobertura son deterministas: los informes serial y
+   con 4 worker son byte-idénticos. Ver §7.5, §11.1, §27.
+5. **Métricas de los roadmap de hitos.** `[SUPERADA por M28..M43]` Los criterios de
+   aceptación basados en porcentajes de cobertura estática fueron sustituidos por
+   criterios de *coverage-driven semantic convergence* más la observación explícita
+   de que el frontier real no cambia. Ver §34.
+6. **Ingesta del conjunto completo de ejecutables (M14/M15/M16).**
+   `[BLOQUEADA]`/`[SIN VERIFICAR]` El cierre del conjunto de ejecutables y el
+   *provider execution frontier* nunca se completaron: el documento los describe
+   como trabajo lineal pendiente, pero en la práctica están bloqueados por el
+   módulo faltante del proveedor. Ver §34 (M14, M15, M16).
+7. **Traducción whole-module y refinamiento indirecto.** `[VIGENTE]` con alcance
+   ampliado mucho más allá de lo que describe §12/§14 (M23..M27, M32/M33 de
+   recursos, M37 de índice incremental, M34 de observabilidad de ejecución).
+8. **Conteo de hitos y numeración.** `[SIN VERIFICAR]` La numeración de ramas se
+   desalineó de la de documentos: la rama que contiene M41–M43 seguía llamada
+   *milestone-39*; **M42 no tuvo commit propio** y su documento se escribió de
+   forma retroactiva, compartiendo checkpoint con M43. Esto es contexto legítimo
+   de la reconciliación, no una cifra inventada.
+9. **Backend LLVM opcional.** `[SIN VERIFICAR]` En los builds locales usados para
+   los checkpoints M41/M42/M43 el target LLVM opcional estaba deshabilitado, así
+   que sus lowering de M41–M43 están localmente sin verificar.
+10. **Privacidad, formato NSO0/MOD0, relocalizaciones y Semantic IR.**
+    `[VIGENTE]` Se conservan intactas (§7, §8, §33, y `docs/SEMANTIC_IR.md`,
+    `docs/RELOCATIONS.md`): siguen describiendo el código real.
+
+### Fuentes consultadas para esta reconciliación
+
+En el árbol actual existen los documentos `docs/MILESTONE_1..43` salvo los
+huecos históricos M5, M6, M7 y M37. `docs/MILESTONE_42.md` fue escrito de forma
+retroactiva durante la limpieza porque M42 no tuvo un commit propio: su código
+quedó entrelazado con el de M43 dentro de `lifter.cpp`, y separarlos habría
+creado un commit intermedio nunca compilado ni testeado. M42 y M43 se registran
+por tanto en el checkpoint combinado `0d6c296` y sus documentos actuales. No se
+ha inventado ninguna cifra para rellenar huecos.
+
+### Qué NO cambia esta reconciliación
+
+No se toca aquí: política de privacidad e higiene del repositorio, formato de
+NSO0/MOD0, modelo de relocalizaciones y resolución de símbolos, diseño del
+Semantic IR, ni ninguna decisión de las secciones marcadas `[VIGENTE]`.
+
+## 1. Scope and status vocabulary — `[VIGENTE]` (vocabulario) / `[SUPERADA por M41..M43]` (inventario de "Existing")
 
 ### Existing
 
@@ -43,19 +149,29 @@ strict/diagnostic translation states, guest-address dispatch validation, and
   launch state, and deterministic controlled-entry reports. This remains a
   single-module controlled execution path rather than a process launch.
 
-### Proposed
+### Proposed — `[VIGENTE]`
 
 The design in this RFC: a reusable SwitchRecomp layer, a game-specific TotkRecomp layer, a staged static recompiler, a native runtime, and a native graphics path.
+
+> Reconciliación: sigue siendo la división de capas real (`src/switchrecomp/*`
+> capa reutilizable frente a la capa de juego, esta última aún ausente). El
+> *native runtime* completo y el *native graphics path* no se han empezado: §16,
+> §21 y §22 siguen siendo propuestas.
 
 ### Future
 
 Work that should happen only after the required evidence, test coverage, and preceding milestones exist. Future items must not be presented in README files or release notes as implemented.
 
-### Needs verification
+### Needs verification — `[VIGENTE]`
 
 An item that requires inspection of a legally obtained, exact target build, controlled runtime traces, public technical research, or a prototype. This label is mandatory for TOTK-specific claims that cannot be established from public evidence.
 
-## 2. Project definition
+## 2. Project definition — `[VIGENTE]`
+
+> Reconciliación: la definición sigue siendo la correcta y el proyecto no se ha
+> deslizado hacia un emulador completo. Única precisión observable: la salida
+> "host-native code" todavía no se produce en los runs reales; lo ejecutado es el
+> intérprete de referencia (§6).
 
 TotkRecomp is an experimental static recompilation project. Its intended input is a legally obtained and appropriately prepared build of the TOTK executable and its associated game data. Its intended output is host-native code plus a native runtime that provides the behavior the recompiled code expects.
 
@@ -108,7 +224,7 @@ Static recompilation is not the same as decompilation. The first implementation 
 
 The runtime may contain emulator-like mechanisms such as guest addresses, handles, synchronization, and service dispatch. Those mechanisms exist to preserve the behavior required by the recompiled game; they are not an objective to reproduce the whole Switch.
 
-## 3. Design principles
+## 3. Design principles — `[VIGENTE]` (no se toca)
 
 1. **Correctness before speed.** A slow, observable, deterministic implementation is more valuable than an optimized implementation that silently corrupts state.
 2. **Exact-build targeting.** Addresses, symbols, layouts, and patches belong to one executable build unless metadata explicitly says otherwise.
@@ -121,7 +237,7 @@ The runtime may contain emulator-like mechanisms such as guest addresses, handle
 9. **License hygiene.** Research can inform the design without automatically becoming a code dependency.
 10. **Legally bounded inputs and outputs.** The project must never require committing Nintendo executables, keys, firmware, SDKs, or copyrighted game assets.
 
-## 4. Architecture boundaries
+## 4. Architecture boundaries — `[VIGENTE]`
 
 The recommended split is conceptual rather than a promise of two repositories.
 
@@ -178,7 +294,18 @@ TotkRecomp should own:
 
 A game-specific patch must not be added to SwitchRecomp merely because it makes TOTK boot.
 
-### 4.3 Controlled entry execution and runtime imports (Milestones 11–12)
+### 4.3 Controlled entry execution and runtime imports (Milestones 11–12) `[VIGENTE]` (modelo de boundary) / `[BLOQUEADA]` (ejecución real más allá del proveedor)
+
+> Reconciliación: este modelo de boundary sigue siendo exactamente el código
+> actual, y es la razón por la que la ejecución real está parada. Un import no
+> resuelto **nunca** se sustituye por un stub host; por tanto, cuando el conjunto
+> de módulos declarado es incompleto y el proveedor de `__nnmusl_init_dso` no
+> está presente, `run-entry` termina ahí. Documentado en `docs/MILESTONE_38.md`
+> como `unresolved_import` `__nnmusl_init_dso` en PC `0x0000007202aa421c`, y
+> reconfirmado como frontier sin cambio en `docs/MILESTONE_39.md`,
+> `docs/MILESTONE_36.md` y `docs/MILESTONE_42.md`. La última frase de esta
+> sección ("remains at the existing M12 boundary") es el antecedente histórico de
+> ese bloqueo y **sigue siendo cierta**.
 
 The M11 execution path is intentionally smaller than a Switch process launch:
 
@@ -278,7 +405,23 @@ Analysis-selected bases remain explicitly distinct from externally observed or
 runtime-verified bases. The local M13 executable set is incomplete, so the
 real `__nnmusl_init_dso` run remains at the existing M12 boundary.
 
-## 5. Why static recompilation is viable, and why this target is difficult
+> `[BLOQUEADA]` — Cuello principal confirmado por la reconciliación: el *conjunto
+> de módulos declarado incompleto* es la causa raíz, no un defecto semántico. Su
+> completitud nunca pasó de ser una afirmación local (`declared_complete`, sin
+> manifiesto que verifique el build exacto: `docs/MILESTONE_15.md`,
+> `docs/MILESTONE_16.md`). Con el set de cuatro módulos que M15/M16 sí cerraron,
+> `sdk` proveía `__nnmusl_init_dso` y los `JUMP_SLOT` de `main`/`subsdk0`
+> resolvían a su dirección huésped (lifting detenido entonces en `umulh` de
+> `0x7204717c30`); en la configuración de recuperación posterior el `run-entry`
+> disponible ni siquiera resuelve la búsqueda y para en el trampoline de import de
+> `main` (`br x17`, `0x0000007202aa421c`). Qué módulo falta en la configuración
+> actual: `[SIN VERIFICAR]`. Ningún proveedor host fue inventado en ningún hito.
+> Consecuencia clave: **mientras el set declarado no cierre, la ejecución real
+> queda bloqueada con independencia de cuánto baje el contador estático de
+> *unsupported instructions***: los dos ejes son independientes. No se admite como
+> progreso una reducción del contador estático que no mueva este boundary.
+
+## 5. Why static recompilation is viable, and why this target is difficult — `[VIGENTE]`
 
 Static recompilation can be effective when a program's code can be analyzed ahead of time and its platform-dependent behavior can be supplied by a compatible runtime. Existing projects demonstrate several useful patterns:
 
@@ -300,9 +443,16 @@ TOTK is substantially harder than those examples in several dimensions:
 
 Therefore the first definition of success is not “launch TOTK.” It is a trustworthy pipeline that can inspect an exact module, load it into a guest address model, translate small functions, execute them against a reference, and fail with useful evidence when coverage is incomplete.
 
-## 6. Translation strategy decision
+## 6. Translation strategy decision `[VIGENTE]`
 
-### Decision
+> Reconciliación: la decisión de tres estadios sigue siendo la arquitectura real
+> (`ir/` + `lifter/` + `interpreter/` + `codegen/llvm_backend*.cpp`). Dos matices
+> observables hoy: (a) el backend LLVM es **opcional** y en los builds locales de
+> los checkpoints M41/M42/M43 estaba deshabilitado, por lo que su lowering de esas
+> familias está `[SIN VERIFICAR]` localmente; (b) el ejecutor realmente usado en
+> los runs reales/documentados es el intérprete de referencia, no el JIT.
+
+### Decision — `[VIGENTE]`
 
 Use a three-stage representation:
 
@@ -337,7 +487,17 @@ A semantic IR permits analysis and validation before host-specific lowering. It 
 | Direct LLVM IR | Strong optimizer and x86-64/ARM64 backends, typed SSA, mature object generation | High coupling to LLVM, awkward guest state and address semantics, difficult diagnostics if semantics are emitted incorrectly | Not the first architectural boundary |
 | Custom IR lowered to LLVM | Explicit guest semantics, testable stages, good optimization path, controlled debug mapping | More code and schema design up front | Recommended |
 
-### 6.1 Decoder and lifting dependencies
+### 6.1 Decoder and lifting dependencies — `[SUPERADA por M4]` en la elección de decodificador
+
+> Reconciliación: la candidata preferida del RFC era **LLVM MC**. En el código
+> real el decodificador es un **envoltorio propio sobre Capstone**
+> (`src/switchrecomp/aarch64/decoder.cpp`, `CAPSTONE_ARM64_SUPPORT` activado y el
+> resto de arquitecturas apagadas en `CMakeLists.txt`). LLVM **no** es un
+> requisito para decodificar. La advertencia original del RFC ("Capstone es un
+> desensamblador, no una especificación de corrección") se mantiene operativa: la
+> normalización, el predicado de liftabilidad y la semántica son propias, y las
+> formas malformadas siguen siendo errores estructurados en lugar de aceptarse por
+> un atajo de decodificador.
 
 - **LLVM MC:** preferred first decoder candidate if LLVM is already a required dependency. It provides AArch64 instruction decoding/printing and avoids maintaining an entire opcode table immediately. It does not replace semantic lifting or control-flow analysis.
 - **Capstone:** useful for a fast analysis prototype and human-readable disassembly. It is a disassembler, not a complete correctness specification for lifting.
@@ -360,9 +520,9 @@ struct DecodedInstruction {
 
 The interface must preserve the original opcode and guest address even if a different decoder is used later.
 
-## 7. Nintendo Switch executable loading
+## 7. Nintendo Switch executable loading `[VIGENTE]`
 
-### 7.1 NSO model
+### 7.1 NSO model — `[VIGENTE]` (no se toca)
 
 Public reverse-engineering references describe NSO as the main Switch executable format. The NSO header identifies the `NSO0` magic, version and flags, file/memory offsets and sizes for `.text`, `.rodata`, and `.data`, BSS size, module identifier, compressed sizes, optional embedded/dynamic-string/dynamic-symbol regions, and per-segment hashes. Compressed segments have historically used LZ4; newer flags and system versions can change compression behavior. These details are version-sensitive and must be verified against the target file.
 
@@ -534,7 +694,7 @@ not partially modify the image. REL, lazy binding, symbol versioning,
 multi-module link order, and Horizon resolution remain future layers. See
 [`RELOCATIONS.md`](RELOCATIONS.md).
 
-### 7.5 Semantic IR and expanded AArch64 lifting — Milestones 6–8
+### 7.5 Semantic IR and expanded AArch64 lifting — Milestones 6–8 — diseño `[VIGENTE]`, lista de rechazos `[SUPERADA por M38/M43]`
 
 Milestones 6, 7, and 8 provide the executable recompilation path without making
 LLVM the architectural contract:
@@ -558,7 +718,17 @@ optional LLVM backend execute synthetic standalone functions through the same
 ABI, and `aarch64-analyze` provides deterministic whole-range coverage reports;
 this does not execute TOTK.
 
-### 7.6 Multiple modules
+> `[SUPERADA por M38/M43]` — El párrafo anterior afirma que el lifter "rechaza
+> divide instructions, fused FP multiply-add, atomics y system instructions". Eso
+> es el estado de M6–M8 y **ya no es cierto**: las divisiones entera
+> (`UDIV`/`SDIV`) y las comparaciones condicionales se liftan desde M38
+> (`docs/MILESTONE_38.md`), y `FMLA`/`FMLS` vectoriales y por elemento usan una
+> operación FP fundida dedicada desde M43 (`docs/MILESTONE_43.md`). Lo que **no**
+> cambió es el contrato del Semantic IR: tipado, determinista, con source mapping,
+> explícitamente terminado e independiente de LLVM en su interfaz pública, con
+> verificador e intérprete de referencia. Ver `docs/SEMANTIC_IR.md` `[VIGENTE]`.
+
+### 7.6 Multiple modules — `[VIGENTE]` (modelo) / `[BLOQUEADA]` (cierre real del set)
 
 The architecture supports a module graph such as:
 
@@ -586,7 +756,16 @@ Each module record should include:
 - Function metadata source and version.
 - Whether it is recompiled, provided by the runtime, or currently unsupported.
 
-## 8. Relocations and symbol resolution
+> `[BLOQUEADA]` — El modelo es correcto y el manifiesto hace exactamente esto, pero
+> la reconciliación deja constancia del punto que el RFC no anticipó: **el set local
+> declarado nunca se verificó contra un manifiesto del build exacto**; su
+> completitud fue siempre una afirmación local (`declared_complete`,
+> `docs/MILESTONE_15.md`/`docs/MILESTONE_16.md`). Ese es hoy el cuello principal de
+> la ejecución real: si el set declarado es incompleto, la búsqueda del proveedor de
+> `__nnmusl_init_dso` no cierra y `run-entry` para en el boundary del import sin que
+> importe la cobertura estática. Ver §0.2, §4.3, §34 (M14/M15/M16).
+
+## 8. Relocations and symbol resolution — `[VIGENTE]` (no se toca)
 
 Relocations must be fully resolved or explicitly represented before translated code can execute.
 
@@ -639,7 +818,7 @@ The names RELA, GOT, and PLT are ELF concepts; the actual Nintendo loader repres
 
 Preserving original guest-visible addresses is preferred. If the native code cannot encode a guest address directly, it must use a guest-address constant and runtime translation.
 
-## 9. Guest address space and memory
+## 9. Guest address space and memory — `[VIGENTE]` (decisión de mapeo)
 
 ### 9.1 Address type
 
@@ -712,7 +891,7 @@ On Windows, the eventual implementation can use `VirtualAlloc` and `VirtualProte
 - Guest structures are decoded with explicit layouts and alignment; host C++ layout is not used as proof of guest layout.
 - Pointer provenance and null/invalid ranges must be checked in diagnostic builds.
 
-## 10. CPU state and ABI
+## 10. CPU state and ABI — `[VIGENTE]`
 
 ### 10.1 Architectural state
 
@@ -776,7 +955,7 @@ The implementation must document:
 - How a guest return differs from a host return.
 - What happens when a function has an unresolved or unknown signature.
 
-## 11. AArch64 decoding and translation
+## 11. AArch64 decoding and translation — `[VIGENTE]` (organización por familias)
 
 The translator should be organized by semantic families rather than by an unstructured opcode switch.
 
@@ -810,7 +989,14 @@ generated operation range
 runtime calls inserted
 ```
 
-### 11.1 Unsupported instructions
+### 11.1 Unsupported instructions — `[VIGENTE]` (contrato) / `[SUPERADA por M38..M43]` (su uso como métrica de avance)
+
+> `[SUPERADA por M38..M43]` — La regla de que no existe fallback silencioso es
+> `[VIGENTE]` y sigue siendo código real: las formas malformadas y no soportadas
+> siguen siendo errores estructurados, nunca un `return zero`, y ningún hito usó un
+> atajo de decodificador para inflar la cobertura. Lo que **sí quedó superado** es
+> la interpretación de "reducir *unsupported instructions*" como la medida del
+> avance. Ver el recuadro al final de esta subsección.
 
 There must never be a silent “return zero” or “skip instruction” fallback for an unsupported instruction.
 
@@ -834,7 +1020,38 @@ The tool should support three explicit modes:
 
 Only strict mode is acceptable for a correctness milestone.
 
-## 12. Function discovery and control flow
+> `[SUPERADA por M38..M43]` — Los tres modos explícitos siguen existiendo
+> (`translate-module --diagnostic`, etc.), pero **el contador estático de
+> *unsupported* dejó de ser una métrica de avance**. Evidencia medida en los
+> propios documentos de hito (módulo `main` preparado, tope de 12,000,000 de
+> instrucciones):
+>
+> ```text
+>                      decoded     liftable  unsupported  decode failures
+> M40 baseline      11,180,285   11,113,251       67,034             391
+> M41 final         11,180,285   11,158,476       21,809             391
+> M42 baseline      11,180,285   11,158,677       21,608             391
+> M43 final         11,180,285   11,168,628       11,657             391
+> ```
+>
+> De M42 a M43 el contador cayó **21608 → 11657** (−9,951, 46.05% según
+> `docs/MILESTONE_43.md`), es decir el 0.104257% de las instrucciones
+> decodificadas.
+> En ese mismo intervalo el **frontier real de ejecución huésped no se movió ni una
+> instrucción**: el `run-entry` sigue parando en `unresolved_import`
+> `__nnmusl_init_dso` / `br x17` en `0x0000007202aa421c` (`docs/MILESTONE_36.md`,
+> reconfirmado en `docs/MILESTONE_38.md`, `docs/MILESTONE_39.md` y
+> `docs/MILESTONE_42.md`, que afirma textualmente *"No real frontier change is
+> claimed"*).
+>
+> Conclusión normativa de esta reconciliación: el contador estático es un
+> **diagnóstico de cobertura**, útil para priorizar familias, y **no** es progreso
+> de ejecución. El progreso real solo se declara cuando se mueve el boundary del
+> proveedor, y eso está `[BLOQUEADA]` por el conjunto de módulos declarado
+> incompleto (§0.2, §4.3, §7.6). Reducir el contador sin mover el boundary es
+> necesario pero claramente insuficiente, y no debe presentarse como avance.
+
+## 12. Function discovery and control flow — `[VIGENTE]` (ampliado por M18..M27, M37)
 
 A large stripped retail binary cannot depend only on symbols. Function discovery should combine:
 
@@ -936,7 +1153,14 @@ versioned canonical metadata
 
 The analyzer must not silently overwrite hand-reviewed metadata. Conflicts should be reported with both sources and a resolution field.
 
-## 13. Metadata and Ghidra integration
+## 13. Metadata and Ghidra integration — `[SIN VERIFICAR]` (exportador no implementado)
+
+> Reconciliación: el formato JSON versionado como metadato canónico sí es real
+> (los informes de `nso-inspect`, `process-inspect`, `translate-module` y
+> `run-entry` son JSON con `schema_version` creciente). El exportador de Ghidra y
+> el flujo de revisión humana descritos aquí **no** existen en el árbol; la
+> recuperación de funciones se hace por descubrimiento determinista desde
+> metadatos y llamadas directas (§12), no por importación de Ghidra.
 
 ### Decision
 
@@ -986,7 +1210,14 @@ The schema must support at least:
 
 A minimal Ghidra exporter should export functions, labels, references, data ranges, jump tables, vtables/RTTI when identified, imports/exports, and function signatures only when the analyst has evidence for them. It must not fabricate C++ types from names.
 
-## 14. Direct calls, indirect calls, function pointers, and vtables
+## 14. Direct calls, indirect calls, function pointers, and vtables — `[VIGENTE]`, con la parte de indiretos mucho más desarrollada de lo que describe
+
+> Reconciliación: la prohibición central (nunca convertir una dirección huésped en
+> un puntero de función host) es código real y ningún hito la ha relajado. Lo que
+> quedó corto es el pronóstico: el refinamiento de destinos indirectos certificado
+> por evidencia (M18/M20/M22/M23/M26/M27) y su contabilidad de recursos
+> (M32/M33/M37) es hoy el subsistema más grande del analizador, y su límite
+> observable sigue siendo el mismo boundary del proveedor (§4.3).
 
 ### 14.1 Direct calls
 
@@ -1053,7 +1284,7 @@ For unknown callback signatures, use the universal `CpuState` ABI and a registra
 
 Do not use a C++ cast from an arbitrary address to an arbitrary typed function pointer.
 
-## 15. Jump tables
+## 15. Jump tables — `[VIGENTE]` (no se toca)
 
 Jump tables are a source of false function boundaries and invalid tail-call classifications.
 
@@ -1083,7 +1314,18 @@ confidence
 
 If the table can be proven complete, code generation may emit a native switch. Otherwise, retain a safe bounds check and route the target through the guest dispatcher. Never treat unvalidated table data as a host pointer.
 
-## 16. Runtime organization
+## 16. Runtime organization — `[VIGENTE]` (objetivo) / `[SIN VERIFICAR]`→parcial (existencia real)
+
+> Reconciliación: el árbol de subsistemas de esta sección sigue siendo una
+> propuesta. Lo que existe hoy en `src/switchrecomp/runtime/` es un subconjunto
+> pequeño y honesto: contexto y `CpuState`, despachador, operaciones FP de
+> referencia, atómicos/memoria compartida, hilos y TLS (M9) y el
+> `RuntimeImportRegistry` (M12). No existen handle table, service registry, VFS ni
+> adaptadores de input/audio/graphics. El punto relevante para este cuello: la
+> política explícita del proyecto **prohíbe** rellenar el boundary con un proveedor
+> host inventado, así que ningún trabajo en §16 reduce por sí solo el bloqueo de
+> `__nnmusl_init_dso`; lo que lo despeja es cerrar el conjunto de módulos declarado
+> (§7.6) o disponer del proveedor huésped real.
 
 Proposed logical runtime:
 
@@ -1125,9 +1367,9 @@ A runtime context should contain:
 
 The runtime is intentionally smaller than a Switch emulator. Unsupported operations must identify the originating guest address, import/service identity, arguments when safe, thread, and module.
 
-## 17. Horizon and Nintendo SDK compatibility
+## 17. Horizon and Nintendo SDK compatibility — `[VIGENTE]` (decisión) / `[BLOQUEADA]` (aplicación real)
 
-### Decision
+### Decision — `[VIGENTE]`
 
 Do not emulate all of Horizon OS. Implement only the behavior required by observed TOTK execution.
 
@@ -1178,7 +1420,10 @@ For case 2, use a combination of:
 
 Do not assume that a public SDK symbol name exists in a stripped retail build.
 
-## 18. Filesystem and asset model
+## 18. Filesystem and asset model — `[SIN VERIFICAR]` (no iniciado)
+
+> Sin código en este árbol. Detrás del frontier del proveedor: el `run-entry`
+> disponible se detiene mucho antes de cualquier acceso a recursos del juego.
 
 The project must never redistribute Nintendo game data. The runtime can consume files supplied by the developer/user from a legally obtained copy, subject to the applicable rights and project policy.
 
@@ -1219,7 +1464,16 @@ The virtual filesystem must cover:
 
 Performance work should wait until a representative loading trace exists. The first implementation should prioritize correct path and handle semantics.
 
-## 19. Threading, TLS, synchronization, and atomics
+## 19. Threading, TLS, synchronization, and atomics — `[VIGENTE]` (M9) / `[BLOQUEADA]` la verificación real
+
+> Reconciliación: M9 entregó el subconjunto controlado (hilos huésped unibles,
+> estado CPU/TLS por hilo, memoria compartida verificada, reservas exclusivas,
+> acquire/release y barreras vía una ABI de runtime estable). Lo que **no** está:
+> los atómicos par-exclusivos (`LDXP`/`STXP`/`LDAXP`/`STLXP`) siguen entre los
+> *unsupported* medidos (`docs/MILESTONE_38.md`, `docs/MILESTONE_39.md`) y LSE no
+> está cubierto. Consecuencia que el RFC no preveía: **el modelo de hilos no ha
+> podido ejercitarse contra el juego real**, porque ningún run alcanza código de
+> juego (§0.2). Su correctitud actual descansa en tests deterministas sintéticos.
 
 ### 19.1 Thread model
 
@@ -1278,7 +1532,7 @@ bool store_exclusive(ExclusiveToken token,
 
 A later optimized lowering may use host atomic instructions, but it must preserve invalidation when another guest/native thread writes the monitored location. The implementation must document whether the monitor is per-thread and what granularity is modeled.
 
-## 20. Exceptions and unwinding
+## 20. Exceptions and unwinding — `[SIN VERIFICAR]` (sin implementación verificada)
 
 Exception support must be treated as a staged subsystem, not ignored.
 
@@ -1303,7 +1557,7 @@ A possible staged model:
 5. Validate destructor and thread interactions.
 6. Only then enable broad optimization that removes context state or changes call boundaries.
 
-## 21. Graphics architecture
+## 21. Graphics architecture — `[SIN VERIFICAR]` (no iniciado; detrás del boundary del proveedor)
 
 ### 21.1 End state
 
@@ -1369,7 +1623,7 @@ The interface should be traceable and replayable. It must not expose Vulkan type
 - macOS Vulkan support may use a translation layer; this is a deployment choice, not a promise of performance or feature parity.
 - Do not implement three backends before the canonical interface and one backend pass conformance tests.
 
-## 22. Shaders and pipelines
+## 22. Shaders and pipelines — `[SIN VERIFICAR]` (no iniciado)
 
 The proposed shader path is:
 
@@ -1423,7 +1677,7 @@ backend/device identity where required
 
 Use persistent caches, background compilation, and asset-driven precompilation only after correctness. Cache invalidation must be explicit whenever translator or renderer semantics change.
 
-## 23. Input and audio
+## 23. Input and audio — `[SIN VERIFICAR]` (no iniciado)
 
 ### 23.1 Input
 
@@ -1456,7 +1710,7 @@ Start with a small output/mixing abstraction and implement only observed require
 
 SDL Audio or another portable backend is a candidate. The exact Nintendo audio service behavior is **Needs verification**. Do not build a complete audio service model before an audio trace or boot dependency proves it is required.
 
-## 24. Frame rate and timing
+## 24. Frame rate and timing — `[SIN VERIFICAR]` (no iniciado)
 
 Separate these two goals:
 
@@ -1483,7 +1737,7 @@ Initially preserve timing semantics. Later, any frame-rate work must be isolated
 
 A patch that increases presentation rate without proving simulation correctness is not a valid performance milestone.
 
-## 25. Patches and hooks
+## 25. Patches and hooks — `[SIN VERIFICAR]` (no iniciado; la regla *fail closed* sigue vigente como política)
 
 Patches belong in TotkRecomp metadata and source, not in generic SwitchRecomp.
 
@@ -1532,7 +1786,15 @@ All patches must declare:
 
 Patches must fail closed if the original bytes do not match. Never apply an address-only patch to an unknown build.
 
-## 26. Logging, tracing, and crash diagnostics
+## 26. Logging, tracing, and crash diagnostics — `[VIGENTE]`, y es la sección mejor cumplida
+
+> Reconciliación: la observabilidad estructurada sí se construyó, y es lo que ha
+> permitido esta reconciliación. Los informes `run-entry` publican motivo de parada
+> estructurado, módulo, función, PC, opcode y clasificación; M34 separó progreso de
+> ejecución de observabilidad de eventos con contabilidad de historia
+> determinista (§4.3). Falta la parte nativa (mapeo dirección nativa → huésped para
+> crashes del código generado), porque no hay código generado ejecutándose en los
+> runs reales.
 
 Structured observability is a core feature, not an afterthought.
 
@@ -1606,7 +1868,19 @@ native crash address
     → original guest instruction
 ```
 
-## 27. Differential testing
+## 27. Differential testing — `[VIGENTE]` (objetivo) / `[SIN VERIFICAR→SUPERADA en la práctica]` (referencias externas)
+
+> Reconciliación: los candidatos de referencia externos **no** son dependencias del
+> proyecto: `docs/DEPENDENCIES.md` declara explícitamente que *"Remill, Unicorn,
+> QEMU, Vulkan, SDL, GLFW and the Nintendo SDK are not dependencies"*. La
+> diferenciación real que se ejecuta hoy es **intérprete de referencia vs. backend
+> LLVM opcional** sobre el mismo Semantic IR, más los fixtures sintéticos
+> arquitecturales (los mismos que M35..M41 usan para afirmar convergencia). Eso es
+> más débil que la visión original del RFC y debe decirse sin eufemismos: **no hay
+> ejecución AArch64 nativa de referencia en CI** `[SIN VERIFICAR]`. Nótese además
+> que la comparación estática interpretador/LLVM no detecta un frontier real mal
+> interpretado: los builds locales de M41–M43 tenían LLVM deshabilitado; el job
+> remoto LLVM 18 del PR de integración posterior sí compiló y validó ese backend.
 
 Differential testing is one of the foundations of the project.
 
@@ -1656,7 +1930,17 @@ Test design requirements:
 
 Every instruction family must earn broader use by passing a corresponding test suite.
 
-## 28. Unit and integration test layout
+## 28. Unit and integration test layout — `[SUPERADA]` en la forma del layout
+
+> Reconciliación: el layout propuesto era un árbol de directorios por área. El
+> layout real es **plano**: un fichero por hito/área bajo `tests/`
+> (`tests/milestone7_semantics_tests.cpp` … `tests/milestone41_structure_load_tests.cpp`,
+> más `nso_tests.cpp`, `mod0_dynamic_tests.cpp`, `relocation_symbol_tests.cpp`,
+> `semantic_ir_tests.cpp`, `guest_memory_tests.cpp`, `llvm_backend_tests.cpp`,
+> etc.), todos enlazados en **un único ejecutable** `switchrecomp-tests`. Los
+> requisitos de contenido de esta sección (fixtures sintéticos, prohibición de
+> binarios del juego) siguen `[VIGENTE]`; solo la organización de carpetas quedó
+> superada.
 
 Proposed layout:
 
@@ -1701,7 +1985,7 @@ Examples:
 - Render IR replay tests.
 - Shader IR/SPIR-V validation tests.
 
-## 29. Build and generated-artifact strategy
+## 29. Build and generated-artifact strategy — `[VIGENTE]` en lo de build, `[SIN VERIFICAR]` en artefactos generados
 
 The current repository uses CMake with pinned FetchContent dependencies for the
 core toolchain. LLVM is an optional host-provided backend dependency.
@@ -1784,7 +2068,11 @@ Generated files should be deterministic and keyed by:
 
 Do not commit gigantic generated sources without a measured reason, a reviewable regeneration procedure, and a storage strategy.
 
-## 30. Host targets
+## 30. Host targets — `[VIGENTE]`
+
+> Verificable en `.github/workflows/ci.yml`: Linux/GCC, Linux/GCC+LLVM 18, Linux
+> con ASan+UBSan, Linux con TSan y Windows/MSVC. Sigue sin haber un primer *host
+> target* de soporte declarado como producto (pregunta 20 de §36 abierta).
 
 No host platform is established by the current repository.
 
@@ -1810,7 +2098,7 @@ ARM64 hosts are important but not an initial shortcut. A guest ARM64 instruction
 
 Any “reuse original instruction” optimization must be a later lowering choice validated against the same semantic IR.
 
-## 31. Dependency and license policy
+## 31. Dependency and license policy — `[VIGENTE]` (no se toca)
 
 The repository has no current dependencies. The following are candidates or research inputs, not approved imports.
 
@@ -1837,7 +2125,7 @@ Rules:
 - Recheck licenses when vendoring, patching, or upgrading.
 - Use public technical facts and clean-room observations where code provenance is uncertain.
 
-## 32. Comparison with reference projects
+## 32. Comparison with reference projects — `[VIGENTE]` (investigación; no se toca)
 
 | Project | Guest CPU | Translation style | Runtime/model | Graphics lesson |
 | --- | --- | --- | --- | --- |
@@ -1854,7 +2142,7 @@ Rules:
 
 This table records architectural patterns observed in public repository documentation and layouts. It does not claim that their internal implementations are portable to AArch64 or legally reusable.
 
-## 33. Legal and repository hygiene
+## 33. Legal and repository hygiene — `[VIGENTE]` (sección conservada intacta)
 
 The repository and releases must not contain:
 
@@ -1881,7 +2169,30 @@ The repository may contain:
 
 This section is a repository policy, not a claim about the legal status of any particular jurisdiction or use.
 
-## 34. Required milestone roadmap
+## 34. Required milestone roadmap — `[SUPERADA]` como secuencia prevista, `[VIGENTE]` como puertas de corrección
+
+> Reconciliación de la ruta (leer antes que cualquier hito de esta sección):
+>
+> - La numeración prevista se rompió dos veces. **M17 no aparece** y **M18 está
+>   duplicado** en esta lista (una vez como *"Evidence-backed indirect guest target
+>   discovery"*, que sí se construyó, y otra como *"First visible game output"*, que
+>   no). A partir de M22 la lista original se queda corta: el trabajo real siguió
+>   por M23..M43 y **todo él es de análisis/semántica, no de gráficos**.
+> - Los hitos **M14/M15/M16 sí se ejecutaron** pero **no cerraron** lo que prometían
+>   (`[BLOQUEADA]`): la ingesta del conjunto completo de ejecutables nunca tuvo
+>   verificación por manifiesto del build exacto y el *provider execution frontier*
+>   real no avanzó más allá del `umulh` primero y, hoy, de la búsqueda de proveedor
+>   sin resolver. Ver §7.6.
+> - La premisa medida por la que esta sección quedó obsoleta: **ningún hito de
+>   gráficos (M17..M22 originales) puede atacarse todavía**, porque el frontier real
+>   de ejecución huésped está detrás del boundary del proveedor. Los M35..M43
+>   redujeron cobertura estática sin tocar ese frontier (§11.1).
+> - Hito **ausente en los documentos**: M37 no tiene `docs/MILESTONE_37.md` en este
+>   árbol (existe como rama `milestone-37-incremental-entry-index`, commit
+>   `954ab31`); su trabajo se describe indirectamente en `docs/MILESTONE_38.md`.
+>   `[SIN VERIFICAR]`
+> - **M42 no tuvo documento en su momento**: escrito de forma retroactiva y
+>   comiteado junto a M43 (§0 "Fuentes consultadas").
 
 The milestones below are gates. Do not skip a gate because the next one appears more exciting.
 
@@ -2090,7 +2401,7 @@ single-module run remains at M12's `runtime_import_unimplemented` boundary;
 no guessed host handler was added. See [MILESTONE_13.md](MILESTONE_13.md) for
 the inventory, public evidence, synthetic coverage, and exact blocker.
 
-### Milestone 14 — Complete executable-set ingestion and provider closure
+### Milestone 14 — Complete executable-set ingestion and provider closure `[BLOQUEADA]`
 
 **Implemented:** `analysis::ModuleSetInventory` provides bounded explicit-file
 and non-recursive prepared-directory ingestion, NSO identity/materialization
@@ -2107,7 +2418,7 @@ The M14 directory-only real-input state was incomplete; M15 keeps that state
 typed while allowing an explicit local assertion to drive a controlled
 experiment. See [MILESTONE_14.md](MILESTONE_14.md).
 
-### Milestone 15 — Real executable-set closure and `__nnmusl_init_dso`
+### Milestone 15 — Real executable-set closure and `__nnmusl_init_dso` `[BLOQUEADA]`
 
 **Implemented:** M15 retains every parsed focus-symbol occurrence, refuses to
 select a provider from an incomplete search, records public ExeFS load-order
@@ -2124,7 +2435,16 @@ remain open.
 See [MILESTONE_15.md](MILESTONE_15.md) for the inventory, public-source
 evidence, report hashes, execution frontier, and exact next blocker.
 
-### Milestone 16 — Provider execution frontier
+### Milestone 16 — Provider execution frontier `[BLOQUEADA]`
+
+> `[BLOQUEADA]` — Los tres hitos de arriba (M14/M15/M16) son el antecedente directo
+> del cuello actual y **ninguno cerró su objetivo**: M14 lo dice explícitamente
+> (*"Directory discovery is not a completeness attestation"*), M15 se detuvo en el
+> `umulh` del proveedor y M16 añadió `UMULH` sin inventar estado de bootstrap. En el
+> estado actual el `run-entry` disponible ni siquiera llega a ese punto: se detiene
+> antes, en la búsqueda no resuelta del proveedor (§0.2, §11.1). Este es el unico
+> camino real hacia la ejecución; los Milestones 17..22 de gráficos están todos
+> detrás.
 
 M16 adds project-owned scalar A64 `UMULH` decoding, lifting, verification,
 portable interpreter semantics, and LLVM lowering. Synthetic process fixtures
@@ -2135,7 +2455,7 @@ not invent bootstrap state or relabel the metadata-selected `main` `DT_INIT`
 candidate as a verified process entry. See [MILESTONE_16.md](MILESTONE_16.md)
 for the real-input availability and execution-frontier status.
 
-### Milestone 18 — Evidence-backed indirect guest target discovery
+### Milestone 18 — Evidence-backed indirect guest target discovery `[VIGENTE]`
 
 **Implemented:** Execution sessions now retain source PC, control-flow kind,
 target register, guest-load provenance, target module, and observation count
@@ -2168,7 +2488,7 @@ have changed is reconsidered. Exhaustion is reported with the exact dimension,
 consumed value, limit, and pending work, and never authorizes uncertified guest
 execution. See [MILESTONE_23.md](MILESTONE_23.md).
 
-### Milestone 26 — Progress-aware indirect refinement closure
+### Milestone 26 — Progress-aware indirect refinement closure `[VIGENTE]`
 
 The indirect-refinement driver distinguishes total execution attempts from
 monotonic work. `total_execution_attempts` is accounting only. A productive
@@ -2201,7 +2521,7 @@ repeated full metadata scans for duplicate runtime observations. The former
 M25 target was consequently assessed, certified, promoted, and entered through
 normal guest dispatch. See [MILESTONE_26.md](MILESTONE_26.md).
 
-### Milestone 27 — Proof-preserving aggregate refinement scaling
+### Milestone 27 — Proof-preserving aggregate refinement scaling `[VIGENTE]`
 
 M27 replaces the ordinary productive-event charge from successful promotions
 and target-module map rebuilds with a finite aggregate ledger of actual
@@ -2233,55 +2553,101 @@ termination proof. See [MILESTONE_27.md](MILESTONE_27.md) for measured
 full-rebuild versus reuse work, synthetic invalidation/transaction tests, the
 real executable frontier, and schema-13 report evidence.
 
-### Future milestone — Filesystem and asset loading
+### Añadido por la reconciliación: la trayectoria real después de M27 (M28..M43) `[SUPERADA]` — la ruta prevista en §34 no contempla lo que el proyecto hizo realmente
+
+La lista anterior termina efectivamente en M27 y salta a puertas de gráficos. El
+trabajo real posterior, verificable en `docs/MILESTONE_*.md` y en `git log`, es de
+**convergencia semántica dirigida por cobertura** y de **recursos/observabilidad**,
+no de presentación ni render:
+
+```text
+M28  structural candidate            M34  execution observability / event accounting
+M29  resumable IR                    M35  FP/SIMD semantic convergence
+M30  stack lifetime                  M36  scalar integer convergence + refinement speed
+M31  function-transition frontier    M37  incremental entry index (no doc own)
+M32  candidate assessment resource   M38  coverage-driven convergence + scanner repair
+M33  refinement transaction resource  M39..M43  coverage-driven convergence families
+```
+
+Tres hechos de esta trayectoria que el RFC debe registrar:
+
+1. **El escáner de cobertura se reparó antes de medir nada.** Hasta M38 el
+   predicado de liftabilidad era un heurístico propio que discrepaba del lifter
+   (omitía UMULH/SMULH, atómicos, barreras, MRS/MSR y usaba una regla FP/SIMD
+   gruesa). Desde M38 es un **escáner de decodificación lineal cuya tabla espeja el
+   predicado del lifter**, con worker paralelos deterministas cuyo informe serial y
+   multiproceso es byte-idéntico (`docs/MILESTONE_38.md`,
+   `src/switchrecomp/analysis/coverage.cpp`). `[SUPERADA]` la descripción de
+   cobertura de §7.5/§11.1.
+2. **La métrica de avance cambió de naturaleza, no solo de valor.** Las familias se
+   eligen por frecuencia medida en la encuesta exacta, no por prioridad
+   arquitectónica.
+   Y cada hito desde M36 declara explícitamente que el frontier real **no** se movió
+   (`docs/MILESTONE_36.md`, `docs/MILESTONE_38.md`, `docs/MILESTONE_39.md`,
+   `docs/MILESTONE_42.md`). `[SUPERADA]` la lectura de "menos unsupported = más
+   avance".
+3. **El frontier real sigue en el mismo punto.** `unresolved_import`
+   `__nnmusl_init_dso`, `br x17` en `0x0000007202aa421c`, con 63 instrucciones
+   huésped ejecutadas y parada por búsqueda de proveedor incompleta
+   (`docs/MILESTONE_36.md`). `[BLOQUEADA]`
+
+### Future milestone — Filesystem and asset loading `[SIN VERIFICAR]` (no iniciado)
 
 **Goal:** Mount user-provided game data and implement the required streaming path.
 
 **Success:** TOTK opens required resources and begins loading without missing-path or handle-semantics failures.
 
-### Future milestone — Graphics initialization
+### Future milestone — Graphics initialization `[SIN VERIFICAR]` (no iniciado)
 
 **Goal:** Trace and intercept the selected graphics boundary and create logical native resources.
 
 **Success:** Recompiled code creates the required native device/resources through the canonical render interface.
 
-### Milestone 17 — First present
+### Milestone 17 — First present `[SIN VERIFICAR]` (no iniciado; detrás del boundary del proveedor)
 
 **Goal:** Produce a window, swapchain, render target, and present path.
 
 **Success:** A frame initiated by recompiled code reaches the display. A cleared framebuffer counts.
 
-### Milestone 18 — First visible game output
+### Milestone 18 — First visible game output `[SIN VERIFICAR]` (no iniciado; número duplicado en esta lista)
 
 **Goal:** Render actual TOTK graphics, even if incomplete.
 
 **Success:** Game-generated geometry or UI is visible through the native renderer.
 
-### Milestone 19 — Menu boot
+### Milestone 19 — Menu boot `[SIN VERIFICAR]` (no iniciado)
 
 **Goal:** Reach an interactable title screen or early menu.
 
 **Success:** Input works and the menu remains stable across repeated runs.
 
-### Milestone 20 — In-game
+### Milestone 20 — In-game `[SIN VERIFICAR]` (no iniciado)
 
 **Goal:** Reach a playable scene.
 
 **Success:** Gameplay begins with known limitations documented.
 
-### Milestone 21 — Correctness
+### Milestone 21 — Correctness `[SIN VERIFICAR]` (no iniciado)
 
 **Focus:** Crashes, memory, synchronization, graphics, audio, saves, streaming, input, timing, and gameplay behavior.
 
 **Success:** A repeatable validation suite covers representative flows and regressions.
 
-### Milestone 22 — Performance
+### Milestone 22 — Performance `[SIN VERIFICAR]` (no iniciado como puerta de juego)
+
+> `[SUPERADA parcialmente]` — El trabajo de rendimiento que sí existe no es el de
+> esta puerta: es rendimiento de **análisis**, no de código generado. Los hitos M32,
+> M33, M35..M37 y los commits `perf:` de `954ab31`/`7827b35`/`37ddfc3` van de
+> paralelizar refinamiento, CFG y escaneo de cobertura determinista (scan paralelo
+> 61.46 s frente a 234.66 s serial en `docs/MILESTONE_40.md`) y de
+> observabilidad/contabilidad de recursos de ejecución (M33/M34). Ver también
+> `docs/performance-profiling.md`.
 
 **Focus:** Direct-call lowering, dispatcher locality, LLVM optimization, SSA/register improvements, guest-memory fast paths, allocation, renderer batching, shader/pipeline caches, and asynchronous compilation.
 
 **Success:** Performance improvements are measured against a fixed workload without regressions in the correctness suite.
 
-## 35. Risks
+## 35. Risks (riesgos) — `[VIGENTE]` (tabla conservada intacta) con una adición de reconciliación
 
 | Risk | Severity | Why it matters | Mitigation |
 | --- | --- | --- | --- |
@@ -2305,7 +2671,25 @@ real executable frontier, and schema-13 report evidence.
 | Premature FPS changes | Medium | Breaks physics/timing | Preserve timing first; isolate and test patches |
 | Host platform variance | Medium | Different memory/ABI/GPU behavior | Backend abstraction, CI matrix, capability reports |
 
-## 36. Open questions
+> `[BLOQUEADA]` — Riesgo que la tabla no contemplaba y que hoy domina todos los
+> demás: **confundir cobertura estática con progreso de ejecución**. Sus mitigaciones
+> ya están en el repositorio (los hitos declaran frontier invariante, `run-entry`
+> publica el motivo de parada estructurado y ningún hito inventó un proveedor host),
+> pero el riesgo es de proceso, no de código: con el conjunto de módulos declarado
+> incompleto, la métrica más visible del proyecto (unsupported estático) puede caer
+> indefinidamente sin que la ejecución huésped avance un solo paso (§0.2, §11.1).
+> Los riesgos de gráficos, shaders y streaming de esta tabla no son alcanzables hasta
+> despejar ese cuello.
+
+## 36. Open questions — `[VIGENTE]`; la pregunta 3 es hoy la pregunta 1 real
+
+> Reconciliación: las preguntas 1–3 eran preliminares en el RFC y hoy son el cuello
+> duro. La nº 3 (*"Which modules are present, and which are actually required to
+> reach initialization?"*) **sigue sin responder de forma verificada**: la
+> completitud del set local nunca pasó de `declared_complete` sin manifiesto del
+> build exacto (§7.6), y esa es exactamente la causa del bloqueo de
+> `__nnmusl_init_dso` (§0.2). Las preguntas 13–17 (gráficos/sombreados) no son
+> abordables todavía: están detrás del boundary del proveedor. `[BLOQUEADA]`
 
 1. Which exact TOTK version, region/build, and update will be the first supported target?
 2. What are the SHA-256 hashes and module identifiers for that build?
@@ -2334,7 +2718,16 @@ real executable frontier, and schema-13 report evidence.
 25. What metadata should be manually reviewed before allowing whole-module translation?
 26. What is the minimum deterministic boot trace that proves a runtime change is correct?
 
-## 37. Immediate Next Steps
+## 37. Immediate Next Steps — `[SUPERADA]` (todos los pasos 1–15 cerrados o sustituidos)
+
+> Reconciliación: esta sección describe las primeras tareas previas a la
+> implementación del recompiler. Los pasos 1–15 están cerrados (los propios
+> subtítulos marcan *implemented in Milestone 2A/4/6/7/8/9*) o sustituidos por la
+> trayectoria real M28..M43 descrita en §34. El único paso de esta sección cuyo
+> objetivo **no** se cumplió es el nº 1, *"Freeze the first exact target build"*: no
+> existe un manifiesto verificado del build exacto, y esa carencia es hoy el cuello
+> principal (§7.6, §0.2). Cualquier "next step" nuevo debe definirse contra el
+> frontier real, no contra el contador estático.
 
 These are the first practical engineering tasks. They intentionally stop before production recompiler implementation.
 
@@ -2471,7 +2864,7 @@ These are the first practical engineering tasks. They intentionally stop before 
 Only after these steps should whole-module TOTK translation be attempted. The
 repository remains intentionally synthetic and does not claim game execution.
 
-## 38. Reference sources
+## 38. Reference sources — `[VIGENTE]` (bibliografía; no se toca)
 
 The following sources were inspected for patterns or technical reference while preparing this RFC:
 
@@ -2504,7 +2897,14 @@ The following sources were inspected for patterns or technical reference while p
 
 Reference links are for research and provenance. They do not grant permission to copy code or redistribute protected content.
 
-## 39. Definition of done for this RFC
+## 39. Definition of done for this RFC — `[SUPERADA]` por esta reconciliación
+
+> La condición *"The repository state is accurately described"* dejó de cumplirse en
+> cuanto el proyecto superó M13: el RFC describía el estado de 2026-09-07. La sección
+> §0 existe para restaurar esa condición sin reescribir la historia. El resto de
+> condiciones sigue vigente, incluida la última —*"Any future implementation claiming
+> progress points back to a test, report, or exact-build artifact"*— que es justo la
+> que obliga a distinguir frontier real de contador estático (§11.1).
 
 This RFC is complete when:
 
@@ -2516,7 +2916,7 @@ This RFC is complete when:
 - Every target-specific unknown remains marked as **Needs verification**.
 - Any future implementation claiming progress points back to a test, report, or exact-build artifact.
 
-## Resumable Semantic IR execution
+## Resumable Semantic IR execution — `[VIGENTE]` (M29)
 
 Milestone 29 separates interpreter scheduling from execution termination. A
 finite internal IR-operation slice yields an `InterpreterFrame` with an exact
@@ -2528,7 +2928,7 @@ finite guest-block, transition, call-depth, event, and refinement resources.
 An explicitly configured `--max-ir-operations N` remains an exact global hard
 guard and is reported separately from the slice quantum.
 
-## Generation-scoped controlled stack memory
+## Generation-scoped controlled stack memory — `[VIGENTE]` (M30)
 
 Milestone 30 gives dynamic controlled stacks an exact whole-region ownership
 token. `ExecutionSession` keeps the token for the lifetime of one logical
