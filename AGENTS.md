@@ -13,10 +13,10 @@ validation when a milestone requires it, create committed checkpoints,
 self-review the resulting state, fix justified blocking defects, and run final
 CI.
 
-There is no Codex/Pi role split, verifier handoff, detached-review requirement,
-or tmux-based agent coordination. When an independent review is explicitly
-requested, treat it as an additional validation activity rather than a second
-persistent agent role.
+There is no persistent multi-agent role split, verifier handoff,
+detached-review requirement, or tmux-based agent coordination. When an
+independent review is explicitly requested, treat it as an additional
+validation activity rather than a second persistent agent role.
 
 The normal topology is:
 
