@@ -111,6 +111,16 @@ namespace
     return false;
 }
 
+[[nodiscard]] bool valid_fp_fused(FpFusedOperation operation) noexcept
+{
+    switch (operation)
+    {
+    case FpFusedOperation::MultiplyAdd:
+    case FpFusedOperation::MultiplySubtract: return true;
+    }
+    return false;
+}
+
 [[nodiscard]] bool valid_fp_unary(FpUnaryOperation operation) noexcept
 {
     switch (operation)
@@ -726,6 +736,19 @@ Result<void> verify(const Function& function)
                         checked = invalid("FP binary operands must have matching f32/f64 types");
                 }
                 break;
+            case Opcode::FpFused:
+                checked = require_arity(instruction, 3U);
+                if (checked)
+                {
+                    const auto left = operand_type(function, instruction.operands[0], "fp fused");
+                    const auto right = operand_type(function, instruction.operands[1], "fp fused");
+                    const auto accumulator = operand_type(function, instruction.operands[2], "fp fused");
+                    if (!left || !right || !accumulator || !valid_fp_fused(instruction.fp_fused) ||
+                        !left.value().is_floating() || left.value() != right.value() ||
+                        left.value() != accumulator.value() || instruction.result_type != left.value())
+                        checked = invalid("FP fused operands must have matching f32/f64 types");
+                }
+                break;
             case Opcode::FpUnary:
                 checked = require_arity(instruction, 1U);
                 if (checked)
@@ -858,6 +881,41 @@ Result<void> verify(const Function& function)
                     if (!left || !right || left.value() != v128_type() || right.value() != v128_type() ||
                         instruction.result_type != v128_type() || !valid_arrangement(instruction.arrangement))
                         checked = invalid("vector shuffle requires V128 operands and a valid arrangement");
+                }
+                break;
+            case Opcode::VectorTableLookup:
+                if (instruction.vector_index < 1U || instruction.vector_index > 4U ||
+                    instruction.operands.size() != static_cast<std::size_t>(instruction.vector_index) + 2U)
+                {
+                    checked = invalid("vector table lookup has an invalid table count or arity");
+                    break;
+                }
+                checked = require_arity(instruction, instruction.operands.size());
+                if (checked)
+                {
+                    const auto destination = operand_type(
+                        function, instruction.operands.back(), "vector table destination");
+                    const auto index = operand_type(
+                        function, instruction.operands[instruction.vector_index], "vector table index");
+                    if (!destination || !index || destination.value() != v128_type() ||
+                        index.value() != v128_type() || instruction.result_type != v128_type() ||
+                        !valid_arrangement(instruction.arrangement) ||
+                        (instruction.arrangement != VectorArrangement::B8 &&
+                         instruction.arrangement != VectorArrangement::B16))
+                    {
+                        checked = invalid("vector table lookup requires byte-vector inputs");
+                        break;
+                    }
+                    for (std::size_t table = 0U; table < instruction.vector_index; ++table)
+                    {
+                        const auto source = operand_type(function, instruction.operands[table],
+                                                         "vector table source");
+                        if (!source || source.value() != v128_type())
+                        {
+                            checked = invalid("vector table source is not a V128");
+                            break;
+                        }
+                    }
                 }
                 break;
             case Opcode::GuestLoadVector:

@@ -880,6 +880,21 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                 if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
                 break;
             }
+            case ir::Opcode::FpFused:
+            {
+                const auto left = read(instruction.operands[0]);
+                const auto right = read(instruction.operands[1]);
+                const auto accumulator = read(instruction.operands[2]);
+                if (!left || !right || !accumulator)
+                    return Result<runtime::ExecutionResult>::failure(!left ? left.error() : !right ? right.error() : accumulator.error());
+                const auto value = runtime::fp_fused(
+                    cpu, static_cast<runtime::FpFusedOperation>(instruction.fp_fused),
+                    instruction.result_type == ir::f32_type() ? 32U : 64U,
+                    left.value(), right.value(), accumulator.value());
+                const auto stored = store_result(value);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
             case ir::Opcode::FpUnary:
             {
                 const auto value = read(instruction.operands[0]);
@@ -1017,6 +1032,36 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                         crc = (crc & 1U) != 0U ? (crc >> 1U) ^ polynomial : crc >> 1U;
                 }
                 const auto stored = store_result(crc);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::VectorTableLookup:
+            {
+                const auto table_count = instruction.vector_index;
+                runtime::Vector128 tables[4]{};
+                for (std::uint8_t table = 0U; table < table_count; ++table)
+                {
+                    const auto value = read(instruction.operands[table]);
+                    const auto high = get_high_value(function, frame.values, frame.high_values,
+                                                     instruction.operands[table]);
+                    if (!value || !high)
+                        return Result<runtime::ExecutionResult>::failure(!value ? value.error() : high.error());
+                    tables[table] = runtime::Vector128{value.value(), high.value()};
+                }
+                const auto index_value = read(instruction.operands[table_count]);
+                const auto index_high = get_high_value(function, frame.values, frame.high_values,
+                                                       instruction.operands[table_count]);
+                const auto destination_value = read(instruction.operands[table_count + 1U]);
+                const auto destination_high = get_high_value(function, frame.values, frame.high_values,
+                                                             instruction.operands[table_count + 1U]);
+                if (!index_value || !index_high || !destination_value || !destination_high)
+                    return Result<runtime::ExecutionResult>::failure(!index_value ? index_value.error() : !index_high ? index_high.error() : !destination_value ? destination_value.error() : destination_high.error());
+                const auto result = runtime::vector_table_lookup(
+                    static_cast<std::uint8_t>(instruction.arrangement), table_count,
+                    instruction.table_lookup_preserve_destination, tables,
+                    runtime::Vector128{index_value.value(), index_high.value()},
+                    runtime::Vector128{destination_value.value(), destination_high.value()});
+                const auto stored = store_result(result.lo, result.hi);
                 if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
                 break;
             }

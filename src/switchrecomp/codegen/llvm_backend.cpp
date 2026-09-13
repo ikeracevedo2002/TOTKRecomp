@@ -292,6 +292,15 @@ class ModuleLowerer
         return module_->getOrInsertFunction("switchrecomp_runtime_fp_binary", type);
     }
 
+    [[nodiscard]] FunctionCallee runtime_fp_fused()
+    {
+        auto* type = FunctionType::get(Type::getInt64Ty(context_),
+                                       {PointerType::getUnqual(cpu_type_), Type::getInt8Ty(context_),
+                                        Type::getInt8Ty(context_), Type::getInt64Ty(context_),
+                                        Type::getInt64Ty(context_), Type::getInt64Ty(context_)}, false);
+        return module_->getOrInsertFunction("switchrecomp_runtime_fp_fused", type);
+    }
+
     [[nodiscard]] FunctionCallee runtime_fp_unary()
     {
         auto* type = FunctionType::get(Type::getInt64Ty(context_),
@@ -376,6 +385,16 @@ class ModuleLowerer
                                         PointerType::getUnqual(vector_type()), PointerType::getUnqual(vector_type()),
                                         Type::getInt8Ty(context_), PointerType::getUnqual(vector_type())}, false);
         return module_->getOrInsertFunction("switchrecomp_runtime_vector_shuffle", type);
+    }
+
+    [[nodiscard]] FunctionCallee runtime_vector_table_lookup()
+    {
+        auto* type = FunctionType::get(Type::getVoidTy(context_),
+                                       {Type::getInt8Ty(context_), Type::getInt8Ty(context_),
+                                        Type::getInt8Ty(context_), PointerType::getUnqual(vector_type()),
+                                        PointerType::getUnqual(vector_type()), PointerType::getUnqual(vector_type()),
+                                        PointerType::getUnqual(vector_type())}, false);
+        return module_->getOrInsertFunction("switchrecomp_runtime_vector_table_lookup", type);
     }
 
     [[nodiscard]] Value* fp_bits(Value* value, ir::Type source_type)
@@ -730,6 +749,24 @@ class ModuleLowerer
             assign(instruction, fp_value(bits, instruction.result_type));
             return Result<void>::success();
         }
+        case ir::Opcode::FpFused:
+        {
+            const auto left = require_value(instruction.operands[0]);
+            const auto right = require_value(instruction.operands[1]);
+            const auto accumulator = require_value(instruction.operands[2]);
+            if (!left || !right || !accumulator)
+                return Result<void>::failure(!left ? left.error() : !right ? right.error() : accumulator.error());
+            const auto bits = builder_.CreateCall(
+                runtime_fp_fused(),
+                {cpu_, builder_.getInt8(static_cast<unsigned int>(instruction.fp_fused)),
+                 builder_.getInt8(instruction.result_type.bit_width()),
+                 fp_bits(left.value(), instruction.result_type),
+                 fp_bits(right.value(), instruction.result_type),
+                 fp_bits(accumulator.value(), instruction.result_type)},
+                "fp.fused.bits");
+            assign(instruction, fp_value(bits, instruction.result_type));
+            return Result<void>::success();
+        }
         case ir::Opcode::FpUnary:
         {
             const auto source = require_value(instruction.operands[0]);
@@ -859,6 +896,40 @@ class ModuleLowerer
                                      left_storage, right_storage, output});
             }
             assign(instruction, builder_.CreateLoad(vector_type(), output, "vector.value"));
+            return Result<void>::success();
+        }
+        case ir::Opcode::VectorTableLookup:
+        {
+            const auto table_count = instruction.vector_index;
+            auto* table_storage = builder_.CreateAlloca(
+                ArrayType::get(vector_type(), 4U), nullptr, "table.lookup.tables");
+            for (std::uint8_t table = 0U; table < table_count; ++table)
+            {
+                const auto source = require_value(instruction.operands[table]);
+                if (!source) return Result<void>::failure(source.error());
+                auto* slot = builder_.CreateInBoundsGEP(
+                    ArrayType::get(vector_type(), 4U), table_storage,
+                    {builder_.getInt32(0), builder_.getInt32(table)}, "table.lookup.source");
+                builder_.CreateStore(source.value(), slot);
+            }
+            const auto indexes = require_value(instruction.operands[table_count]);
+            const auto destination = require_value(instruction.operands[table_count + 1U]);
+            if (!indexes || !destination)
+                return Result<void>::failure(!indexes ? indexes.error() : destination.error());
+            auto* indexes_storage = builder_.CreateAlloca(vector_type(), nullptr, "table.lookup.indexes");
+            auto* destination_storage = builder_.CreateAlloca(vector_type(), nullptr, "table.lookup.destination");
+            auto* output = builder_.CreateAlloca(vector_type(), nullptr, "table.lookup.result");
+            builder_.CreateStore(indexes.value(), indexes_storage);
+            builder_.CreateStore(destination.value(), destination_storage);
+            auto* table_pointer = builder_.CreateInBoundsGEP(
+                ArrayType::get(vector_type(), 4U), table_storage,
+                {builder_.getInt32(0), builder_.getInt32(0)}, "table.lookup.pointer");
+            builder_.CreateCall(runtime_vector_table_lookup(),
+                                {builder_.getInt8(static_cast<unsigned int>(instruction.arrangement)),
+                                 builder_.getInt8(table_count),
+                                 builder_.getInt8(instruction.table_lookup_preserve_destination ? 1U : 0U),
+                                 table_pointer, indexes_storage, destination_storage, output});
+            assign(instruction, builder_.CreateLoad(vector_type(), output, "table.lookup.value"));
             return Result<void>::success();
         }
         case ir::Opcode::VectorShuffle:
@@ -1324,6 +1395,10 @@ Result<runtime::ExecutionResult> LlvmBackend::execute(const ir::Function& functi
          llvm::orc::ExecutorSymbolDef(
              llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_fp_binary),
              llvm::JITSymbolFlags::Exported)},
+        {(*jit)->mangleAndIntern("switchrecomp_runtime_fp_fused"),
+         llvm::orc::ExecutorSymbolDef(
+             llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_fp_fused),
+             llvm::JITSymbolFlags::Exported)},
         {(*jit)->mangleAndIntern("switchrecomp_runtime_fp_unary"),
          llvm::orc::ExecutorSymbolDef(
              llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_fp_unary),
@@ -1363,6 +1438,10 @@ Result<runtime::ExecutionResult> LlvmBackend::execute(const ir::Function& functi
         {(*jit)->mangleAndIntern("switchrecomp_runtime_vector_shuffle"),
          llvm::orc::ExecutorSymbolDef(
              llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_vector_shuffle),
+             llvm::JITSymbolFlags::Exported)},
+        {(*jit)->mangleAndIntern("switchrecomp_runtime_vector_table_lookup"),
+         llvm::orc::ExecutorSymbolDef(
+             llvm::orc::ExecutorAddr::fromPtr(&runtime::switchrecomp_runtime_vector_table_lookup),
              llvm::JITSymbolFlags::Exported)},
     }));
     if (define)

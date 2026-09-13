@@ -437,6 +437,31 @@ Vector128 vector_compare(CpuState& cpu, std::uint8_t operation, std::uint8_t arr
     return vector_result_mask(bits, count, result);
 }
 
+Vector128 vector_table_lookup(std::uint8_t arrangement, std::uint8_t table_count,
+                               bool preserve_destination, const Vector128* tables,
+                               Vector128 indexes, Vector128 destination) noexcept
+{
+    if ((arrangement != 1U && arrangement != 2U) || table_count == 0U || table_count > 4U ||
+        tables == nullptr)
+        return {};
+    const auto output_lanes = arrangement == 1U ? 8U : 16U;
+    Vector128 result = preserve_destination ? destination : Vector128{};
+    const auto table_bytes = static_cast<std::uint16_t>(table_count) * 16U;
+    for (std::uint8_t lane = 0U; lane < output_lanes; ++lane)
+    {
+        const auto index = static_cast<std::uint8_t>(read_lane_bits(indexes, 8U, lane));
+        if (index < table_bytes)
+        {
+            const auto table = static_cast<std::uint8_t>(index / 16U);
+            const auto table_lane = static_cast<std::uint8_t>(index % 16U);
+            write_lane_bits(result, 8U, lane,
+                            read_lane_bits(tables[table], 8U, table_lane));
+        }
+    }
+    return preserve_destination ? result
+                                 : clear_unused_lanes(result, 8U, static_cast<std::uint8_t>(output_lanes));
+}
+
 Vector128 vector_shuffle(std::uint8_t operation, std::uint8_t arrangement, Vector128 left,
                          Vector128 right, std::uint8_t immediate) noexcept
 {
@@ -518,6 +543,75 @@ std::uint64_t fp_binary(CpuState& cpu, FpBinaryOperation operation, std::uint8_t
                         std::uint64_t left, std::uint64_t right) noexcept
 {
     return apply_fp_binary(cpu, operation, width, left, right);
+}
+
+std::uint64_t fp_fused(CpuState& cpu, FpFusedOperation operation, std::uint8_t width,
+                       std::uint64_t left, std::uint64_t right,
+                       std::uint64_t accumulator) noexcept
+{
+    left = flush_input(cpu, left, width);
+    right = flush_input(cpu, right, width);
+    accumulator = flush_input(cpu, accumulator, width);
+    if (is_nan_bits(left, width))
+    {
+        if (is_signaling_nan_bits(left, width)) set_status(cpu, fpsr_invalid_operation);
+        return canonical_or_quiet_nan(cpu, width, left);
+    }
+    if (is_nan_bits(right, width))
+    {
+        if (is_signaling_nan_bits(right, width)) set_status(cpu, fpsr_invalid_operation);
+        return canonical_or_quiet_nan(cpu, width, right);
+    }
+    if (is_nan_bits(accumulator, width))
+    {
+        if (is_signaling_nan_bits(accumulator, width)) set_status(cpu, fpsr_invalid_operation);
+        return canonical_or_quiet_nan(cpu, width, accumulator);
+    }
+
+    const auto left_inf = is_infinity_bits(left, width);
+    const auto right_inf = is_infinity_bits(right, width);
+    const auto left_zero = is_zero_bits(left, width);
+    const auto right_zero = is_zero_bits(right, width);
+    if ((left_inf && right_zero) || (right_inf && left_zero))
+    {
+        set_status(cpu, fpsr_invalid_operation);
+        return default_nan_bits(width);
+    }
+    const auto effective_left = operation == FpFusedOperation::MultiplySubtract
+                                     ? left ^ sign_mask(width)
+                                     : left;
+    const auto product_sign = (effective_left ^ right) & sign_mask(width);
+    if (is_infinity_bits(accumulator, width) && (left_inf || right_inf) &&
+        product_sign != (accumulator & sign_mask(width)))
+    {
+        set_status(cpu, fpsr_invalid_operation);
+        return default_nan_bits(width);
+    }
+
+    ScopedRounding rounding(rounding_mode_from_fpcr(cpu.fpcr));
+    if (width == 32U)
+    {
+        const volatile float a = as_float(effective_left);
+        const volatile float b = as_float(right);
+        const volatile float c = as_float(accumulator);
+        const volatile float result = std::fma(a, b, c);
+        const auto bits = from_float(result);
+        if (rounding.inexact()) set_status(cpu, fpsr_inexact);
+        if (is_infinity_bits(bits, width) && !left_inf && !right_inf &&
+            !is_infinity_bits(accumulator, width))
+            set_status(cpu, fpsr_overflow);
+        return flush_result(cpu, bits, width);
+    }
+    const volatile double a = as_double(effective_left);
+    const volatile double b = as_double(right);
+    const volatile double c = as_double(accumulator);
+    const volatile double result = std::fma(a, b, c);
+    const auto bits = from_double(result);
+    if (rounding.inexact()) set_status(cpu, fpsr_inexact);
+    if (is_infinity_bits(bits, width) && !left_inf && !right_inf &&
+        !is_infinity_bits(accumulator, width))
+        set_status(cpu, fpsr_overflow);
+    return flush_result(cpu, bits, width);
 }
 
 std::uint64_t fp_unary(CpuState& cpu, FpUnaryOperation operation, std::uint8_t width,
@@ -682,6 +776,15 @@ std::uint64_t switchrecomp_runtime_fp_binary(CpuState* cpu, std::uint8_t operati
     return cpu == nullptr ? 0U : fp_binary(*cpu, static_cast<FpBinaryOperation>(operation), width, left, right);
 }
 
+std::uint64_t switchrecomp_runtime_fp_fused(CpuState* cpu, std::uint8_t operation,
+                                            std::uint8_t width, std::uint64_t left,
+                                            std::uint64_t right,
+                                            std::uint64_t accumulator) noexcept
+{
+    return cpu == nullptr ? 0U : fp_fused(*cpu, static_cast<FpFusedOperation>(operation), width,
+                                           left, right, accumulator);
+}
+
 std::uint64_t switchrecomp_runtime_fp_unary(CpuState* cpu, std::uint8_t operation,
                                             std::uint8_t width, std::uint64_t value) noexcept
 {
@@ -754,6 +857,16 @@ void switchrecomp_runtime_vector_shuffle(std::uint8_t operation, std::uint8_t ar
 {
     if (left == nullptr || right == nullptr || result == nullptr) return;
     *result = vector_shuffle(operation, arrangement, *left, *right, immediate);
+}
+
+void switchrecomp_runtime_vector_table_lookup(std::uint8_t arrangement, std::uint8_t table_count,
+                                              std::uint8_t preserve_destination,
+                                              const Vector128* tables, const Vector128* indexes,
+                                              const Vector128* destination, Vector128* result) noexcept
+{
+    if (indexes == nullptr || destination == nullptr || result == nullptr) return;
+    *result = vector_table_lookup(arrangement, table_count, preserve_destination != 0U, tables,
+                                  *indexes, *destination);
 }
 }
 

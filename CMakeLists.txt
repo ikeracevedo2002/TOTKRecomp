@@ -472,6 +472,8 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/milestone39_coverage_convergence_tests.cpp
         tests/milestone40_semantic_convergence_tests.cpp
         tests/milestone41_structure_load_tests.cpp
+        tests/milestone42_structure_store_tests.cpp
+        tests/milestone43_advsimd_coverage_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE

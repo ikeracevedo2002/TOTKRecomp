@@ -295,6 +295,10 @@ to inspect a ZBIC-marked header without claiming materialization succeeded.
   transactional provider-base relocation readback, runtime-fallback precedence,
   and focused real-set reporting. The next blocker is provider instruction
   coverage and, if observed, faithful rtld/process bootstrap.
+- Milestone 43 — high-impact AdvSIMD coverage collapse: implemented for the
+  measured widening multiply, fused multiply-add, zero-compare, table-lookup,
+  and scalar UMULL/SMULL families; prepared-main unsupported coverage is 11,657
+  under the documented local bound. See `docs/MILESTONE_43.md`.
 
 Materialization consumes a legally obtained, already prepared local NSO. The
 repository does not decrypt, extract, or distribute Nintendo content.

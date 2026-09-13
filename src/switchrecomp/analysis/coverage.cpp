@@ -105,6 +105,7 @@ namespace
     case aarch64::InstructionId::Umulh: case aarch64::InstructionId::Smulh:
     case aarch64::InstructionId::Umaddl: case aarch64::InstructionId::Umsubl:
     case aarch64::InstructionId::Smaddl: case aarch64::InstructionId::Smsubl:
+    case aarch64::InstructionId::Umull: case aarch64::InstructionId::Smull:
     case aarch64::InstructionId::Crc32: case aarch64::InstructionId::Prfm:
     case aarch64::InstructionId::Rev: case aarch64::InstructionId::Rev16:
     case aarch64::InstructionId::Udiv: case aarch64::InstructionId::Sdiv:
@@ -146,59 +147,7 @@ namespace
                operand.reg.kind == aarch64::RegisterKind::Vector && operand.reg.index < 32U;
     };
     const auto structure_liftable = [&]() {
-        using Op = aarch64::SimdOperation;
-        const auto op = instruction.simd_operation;
-        const auto fixed_count = op == Op::Ld1r || op == Op::Ld2r || op == Op::Ld3r || op == Op::Ld4r
-                                     ? op == Op::Ld1r ? 1U : op == Op::Ld2r ? 2U : op == Op::Ld3r ? 3U : 4U
-                                     : op == Op::Ld2 ? 2U : op == Op::Ld3 ? 3U : op == Op::Ld4 ? 4U : 0U;
-        const auto memory = std::find_if(
-            instruction.operands.begin(), instruction.operands.end(),
-            [](const aarch64::Operand& operand) { return operand.kind == aarch64::OperandKind::Memory; });
-        if (memory == instruction.operands.end()) return false;
-        const auto destination_count = static_cast<std::size_t>(
-            memory - instruction.operands.begin());
-        if ((op != Op::Ld1 && destination_count != fixed_count) ||
-            (op == Op::Ld1 && (destination_count < 1U || destination_count > 4U)) ||
-            (instruction.operands.size() != destination_count + 1U &&
-             instruction.operands.size() != destination_count + 2U))
-            return false;
-        const bool register_post_index = instruction.operands.size() == destination_count + 2U;
-        if (register_post_index &&
-            (memory->memory.addressing != aarch64::MemoryAddressingMode::PostIndex ||
-             instruction.operands.back().kind != aarch64::OperandKind::Register ||
-             instruction.operands.back().reg.kind != aarch64::RegisterKind::General ||
-             instruction.operands.back().reg.width != aarch64::RegisterWidth::X64))
-            return false;
-        if (memory->memory.base.kind != aarch64::RegisterKind::General ||
-            memory->memory.base.width != aarch64::RegisterWidth::X64 ||
-            (memory->memory.addressing != aarch64::MemoryAddressingMode::Base &&
-             memory->memory.addressing != aarch64::MemoryAddressingMode::PreIndex &&
-             memory->memory.addressing != aarch64::MemoryAddressingMode::PostIndex))
-            return false;
-        if (!vector_register(instruction.operands[0]) ||
-            instruction.operands[0].arrangement == aarch64::VectorArrangement::Invalid)
-            return false;
-        const auto arrangement = instruction.operands[0].arrangement;
-        const auto lanes = aarch64::vector_lane_count(arrangement);
-        const auto bits = aarch64::vector_element_bits(arrangement);
-        if (lanes == 0U || bits == 0U || bits % 8U != 0U)
-            return false;
-        const bool lane_load = op == Op::Ld1 && instruction.operands[0].vector_index >= 0;
-        if (lane_load && (destination_count != 1U ||
-                          static_cast<std::uint8_t>(instruction.operands[0].vector_index) >= lanes))
-            return false;
-        if ((op == Op::Ld2 || op == Op::Ld3 || op == Op::Ld4) &&
-            arrangement == aarch64::VectorArrangement::D1)
-            return false;
-        for (std::size_t destination = 0U; destination < destination_count; ++destination)
-        {
-            if (!vector_register(instruction.operands[destination]) ||
-                instruction.operands[destination].arrangement != arrangement ||
-                instruction.operands[destination].reg.index !=
-                    static_cast<std::uint8_t>((instruction.operands[0].reg.index + destination) % 32U))
-                return false;
-        }
-        return true;
+        return aarch64::is_structure_memory_form_liftable(instruction);
     };
     switch (instruction.simd_operation)
     {
@@ -208,6 +157,47 @@ namespace
     case aarch64::SimdOperation::Fnmadd:
     case aarch64::SimdOperation::Fnmsub:
         return false;
+    case aarch64::SimdOperation::Tbl:
+    case aarch64::SimdOperation::Tbx:
+        return aarch64::is_table_lookup_form_liftable(instruction);
+    case aarch64::SimdOperation::Umull:
+    case aarch64::SimdOperation::Umull2:
+    case aarch64::SimdOperation::Smull:
+    case aarch64::SimdOperation::Smull2:
+    case aarch64::SimdOperation::Umlal:
+    case aarch64::SimdOperation::Umlal2:
+    case aarch64::SimdOperation::Smlal:
+    case aarch64::SimdOperation::Smlal2:
+    case aarch64::SimdOperation::Umlsl:
+    case aarch64::SimdOperation::Umlsl2:
+    case aarch64::SimdOperation::Smlsl:
+    case aarch64::SimdOperation::Smlsl2:
+        return aarch64::is_simd_widening_multiply_form_liftable(instruction);
+    case aarch64::SimdOperation::Fcmlt:
+    case aarch64::SimdOperation::Fcmle:
+        return instruction.operands.size() == 3U && vector_register(instruction.operands[0]) &&
+               vector_register(instruction.operands[1]) &&
+               instruction.operands[1].arrangement == instruction.operands[0].arrangement &&
+               (instruction.operands[0].arrangement == aarch64::VectorArrangement::S2 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::S4 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::D1 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::D2) &&
+               instruction.operands[2].kind == aarch64::OperandKind::FloatingImmediate &&
+               instruction.operands[2].floating_immediate == 0.0;
+    case aarch64::SimdOperation::Fmla:
+    case aarch64::SimdOperation::Fmls:
+        return instruction.operands.size() == 3U && vector_register(instruction.operands[0]) &&
+               vector_register(instruction.operands[1]) && vector_register(instruction.operands[2]) &&
+               instruction.operands[1].arrangement == instruction.operands[0].arrangement &&
+               (instruction.operands[0].arrangement == aarch64::VectorArrangement::S2 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::S4 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::D1 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::D2) &&
+               (instruction.operands[2].vector_index < 0
+                    ? instruction.operands[2].arrangement == instruction.operands[0].arrangement
+                    : instruction.operands[2].arrangement == aarch64::VectorArrangement::Invalid &&
+                          static_cast<std::uint8_t>(instruction.operands[2].vector_index) <
+                              aarch64::vector_lane_count(instruction.operands[0].arrangement));
     case aarch64::SimdOperation::Movi:
     case aarch64::SimdOperation::Mvni:
         return instruction.operands.size() == 2U && vector_register(instruction.operands[0]) &&
@@ -233,6 +223,10 @@ namespace
                vector_register(instruction.operands[1]) && vector_register(instruction.operands[2]) &&
                (instruction.operands[0].arrangement == aarch64::VectorArrangement::B8 ||
                 instruction.operands[0].arrangement == aarch64::VectorArrangement::B16);
+    case aarch64::SimdOperation::St1:
+    case aarch64::SimdOperation::St2:
+    case aarch64::SimdOperation::St3:
+    case aarch64::SimdOperation::St4:
     case aarch64::SimdOperation::Ld1:
     case aarch64::SimdOperation::Ld1r:
     case aarch64::SimdOperation::Ld2:
@@ -242,13 +236,6 @@ namespace
     case aarch64::SimdOperation::Ld4:
     case aarch64::SimdOperation::Ld4r:
         return structure_liftable();
-    case aarch64::SimdOperation::St1:
-        return instruction.operands.size() == 2U &&
-               instruction.operands[0].kind == aarch64::OperandKind::Register &&
-               instruction.operands[0].reg.kind == aarch64::RegisterKind::Vector &&
-               instruction.operands[0].arrangement != aarch64::VectorArrangement::Invalid &&
-               instruction.operands[0].vector_index >= 0 &&
-               instruction.operands[1].kind == aarch64::OperandKind::Memory;
     default:
         return true;
     }

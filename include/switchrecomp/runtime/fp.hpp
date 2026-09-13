@@ -41,6 +41,12 @@ enum class FpBinaryOperation : std::uint8_t
     Max,
 };
 
+enum class FpFusedOperation : std::uint8_t
+{
+    MultiplyAdd,
+    MultiplySubtract,
+};
+
 enum class FpUnaryOperation : std::uint8_t
 {
     Neg,
@@ -89,6 +95,9 @@ void write_lane_bits(Vector128& value, std::uint8_t element_bits, std::uint8_t l
 [[nodiscard]] Vector128 vector_shuffle(std::uint8_t operation, std::uint8_t arrangement,
                                        Vector128 left, Vector128 right,
                                        std::uint8_t immediate) noexcept;
+[[nodiscard]] Vector128 vector_table_lookup(std::uint8_t arrangement, std::uint8_t table_count,
+                                            bool preserve_destination, const Vector128* tables,
+                                            Vector128 indexes, Vector128 destination) noexcept;
 
 [[nodiscard]] bool is_nan_bits(std::uint64_t bits, std::uint8_t width) noexcept;
 [[nodiscard]] bool is_signaling_nan_bits(std::uint64_t bits, std::uint8_t width) noexcept;
@@ -103,6 +112,9 @@ void write_lane_bits(Vector128& value, std::uint8_t element_bits, std::uint8_t l
 [[nodiscard]] std::uint64_t fp_binary(CpuState& cpu, FpBinaryOperation operation,
                                       std::uint8_t width, std::uint64_t left,
                                       std::uint64_t right) noexcept;
+[[nodiscard]] std::uint64_t fp_fused(CpuState& cpu, FpFusedOperation operation,
+                                     std::uint8_t width, std::uint64_t left,
+                                     std::uint64_t right, std::uint64_t accumulator) noexcept;
 [[nodiscard]] std::uint64_t fp_unary(CpuState& cpu, FpUnaryOperation operation,
                                      std::uint8_t width, std::uint64_t value) noexcept;
 [[nodiscard]] std::uint32_t fp_compare(CpuState& cpu, std::uint8_t width,
@@ -122,6 +134,10 @@ extern "C"
 std::uint64_t switchrecomp_runtime_fp_binary(CpuState*, std::uint8_t operation,
                                              std::uint8_t width, std::uint64_t left,
                                              std::uint64_t right) noexcept;
+std::uint64_t switchrecomp_runtime_fp_fused(CpuState*, std::uint8_t operation,
+                                            std::uint8_t width, std::uint64_t left,
+                                            std::uint64_t right,
+                                            std::uint64_t accumulator) noexcept;
 std::uint64_t switchrecomp_runtime_fp_unary(CpuState*, std::uint8_t operation,
                                             std::uint8_t width, std::uint64_t value) noexcept;
 std::uint32_t switchrecomp_runtime_fp_compare(CpuState*, std::uint8_t width,
@@ -149,6 +165,10 @@ void switchrecomp_runtime_vector_compare(CpuState*, std::uint8_t operation,
 void switchrecomp_runtime_vector_shuffle(std::uint8_t operation, std::uint8_t arrangement,
                                          const Vector128*, const Vector128*, std::uint8_t immediate,
                                          Vector128*) noexcept;
+void switchrecomp_runtime_vector_table_lookup(std::uint8_t arrangement, std::uint8_t table_count,
+                                              std::uint8_t preserve_destination,
+                                              const Vector128* tables, const Vector128* indexes,
+                                              const Vector128* destination, Vector128* result) noexcept;
 }
 
 } // namespace switchrecomp::runtime

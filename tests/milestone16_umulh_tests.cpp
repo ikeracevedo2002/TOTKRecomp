@@ -341,7 +341,7 @@ TEST_CASE("M16 UMULH lifts to project IR, preserves NZCV, aliases operands, and 
     REQUIRE(same_cpu.x[0] == 1U);
 }
 
-TEST_CASE("M17 diagnostic lifting executes UMULH before a typed unsupported boundary")
+TEST_CASE("M43 diagnostic lifting executes UMULH and vector FMLA")
 {
     constexpr memory::GuestAddress address = 0x200000U;
     const auto bytes = words({0x9bc97d49U, 0x4e22cc20U, 0xd65f03c0U});
@@ -373,10 +373,8 @@ TEST_CASE("M17 diagnostic lifting executes UMULH before a typed unsupported boun
     REQUIRE(result);
     REQUIRE(result.value().observed_guest_pcs == std::vector<std::uint64_t>{address});
     REQUIRE(cpu.x[9] == 1U);
-    REQUIRE(result.value().boundary.kind == runtime::ExecutionBoundaryKind::UnsupportedInstruction);
-    REQUIRE(result.value().boundary.source_guest_pc == address + 4U);
-    REQUIRE(result.value().boundary.target_provenance.find("fmla") != std::string::npos);
-    REQUIRE(result.value().boundary.target_provenance.find("0x4e22cc20") == std::string::npos);
+    REQUIRE(result.value().boundary.kind == runtime::ExecutionBoundaryKind::Return);
+    REQUIRE(result.value().boundary.source_guest_pc == address + 8U);
 }
 
 TEST_CASE("M16 UMULH honors architecturally valid XZR source and destination aliases")

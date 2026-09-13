@@ -44,6 +44,8 @@ struct Instruction
     BarrierKind barrier_kind = BarrierKind::Dmb;
     BarrierOption barrier_option = BarrierOption::Sy;
     SystemRegister system_register = SystemRegister::TpidrEl0;
+    FpFusedOperation fp_fused = FpFusedOperation::MultiplyAdd;
+    bool table_lookup_preserve_destination = false;
 };
 
 enum class TerminatorKind : std::uint8_t

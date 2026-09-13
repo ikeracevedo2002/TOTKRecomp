@@ -34,10 +34,14 @@ backend; the optional LLVM backend lowers the same IR primitives.
 | AdvSIMD immediate moves | yes | yes | yes | FMOV vector immediate `.2S`/`.4S`/`.2D`; MOVI expanded architectural immediates with exact lane broadcasts |
 | NEON DUP/INS/UMOV/SMOV/EXT and ZIP/UZP/TRN | yes | yes | yes | normalized arrangements and lane indices |
 | NEON logical/integer/FP vector arithmetic and comparisons | yes | yes | yes | B/H/S/D arrangements; FP vector operations use the reference runtime |
-| AdvSIMD ST1 single-lane store | yes | yes | yes | B/H/S/D lane extraction through checked little-endian guest memory; multiple-register forms remain explicit unsupported |
+| AdvSIMD structure stores | yes | yes | yes | ST1/ST2/ST3/ST4 full-vector and lane forms with B/H/S/D arrangements, checked little-endian memory, wrapped lists, and writeback |
 | AdvSIMD structure loads | yes | yes | yes | LD1/LD1R/LD2/LD2R/LD3/LD3R/LD4/LD4R, lane preservation, interleaving/replication, wrapped consecutive lists, and checked post-index writeback |
+| AdvSIMD widening multiply | yes | yes | yes | UMULL/SMULL, UMULL2/SMULL2, UMLAL/UMLSL and signed variants; lower/upper source halves and modulo-width accumulation |
+| AdvSIMD fused multiply-add | yes | yes | yes | FMLA/FMLS vector and by-element forms through fused reference-runtime FP operations |
+| AdvSIMD table lookup | yes | yes | yes | TBL/TBX one-to-four consecutive 16-byte tables, B8/B16 indexes, bounds checking, and TBX destination preservation |
+| AdvSIMD FP zero compares | yes | yes | yes | FCMLT/FCMLE zero-immediate forms with IEEE comparison and FP status behavior |
 | S/D/Q LDR/STR and LDP/STP | yes | yes | yes | checked guest memory; Q uses 16-byte vector helpers |
-| FP/SIMD fused multiply-add | yes | no | no | explicit unsupported behavior |
+| FP/SIMD reciprocal and rounding estimates | yes | no | no | explicit unsupported behavior; reciprocal estimate families remain deferred |
 | LDXR/STXR (B/H/W/X) | yes | yes | yes | per-thread monitor; deterministic 64-byte reservation granules |
 | LDAXR/STLXR (B/H/W/X) | yes | yes | yes | acquire load and release store semantics |
 | LDAR/STLR (B/H/W/X) | yes | yes | yes | acquire/release ordinary atomic accesses |
@@ -90,9 +94,42 @@ overflow use project-owned `AddWithCarry` IR operations; CRC uses the
 reusable `Crc32` IR operation. The interpreter and LLVM lowering implement the
 same result, while NZCV, FP state, and unrelated registers remain unchanged.
 PRFM/PRFUM are explicit no-ops because no guest cache-state model exists.
-M41 adds the measured AdvSIMD structure-load subset described below; vector
-structure stores, vector table lookup, and fused FP multiply-add remain
-unsupported until their complete architectural families are implemented.
+M41 adds the measured AdvSIMD structure-load subset and M42 adds the matching
+structure-store subset. M43 adds
+scalar UMULL/SMULL aliases and the high-impact AdvSIMD widening multiply,
+FMLA/FMLS, FCMLT/FCMLE, and TBL/TBX families described in its milestone note.
+
+## M43 AdvSIMD coverage collapse
+
+M43 normalizes the high-impact AdvSIMD families that dominated the remaining
+measured frontier. Widening multiplies use explicit lane extraction, signed or
+unsigned extension, modulo-width multiply, and optional add/subtract
+accumulation. FMLA/FMLS uses a dedicated fused FP IR operation backed by the
+reference runtime's IEEE bit-pattern and FPSR handling; by-element forms select
+the encoded source lane. FCMLT/FCMLE lower zero-immediate comparisons through
+the existing FP vector comparison path. TBL/TBX use a table-lookup IR operation
+with one-to-four consecutive 16-byte tables; out-of-range indexes produce zero
+for TBL and preserve the destination for TBX.
+
+The decoder, detailed coverage predicate, lifter, verifier, interpreter, and
+optional LLVM backend agree on these normalized forms. Malformed register
+lists, incompatible arrangements, and unsupported estimates remain explicit
+boundaries. Scalar UMULL/SMULL aliases are normalized separately from their
+AdvSIMD operation names and require an X destination with W sources.
+
+The M42 baseline measured 21,608 unsupported instructions in the prepared main
+image. With the same 12,000,000-instruction bound, M43 measures:
+
+```text
+                         decoded    liftable   unsupported   decode failures
+main                     11180285   11168628        11657              391
+```
+
+This is 9,951 fewer unsupported instructions, reducing the unsupported count by
+46.05% and meeting the stretch target of at most 12,000. The serial and bounded
+four-worker JSON coverage reports are byte-identical. The remaining frontier is
+primarily deferred FP/SIMD estimates and unknown/SVE instructions; no provider,
+register, or runtime success is fabricated to improve the count.
 
 ## M41 AdvSIMD structure loads
 

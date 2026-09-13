@@ -19,8 +19,10 @@ enum class SimdOperation : std::uint8_t
     Fccmp, Fccmpe,
     Fcsel, Scvtf, Ucvtf, Fcvtzs, Fcvtzu, Fcvt, Frintn, Frintp, Frintm, Frintz,
     Fmadd, Fmsub, Fnmadd, Fnmsub, Dup, Ins, Umov, Smov, Ext, Zip1, Zip2, Uzp1, Uzp2,
-    Trn1, Trn2, Fcmeq, Fcmgt, Fcmge, Cmeq, Cmgt, Cmge, Cmhi, Cmhs,
-    Bif, Bit, Bsl, St1, Ld1, Ld1r, Ld2, Ld2r, Ld3, Ld3r, Ld4, Ld4r,
+    Trn1, Trn2, Fcmeq, Fcmgt, Fcmge, Fcmlt, Fcmle, Cmeq, Cmgt, Cmge, Cmhi, Cmhs,
+    Fmla, Fmls, Umull, Umull2, Smull, Smull2, Umlal, Umlal2, Smlal, Smlal2,
+    Umlsl, Umlsl2, Smlsl, Smlsl2, Tbl, Tbx,
+    Bif, Bit, Bsl, St1, St2, St3, St4, Ld1, Ld1r, Ld2, Ld2r, Ld3, Ld3r, Ld4, Ld4r,
 };
 
 enum class AtomicMemoryOrder : std::uint8_t { Relaxed, Acquire, Release };
@@ -40,7 +42,7 @@ enum class InstructionId : std::uint16_t
     Mov, Mvn, Cmp, Cmn, Ccmp, Ccmn, Tst, Neg, Negs,
     Csel, Csinc, Csinv, Csneg, Cset, Csetm, Cinc, Cinv, Cneg,
     Movz, Movk, Movn, Lsl, Lsr, Asr, Ror, Ubfm, Sbfm, Bfm, Extr,
-    Mul, Madd, Msub, Mneg, Umulh, Smulh, Umaddl, Umsubl, Smaddl, Smsubl,
+    Mul, Madd, Msub, Mneg, Umulh, Smulh, Umaddl, Umsubl, Smaddl, Smsubl, Umull, Smull,
     Udiv, Sdiv, Crc32, Prfm, Rev, Rev16, Adr, Adrp,
     Ldr, Ldrb, Ldrh, Ldrsb, Ldrsh, Ldrsw, Str, Strb, Strh,
     Ldp, Stp, Ldur, Stur, LdrLiteral,
@@ -106,6 +108,10 @@ struct DecodedInstruction
 [[nodiscard]] std::string_view instruction_id_name(InstructionId id) noexcept;
 [[nodiscard]] std::string_view control_flow_kind_name(ControlFlowKind kind) noexcept;
 [[nodiscard]] std::string_view simd_operation_name(SimdOperation operation) noexcept;
+[[nodiscard]] bool is_structure_memory_form_liftable(const DecodedInstruction& instruction) noexcept;
+[[nodiscard]] bool is_scalar_widening_multiply_form_liftable(const DecodedInstruction& instruction) noexcept;
+[[nodiscard]] bool is_simd_widening_multiply_form_liftable(const DecodedInstruction& instruction) noexcept;
+[[nodiscard]] bool is_table_lookup_form_liftable(const DecodedInstruction& instruction) noexcept;
 [[nodiscard]] std::string_view barrier_option_name(BarrierOption option) noexcept;
 [[nodiscard]] std::string_view system_register_name(SystemRegister reg) noexcept;
 

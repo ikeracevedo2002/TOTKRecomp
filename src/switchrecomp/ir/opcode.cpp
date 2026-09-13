@@ -65,6 +65,7 @@ std::string_view opcode_name(Opcode opcode) noexcept
     case Opcode::ReadFpStatus: return "read_fpsr";
     case Opcode::WriteFpStatus: return "write_fpsr";
     case Opcode::FpBinary: return "fp_binary";
+    case Opcode::FpFused: return "fp_fused";
     case Opcode::FpUnary: return "fp_unary";
     case Opcode::FpCompare: return "fp_compare";
     case Opcode::FpConvert: return "fp_convert";
@@ -75,6 +76,7 @@ std::string_view opcode_name(Opcode opcode) noexcept
     case Opcode::VectorBinary: return "vector_binary";
     case Opcode::VectorCompare: return "vector_compare";
     case Opcode::VectorShuffle: return "vector_shuffle";
+    case Opcode::VectorTableLookup: return "vector_table_lookup";
     case Opcode::GuestLoadVector: return "guest_load_vector";
     case Opcode::GuestStoreVector: return "guest_store_vector";
     case Opcode::Crc32: return "crc32";

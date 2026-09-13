@@ -453,6 +453,20 @@ namespace
     {
         return InstructionId::Movn;
     }
+    // Capstone uses the architectural UMULL/SMULL aliases for the scalar
+    // long multiply encodings as well as the AdvSIMD instructions. Keep the
+    // scalar aliases in the ordinary instruction domain; vector encodings
+    // continue through the project-owned FP/SIMD operation table below.
+    if (instruction.id == ARM64_INS_UMULL &&
+        (opcode & 0xffe0fc00U) == 0x9ba07c00U)
+    {
+        return InstructionId::Umull;
+    }
+    if (instruction.id == ARM64_INS_SMULL &&
+        (opcode & 0xffe0fc00U) == 0x9b207c00U)
+    {
+        return InstructionId::Smull;
+    }
     if ((opcode & 0x3b000000U) == 0x18000000U)
     {
         const auto literal_kind = (opcode >> 30U) & 0x3U;
@@ -612,6 +626,8 @@ namespace
         return InstructionId::Smaddl;
     case ARM64_INS_SMSUBL:
         return InstructionId::Smsubl;
+    case ARM64_INS_FMOV:
+        return InstructionId::FpSimd;
     case ARM64_INS_CRC32B:
     case ARM64_INS_CRC32H:
     case ARM64_INS_CRC32W:
@@ -842,6 +858,8 @@ namespace
     case ARM64_INS_FRINTZ: return SimdOperation::Frintz;
     case ARM64_INS_FMADD: return SimdOperation::Fmadd;
     case ARM64_INS_FMSUB: return SimdOperation::Fmsub;
+    case ARM64_INS_FMLA: return SimdOperation::Fmla;
+    case ARM64_INS_FMLS: return SimdOperation::Fmls;
     case ARM64_INS_FNMADD: return SimdOperation::Fnmadd;
     case ARM64_INS_FNMSUB: return SimdOperation::Fnmsub;
     case ARM64_INS_DUP: return SimdOperation::Dup;
@@ -858,15 +876,34 @@ namespace
     case ARM64_INS_FCMEQ: return SimdOperation::Fcmeq;
     case ARM64_INS_FCMGT: return SimdOperation::Fcmgt;
     case ARM64_INS_FCMGE: return SimdOperation::Fcmge;
+    case ARM64_INS_FCMLT: return SimdOperation::Fcmlt;
+    case ARM64_INS_FCMLE: return SimdOperation::Fcmle;
     case ARM64_INS_CMEQ: return SimdOperation::Cmeq;
     case ARM64_INS_CMGT: return SimdOperation::Cmgt;
     case ARM64_INS_CMGE: return SimdOperation::Cmge;
     case ARM64_INS_CMHI: return SimdOperation::Cmhi;
     case ARM64_INS_CMHS: return SimdOperation::Cmhs;
+    case ARM64_INS_UMULL: return SimdOperation::Umull;
+    case ARM64_INS_UMULL2: return SimdOperation::Umull2;
+    case ARM64_INS_SMULL: return SimdOperation::Smull;
+    case ARM64_INS_SMULL2: return SimdOperation::Smull2;
+    case ARM64_INS_UMLAL: return SimdOperation::Umlal;
+    case ARM64_INS_UMLAL2: return SimdOperation::Umlal2;
+    case ARM64_INS_SMLAL: return SimdOperation::Smlal;
+    case ARM64_INS_SMLAL2: return SimdOperation::Smlal2;
+    case ARM64_INS_UMLSL: return SimdOperation::Umlsl;
+    case ARM64_INS_UMLSL2: return SimdOperation::Umlsl2;
+    case ARM64_INS_SMLSL: return SimdOperation::Smlsl;
+    case ARM64_INS_SMLSL2: return SimdOperation::Smlsl2;
+    case ARM64_INS_TBL: return SimdOperation::Tbl;
+    case ARM64_INS_TBX: return SimdOperation::Tbx;
     case ARM64_INS_BIF: return SimdOperation::Bif;
     case ARM64_INS_BIT: return SimdOperation::Bit;
     case ARM64_INS_BSL: return SimdOperation::Bsl;
     case ARM64_INS_ST1: return SimdOperation::St1;
+    case ARM64_INS_ST2: return SimdOperation::St2;
+    case ARM64_INS_ST3: return SimdOperation::St3;
+    case ARM64_INS_ST4: return SimdOperation::St4;
     case ARM64_INS_LD1: return SimdOperation::Ld1;
     case ARM64_INS_LD1R: return SimdOperation::Ld1r;
     case ARM64_INS_LD2: return SimdOperation::Ld2;
@@ -1181,6 +1218,22 @@ Result<DecodedInstruction> AArch64Decoder::decode(GuestAddress address,
     {
         result.operands.push_back(normalize_operand(detail.operands[index], detail, result.id, opcode));
     }
+    if (result.simd_operation == SimdOperation::Fmov && result.operands.size() >= 2U &&
+        result.operands[1].kind == OperandKind::Register &&
+        result.operands[1].reg.kind == RegisterKind::Vector &&
+        result.operands[1].vector_index >= 0 &&
+        result.operands[1].arrangement == VectorArrangement::Invalid)
+    {
+        // FMOV Sd/Dd, Vn.S[i]/Vn.D[i] is printed as MOV by Capstone. The
+        // scalar element VAS does not carry the complete source arrangement.
+        result.operands[1].arrangement = result.operands[1].reg.width == RegisterWidth::S32
+                                             ? VectorArrangement::S4
+                                             : result.operands[1].reg.width == RegisterWidth::D64
+                                                   ? VectorArrangement::D2
+                                                   : VectorArrangement::Invalid;
+        if (result.operands[1].arrangement == VectorArrangement::Invalid)
+            result.normalized = false;
+    }
     if ((result.simd_operation == SimdOperation::St1 ||
          result.simd_operation == SimdOperation::Ld1) &&
         result.operands.size() >= 2U &&
@@ -1241,6 +1294,10 @@ Result<DecodedInstruction> AArch64Decoder::decode(GuestAddress address,
     }
     if (result.simd_operation == SimdOperation::Ld1 ||
         result.simd_operation == SimdOperation::Ld1r ||
+        result.simd_operation == SimdOperation::St1 ||
+        result.simd_operation == SimdOperation::St2 ||
+        result.simd_operation == SimdOperation::St3 ||
+        result.simd_operation == SimdOperation::St4 ||
         result.simd_operation == SimdOperation::Ld2 ||
         result.simd_operation == SimdOperation::Ld2r ||
         result.simd_operation == SimdOperation::Ld3 ||
@@ -1265,8 +1322,9 @@ Result<DecodedInstruction> AArch64Decoder::decode(GuestAddress address,
             const auto arrangement = result.operands[0].arrangement;
             const auto element_bits = vector_element_bits(arrangement);
             const auto lanes = vector_lane_count(arrangement);
-            const bool lane_load = result.simd_operation == SimdOperation::Ld1 &&
-                                   result.operands[0].vector_index >= 0;
+            const bool lane_access = (result.simd_operation == SimdOperation::St1 ||
+                                      result.simd_operation == SimdOperation::Ld1) &&
+                                     result.operands[0].vector_index >= 0;
             const bool replicate = result.simd_operation == SimdOperation::Ld1r ||
                                    result.simd_operation == SimdOperation::Ld2r ||
                                    result.simd_operation == SimdOperation::Ld3r ||
@@ -1274,7 +1332,7 @@ Result<DecodedInstruction> AArch64Decoder::decode(GuestAddress address,
             if (element_bits != 0U && lanes != 0U && result.operands[0].reg.kind == RegisterKind::Vector)
             {
                 const auto element_bytes = static_cast<std::int64_t>(element_bits / 8U);
-                const auto bytes_per_destination = lane_load
+                const auto bytes_per_destination = lane_access
                                                        ? element_bytes
                                                        : replicate
                                                              ? element_bytes

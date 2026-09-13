@@ -414,14 +414,14 @@ TEST_CASE("M35 ST1 lane normalization is generic across B/H/S/D arrangements")
     }
 }
 
-TEST_CASE("M35 ST1 multi-register form is not claimed as a single-lane operation")
+TEST_CASE("M42 ST1 full-vector form is lifted separately from lane stores")
 {
     const auto decoder = aarch64::AArch64Decoder::create();
     REQUIRE(decoder);
     const auto decoded = decoder.value()->decode(code_address, 0x4c007984U); // st1 {v4.4s}, [x12]
     REQUIRE(decoded);
     REQUIRE(decoded.value().simd_operation == aarch64::SimdOperation::St1);
-    REQUIRE_FALSE(lifter::is_instruction_liftable(decoded.value()));
+    REQUIRE(lifter::is_instruction_liftable(decoded.value()));
 }
 
 #ifdef TOTKRECOMP_HAS_LLVM

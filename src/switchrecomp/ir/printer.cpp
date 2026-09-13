@@ -111,7 +111,8 @@ std::string print(const Function& function)
                      instruction.opcode == Opcode::VectorBroadcast ||
                      instruction.opcode == Opcode::VectorBinary ||
                      instruction.opcode == Opcode::VectorCompare ||
-                     instruction.opcode == Opcode::VectorShuffle)
+                     instruction.opcode == Opcode::VectorShuffle ||
+                     instruction.opcode == Opcode::VectorTableLookup)
             {
                 output << " arrangement=" << vector_arrangement_name(instruction.arrangement);
                 if (instruction.opcode == Opcode::VectorExtractLane ||
@@ -123,11 +124,14 @@ std::string print(const Function& function)
                     print_operands(output, instruction);
                 }
             }
-            else if (instruction.opcode == Opcode::FpBinary || instruction.opcode == Opcode::FpUnary ||
+            else if (instruction.opcode == Opcode::FpBinary || instruction.opcode == Opcode::FpFused ||
+                     instruction.opcode == Opcode::FpUnary ||
                      instruction.opcode == Opcode::FpCompare || instruction.opcode == Opcode::FpConvert ||
                      instruction.opcode == Opcode::FpRound)
             {
                 output << " rm=" << static_cast<unsigned int>(instruction.rounding_mode);
+                if (instruction.opcode == Opcode::FpFused)
+                    output << " fused=" << static_cast<unsigned int>(instruction.fp_fused);
                 if (!instruction.operands.empty())
                 {
                     output << " ";
