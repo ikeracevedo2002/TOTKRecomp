@@ -428,6 +428,25 @@ Result<void> verify(const Function& function)
                 }
                 break;
             }
+            case Opcode::DivideUnsigned:
+            case Opcode::DivideSigned:
+            {
+                const auto pair = require_same_integer_pair();
+                if (!pair)
+                {
+                    checked = invalid(pair.error().message);
+                }
+                else if (pair.value().bit_width() != 32U && pair.value().bit_width() != 64U)
+                {
+                    checked = invalid(std::string(opcode_name(instruction.opcode)) +
+                                      " requires i32 or i64 operands");
+                }
+                else
+                {
+                    checked = require_result(pair.value());
+                }
+                break;
+            }
             case Opcode::CompareEqual:
             case Opcode::CompareNotEqual:
             case Opcode::CompareUnsigned:

@@ -48,8 +48,25 @@ namespace
     return left.opcode < right.opcode;
 }
 
-[[nodiscard]] bool common_liftable(aarch64::InstructionId id) noexcept
+// The analysis library must not depend on the lifter (the lifter links analysis),
+// so the liftability classification is mirrored here. Keep this table and the
+// FP/SIMD table below in sync with lifter::is_instruction_liftable in
+// src/switchrecomp/lifter/lifter.cpp.
+[[nodiscard]] bool common_liftable(const aarch64::DecodedInstruction& instruction) noexcept
 {
+    const auto id = instruction.id;
+    if (id == aarch64::InstructionId::Mrs || id == aarch64::InstructionId::Msr)
+    {
+        return instruction.system_register == aarch64::SystemRegister::TpidrEl0 ||
+               (id == aarch64::InstructionId::Mrs &&
+                instruction.system_register == aarch64::SystemRegister::TpidrroEl0);
+    }
+    if ((id == aarch64::InstructionId::Dmb || id == aarch64::InstructionId::Dsb ||
+         id == aarch64::InstructionId::Isb) &&
+        instruction.barrier_option == aarch64::BarrierOption::Invalid)
+    {
+        return false;
+    }
     switch (id)
     {
     case aarch64::InstructionId::Nop:
@@ -61,6 +78,7 @@ namespace
     case aarch64::InstructionId::Bic: case aarch64::InstructionId::Bics:
     case aarch64::InstructionId::Mov: case aarch64::InstructionId::Mvn:
     case aarch64::InstructionId::Cmp: case aarch64::InstructionId::Cmn:
+    case aarch64::InstructionId::Ccmp: case aarch64::InstructionId::Ccmn:
     case aarch64::InstructionId::Tst: case aarch64::InstructionId::Neg:
     case aarch64::InstructionId::Negs: case aarch64::InstructionId::Csel:
     case aarch64::InstructionId::Csinc: case aarch64::InstructionId::Csinv:
@@ -75,6 +93,8 @@ namespace
     case aarch64::InstructionId::Extr:
     case aarch64::InstructionId::Mul: case aarch64::InstructionId::Madd:
     case aarch64::InstructionId::Msub: case aarch64::InstructionId::Mneg:
+    case aarch64::InstructionId::Umulh: case aarch64::InstructionId::Smulh:
+    case aarch64::InstructionId::Udiv: case aarch64::InstructionId::Sdiv:
     case aarch64::InstructionId::Adr: case aarch64::InstructionId::Adrp:
     case aarch64::InstructionId::Ldr: case aarch64::InstructionId::Ldrb:
     case aarch64::InstructionId::Ldrh: case aarch64::InstructionId::Ldrsb:
@@ -88,15 +108,27 @@ namespace
     case aarch64::InstructionId::Blr: case aarch64::InstructionId::Ret:
     case aarch64::InstructionId::Cbz: case aarch64::InstructionId::Cbnz:
     case aarch64::InstructionId::Tbz: case aarch64::InstructionId::Tbnz:
+    case aarch64::InstructionId::Ldxr: case aarch64::InstructionId::Ldxrb:
+    case aarch64::InstructionId::Ldxrh: case aarch64::InstructionId::Ldaxr:
+    case aarch64::InstructionId::Ldaxrb: case aarch64::InstructionId::Ldaxrh:
+    case aarch64::InstructionId::Stxr: case aarch64::InstructionId::Stxrb:
+    case aarch64::InstructionId::Stxrh: case aarch64::InstructionId::Stlxr:
+    case aarch64::InstructionId::Stlxrb: case aarch64::InstructionId::Stlxrh:
+    case aarch64::InstructionId::Ldar: case aarch64::InstructionId::Ldarb:
+    case aarch64::InstructionId::Ldarh: case aarch64::InstructionId::Stlr:
+    case aarch64::InstructionId::Stlrb: case aarch64::InstructionId::Stlrh:
+    case aarch64::InstructionId::Clrex: case aarch64::InstructionId::Dmb:
+    case aarch64::InstructionId::Dsb: case aarch64::InstructionId::Isb:
+    case aarch64::InstructionId::Mrs: case aarch64::InstructionId::Msr:
         return true;
     default:
         return false;
     }
 }
 
-[[nodiscard]] bool fp_simd_liftable(aarch64::SimdOperation operation) noexcept
+[[nodiscard]] bool fp_simd_liftable(const aarch64::DecodedInstruction& instruction) noexcept
 {
-    switch (operation)
+    switch (instruction.simd_operation)
     {
     case aarch64::SimdOperation::None:
     case aarch64::SimdOperation::Fmadd:
@@ -104,6 +136,19 @@ namespace
     case aarch64::SimdOperation::Fnmadd:
     case aarch64::SimdOperation::Fnmsub:
         return false;
+    case aarch64::SimdOperation::Movi:
+        return instruction.operands.size() == 2U &&
+               instruction.operands[0].kind == aarch64::OperandKind::Register &&
+               instruction.operands[0].reg.kind == aarch64::RegisterKind::Vector &&
+               instruction.operands[0].arrangement != aarch64::VectorArrangement::Invalid &&
+               instruction.operands[1].kind == aarch64::OperandKind::Immediate;
+    case aarch64::SimdOperation::St1:
+        return instruction.operands.size() == 2U &&
+               instruction.operands[0].kind == aarch64::OperandKind::Register &&
+               instruction.operands[0].reg.kind == aarch64::RegisterKind::Vector &&
+               instruction.operands[0].arrangement != aarch64::VectorArrangement::Invalid &&
+               instruction.operands[0].vector_index >= 0 &&
+               instruction.operands[1].kind == aarch64::OperandKind::Memory;
     default:
         return true;
     }
@@ -166,9 +211,10 @@ Result<CoverageReport> scan_coverage(const memory::GuestMemory& memory, memory::
         ++report.decoded;
         const auto name = std::string(aarch64::instruction_id_name(decoded.value().id));
         ++instruction_counts[name];
-        const bool liftable = decoded.value().id == aarch64::InstructionId::FpSimd
-                                  ? fp_simd_liftable(decoded.value().simd_operation)
-                                  : decoded.value().normalized && common_liftable(decoded.value().id);
+        const bool liftable = decoded.value().normalized &&
+                              (decoded.value().id == aarch64::InstructionId::FpSimd
+                                   ? fp_simd_liftable(decoded.value())
+                                   : common_liftable(decoded.value()));
         if (liftable)
         {
             ++report.liftable;

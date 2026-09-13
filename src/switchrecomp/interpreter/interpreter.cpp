@@ -487,6 +487,54 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                 }
                 break;
             }
+            case ir::Opcode::DivideUnsigned:
+            case ir::Opcode::DivideSigned:
+            {
+                const auto left = read(instruction.operands[0]);
+                const auto right = read(instruction.operands[1]);
+                if (!left || !right)
+                {
+                    return Result<runtime::ExecutionResult>::failure(!left ? left.error() : right.error());
+                }
+                const auto type = instruction.result_type;
+                const auto mask = mask_for(type);
+                const auto dividend = left.value() & mask;
+                const auto divisor = right.value() & mask;
+                std::uint64_t quotient = 0U;
+                if (divisor != 0U)
+                {
+                    if (instruction.opcode == ir::Opcode::DivideUnsigned)
+                    {
+                        quotient = dividend / divisor;
+                    }
+                    else
+                    {
+                        const auto extend = [type, mask](std::uint64_t value) -> std::int64_t {
+                            const auto masked = value & mask;
+                            if (type.bit_width() < 64U && signed_bit(masked, type))
+                            {
+                                return static_cast<std::int64_t>(masked | ~mask);
+                            }
+                            return static_cast<std::int64_t>(masked);
+                        };
+                        const auto signed_dividend = extend(dividend);
+                        const auto signed_divisor = extend(divisor);
+                        const auto minimum =
+                            type.bit_width() == 32U
+                                ? static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::min())
+                                : std::numeric_limits<std::int64_t>::min();
+                        quotient = (signed_dividend == minimum && signed_divisor == -1)
+                                       ? (static_cast<std::uint64_t>(minimum) & mask)
+                                       : (static_cast<std::uint64_t>(signed_dividend / signed_divisor) & mask);
+                    }
+                }
+                const auto stored = store_result(quotient & mask);
+                if (!stored)
+                {
+                    return Result<runtime::ExecutionResult>::failure(stored.error());
+                }
+                break;
+            }
             case ir::Opcode::Not:
             {
                 const auto operand = read(instruction.operands[0]);

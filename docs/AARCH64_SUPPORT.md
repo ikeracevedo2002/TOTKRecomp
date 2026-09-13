@@ -8,7 +8,7 @@ backend; the optional LLVM backend lowers the same IR primitives.
 | --- | --- | --- | --- | --- |
 | ADD/SUB, ADDS/SUBS | yes | yes | yes | W/X immediate, shifted and common extended register forms |
 | CMP/CMN, NEG/NEGS | yes | yes | yes | NZCV uses ARM carry/no-borrow semantics |
-| CCMP/CCMN | yes | no | no | explicit deferred fallback-NZCV semantics |
+| CCMP/CCMN | yes | yes | yes | NZCV from the comparison, conditionally selected against the fallback immediate using the incoming condition flags |
 | AND/ANDS/ORR/ORN/EOR/EON/BIC/BICS/TST | yes | yes | yes | logical flag writes set N/Z and clear C/V |
 | MOV/MVN, MOVZ/MOVK/MOVN | yes | yes | yes | W/X aliases and all valid move-wide lanes |
 | LSL/LSR/ASR/ROR, UBFM/SBFM/BFM aliases | yes | yes | yes | W/X immediate and register-controlled shifts; width-masked amounts and wrapped bitfield masks |
@@ -23,8 +23,8 @@ backend; the optional LLVM backend lowers the same IR primitives.
 | ADR/ADRP/literal LDR | yes | yes | yes | guest-PC and page-relative address domain |
 | B/B.cond/CBZ/CBNZ/TBZ/TBNZ | yes | yes | yes | internal CFG targets and taken/not-taken paths |
 | BL/BLR/BR/RET | yes | partial | partial | LR and direct/indirect guest targets are explicit; no function dispatcher |
-| UDIV/SDIV | yes | no | no | deferred until a shared divide-by-zero model is added |
-| Scalar FP: FMOV/FADD/FSUB/FMUL/FDIV/FNEG/FABS/FCMP/FCSEL/SCVTF/UCVTF/FCVTZS/FCVTZU/FCVT/FRINT | yes | yes | yes | S/D forms; raw IEEE bit patterns and sticky FPSR state |
+| UDIV/SDIV | yes | yes | yes | architectural divide-by-zero (quotient 0) and signed overflow (INT_MIN/-1) semantics; LLVM lowering guards undefined behavior |
+| Scalar FP: FMOV/FADD/FSUB/FMUL/FDIV/FNEG/FABS/FCMP/FCCMP/FCSEL/SCVTF/UCVTF/FCVTZS/FCVTZU/FCVT/FRINT | yes | yes | yes | S/D forms; raw IEEE bit patterns and sticky FPSR state; FCCMP/FCCMPE always update FPSR and conditionally select NZCV |
 | Scalar FP: FSQRT/FMIN/FMAX | yes | yes | yes | reference runtime semantics, explicit NaN and signed-zero handling |
 | AdvSIMD immediate moves | yes | yes | yes | FMOV vector immediate `.2S`/`.4S`/`.2D`; MOVI expanded architectural immediates with exact lane broadcasts |
 | NEON DUP/INS/UMOV/SMOV/EXT and ZIP/UZP/TRN | yes | yes | yes | normalized arrangements and lane indices |

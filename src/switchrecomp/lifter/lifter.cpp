@@ -850,6 +850,51 @@ class FunctionLifter
         return write_vector(instruction.operands[0].reg, result.value(), instruction);
     }
 
+    struct ArithmeticFlags
+    {
+        ir::ValueId negative;
+        ir::ValueId zero;
+        ir::ValueId carry;
+        ir::ValueId overflow;
+    };
+
+    [[nodiscard]] Result<ArithmeticFlags> compute_fp_compare_flags(
+        ir::ValueId left, ir::ValueId right, bool signaling, const DecodedInstruction& instruction)
+    {
+        ir::Instruction compare;
+        compare.opcode = ir::Opcode::FpCompare;
+        compare.result_type = ir::i32_type();
+        compare.operands = {left, right};
+        compare.signaling = signaling;
+        compare.source = source_location(instruction);
+        const auto flags = emit_value(std::move(compare));
+        if (!flags)
+        {
+            return Result<ArithmeticFlags>::failure(flags.error());
+        }
+        Result<ir::ValueId> bits[4] = {
+            Result<ir::ValueId>::failure(unsupported(instruction, "missing FP compare flag")),
+            Result<ir::ValueId>::failure(unsupported(instruction, "missing FP compare flag")),
+            Result<ir::ValueId>::failure(unsupported(instruction, "missing FP compare flag")),
+            Result<ir::ValueId>::failure(unsupported(instruction, "missing FP compare flag"))};
+        std::size_t index = 0U;
+        for (const auto& [flag, shift] : {std::pair{ir::Flag::N, 3U}, std::pair{ir::Flag::Z, 2U},
+                                           std::pair{ir::Flag::C, 1U}, std::pair{ir::Flag::V, 0U}})
+        {
+            const auto amount = constant(ir::i32_type(), shift, instruction);
+            if (!amount) return Result<ArithmeticFlags>::failure(amount.error());
+            const auto shifted = binary(ir::Opcode::LogicalShiftRight, flags.value(), amount.value(),
+                                        ir::i32_type(), instruction);
+            if (!shifted) return Result<ArithmeticFlags>::failure(shifted.error());
+            const auto bit = cast(ir::Opcode::Truncate, shifted.value(), ir::i1_type(), instruction);
+            if (!bit) return Result<ArithmeticFlags>::failure(bit.error());
+            (void)flag;
+            bits[index++] = bit;
+        }
+        return Result<ArithmeticFlags>::success(
+            ArithmeticFlags{bits[0].value(), bits[1].value(), bits[2].value(), bits[3].value()});
+    }
+
     [[nodiscard]] Result<void> lift_fp_simd(const DecodedInstruction& instruction)
     {
         using Op = aarch64::SimdOperation;
@@ -972,33 +1017,44 @@ class FunctionLifter
             const auto left = scalar_operand(instruction.operands[0], type, instruction);
             const auto right = scalar_operand(instruction.operands[1], type, instruction);
             if (!left || !right) return Result<void>::failure(!left ? left.error() : right.error());
-            ir::Instruction compare;
-            compare.opcode = ir::Opcode::FpCompare;
-            compare.result_type = ir::i32_type();
-            compare.operands = {left.value(), right.value()};
-            compare.signaling = op == Op::Fcmpe;
-            compare.source = source_location(instruction);
-            const auto flags = emit_value(std::move(compare));
+            const auto flags = compute_fp_compare_flags(left.value(), right.value(), op == Op::Fcmpe,
+                                                        instruction);
             if (!flags) return Result<void>::failure(flags.error());
-            for (const auto& [flag, shift] : {std::pair{ir::Flag::N, 3U}, std::pair{ir::Flag::Z, 2U},
-                                               std::pair{ir::Flag::C, 1U}, std::pair{ir::Flag::V, 0U}})
-            {
-                const auto amount = constant(ir::i32_type(), shift, instruction);
-                if (!amount) return Result<void>::failure(amount.error());
-                const auto shifted = binary(ir::Opcode::LogicalShiftRight, flags.value(), amount.value(), ir::i32_type(), instruction);
-                if (!shifted) return Result<void>::failure(shifted.error());
-                const auto bit = cast(ir::Opcode::Truncate, shifted.value(), ir::i1_type(), instruction);
-                if (!bit) return Result<void>::failure(bit.error());
-                ir::Instruction write;
-                write.opcode = ir::Opcode::WriteFlag;
-                write.result_type = ir::void_type();
-                write.operands = {bit.value()};
-                write.flag = flag;
-                write.source = source_location(instruction);
-                const auto emitted = emit_void(std::move(write));
-                if (!emitted) return emitted;
-            }
-            return Result<void>::success();
+            return write_flags(flags.value(), instruction);
+        }
+        case Op::Fccmp: case Op::Fccmpe:
+        {
+            if (instruction.operands.size() != 3U || !destination_is_vector ||
+                instruction.operands[2].kind != aarch64::OperandKind::Immediate)
+                return Result<void>::failure(unsupported(instruction, "FCCMP requires two scalar FP operands and NZCV immediate"));
+            const auto type = instruction.operands[0].reg.width == aarch64::RegisterWidth::S32 ? ir::f32_type() : ir::f64_type();
+            const auto left = scalar_operand(instruction.operands[0], type, instruction);
+            const auto right = scalar_operand(instruction.operands[1], type, instruction);
+            if (!left || !right) return Result<void>::failure(!left ? left.error() : right.error());
+            const auto computed = compute_fp_compare_flags(left.value(), right.value(), op == Op::Fccmpe,
+                                                           instruction);
+            if (!computed) return Result<void>::failure(computed.error());
+            const auto condition = condition_value(instruction.condition.value_or(aarch64::ConditionCode::Al), instruction);
+            if (!condition) return Result<void>::failure(condition.error());
+            const auto nzcv = static_cast<std::uint64_t>(instruction.operands[2].immediate) & 0xfU;
+            const auto select_flag = [&](ir::ValueId computed_flag,
+                                         std::uint8_t fallback_bit) -> Result<ir::ValueId> {
+                const auto fallback = constant(ir::i1_type(), (nzcv >> fallback_bit) & 1U, instruction);
+                if (!fallback) return Result<ir::ValueId>::failure(fallback.error());
+                ir::Instruction select;
+                select.opcode = ir::Opcode::Select;
+                select.result_type = ir::i1_type();
+                select.operands = {condition.value(), computed_flag, fallback.value()};
+                select.source = source_location(instruction);
+                return emit_value(std::move(select));
+            };
+            const auto n = select_flag(computed.value().negative, 3U);
+            const auto z = select_flag(computed.value().zero, 2U);
+            const auto c = select_flag(computed.value().carry, 1U);
+            const auto v = select_flag(computed.value().overflow, 0U);
+            if (!n || !z || !c || !v)
+                return Result<void>::failure(!n ? n.error() : !z ? z.error() : !c ? c.error() : v.error());
+            return write_flags(ArithmeticFlags{n.value(), z.value(), c.value(), v.value()}, instruction);
         }
         case Op::Fcsel:
         {
@@ -1369,29 +1425,29 @@ class FunctionLifter
         return emit_flags(left.value(), right.value(), result.value(), false, type, instruction);
     }
 
-    [[nodiscard]] Result<void> emit_flags(ir::ValueId left, ir::ValueId right, ir::ValueId result,
-                                          bool subtraction, ir::Type type,
-                                          const DecodedInstruction& instruction)
+    [[nodiscard]] Result<ArithmeticFlags> compute_arithmetic_flags(
+        ir::ValueId left, ir::ValueId right, ir::ValueId result, bool subtraction,
+        ir::Type type, const DecodedInstruction& instruction)
     {
         const auto zero = constant(type, 0U, instruction);
         if (!zero)
         {
-            return Result<void>::failure(zero.error());
+            return Result<ArithmeticFlags>::failure(zero.error());
         }
         const auto z = binary(ir::Opcode::CompareEqual, result, zero.value(), ir::i1_type(), instruction);
         if (!z)
         {
-            return Result<void>::failure(z.error());
+            return Result<ArithmeticFlags>::failure(z.error());
         }
         const auto shift_amount = constant(type, type.bit_width() - 1U, instruction);
         if (!shift_amount)
         {
-            return Result<void>::failure(shift_amount.error());
+            return Result<ArithmeticFlags>::failure(shift_amount.error());
         }
         const auto shifted = binary(ir::Opcode::LogicalShiftRight, result, shift_amount.value(), type, instruction);
         if (!shifted)
         {
-            return Result<void>::failure(shifted.error());
+            return Result<ArithmeticFlags>::failure(shifted.error());
         }
         ir::Instruction truncate{ir::Opcode::Truncate, ir::invalid_value, ir::i1_type(),
                                  {shifted.value()}, {}, ir::Flag::N, ir::ConditionCode::Al, 0, 0,
@@ -1399,7 +1455,7 @@ class FunctionLifter
         const auto n = emit_value(std::move(truncate));
         if (!n)
         {
-            return Result<void>::failure(n.error());
+            return Result<ArithmeticFlags>::failure(n.error());
         }
         ir::Instruction carry_instruction;
         carry_instruction.opcode = subtraction ? ir::Opcode::SubCarry : ir::Opcode::AddCarry;
@@ -1409,7 +1465,7 @@ class FunctionLifter
         const auto carry = emit_value(std::move(carry_instruction));
         if (!carry)
         {
-            return Result<void>::failure(carry.error());
+            return Result<ArithmeticFlags>::failure(carry.error());
         }
         ir::Instruction overflow_instruction;
         overflow_instruction.opcode = subtraction ? ir::Opcode::SubOverflow : ir::Opcode::AddOverflow;
@@ -1419,12 +1475,19 @@ class FunctionLifter
         const auto overflow = emit_value(std::move(overflow_instruction));
         if (!overflow)
         {
-            return Result<void>::failure(overflow.error());
+            return Result<ArithmeticFlags>::failure(overflow.error());
         }
-        for (const auto& [flag, value] : {std::pair{ir::Flag::N, n.value()},
-                                          std::pair{ir::Flag::Z, z.value()},
-                                          std::pair{ir::Flag::C, carry.value()},
-                                          std::pair{ir::Flag::V, overflow.value()}})
+        return Result<ArithmeticFlags>::success(
+            ArithmeticFlags{n.value(), z.value(), carry.value(), overflow.value()});
+    }
+
+    [[nodiscard]] Result<void> write_flags(const ArithmeticFlags& flags,
+                                           const DecodedInstruction& instruction)
+    {
+        for (const auto& [flag, value] : {std::pair{ir::Flag::N, flags.negative},
+                                          std::pair{ir::Flag::Z, flags.zero},
+                                          std::pair{ir::Flag::C, flags.carry},
+                                          std::pair{ir::Flag::V, flags.overflow}})
         {
             ir::Instruction write;
             write.opcode = ir::Opcode::WriteFlag;
@@ -1438,6 +1501,79 @@ class FunctionLifter
             }
         }
         return Result<void>::success();
+    }
+
+    [[nodiscard]] Result<void> emit_flags(ir::ValueId left, ir::ValueId right, ir::ValueId result,
+                                          bool subtraction, ir::Type type,
+                                          const DecodedInstruction& instruction)
+    {
+        const auto flags = compute_arithmetic_flags(left, right, result, subtraction, type, instruction);
+        if (!flags)
+        {
+            return Result<void>::failure(flags.error());
+        }
+        return write_flags(flags.value(), instruction);
+    }
+
+    [[nodiscard]] Result<void> lift_conditional_compare(const DecodedInstruction& instruction,
+                                                        bool subtraction)
+    {
+        if (instruction.operands.size() != 3U ||
+            instruction.operands[0].kind != aarch64::OperandKind::Register ||
+            instruction.operands[2].kind != aarch64::OperandKind::Immediate)
+        {
+            return Result<void>::failure(unsupported(
+                instruction, "conditional compare requires register, operand, and NZCV immediate"));
+        }
+        const auto type = type_for_width(instruction.operands[0].reg.width);
+        const auto left = operand_value(instruction.operands[0], type, instruction);
+        const auto right = operand_value(instruction.operands[1], type, instruction);
+        if (!left || !right)
+        {
+            return Result<void>::failure(!left ? left.error() : right.error());
+        }
+        const auto result = binary(subtraction ? ir::Opcode::Sub : ir::Opcode::Add, left.value(),
+                                   right.value(), type, instruction);
+        if (!result)
+        {
+            return Result<void>::failure(result.error());
+        }
+        const auto computed = compute_arithmetic_flags(left.value(), right.value(), result.value(),
+                                                       subtraction, type, instruction);
+        if (!computed)
+        {
+            return Result<void>::failure(computed.error());
+        }
+        const auto condition =
+            condition_value(instruction.condition.value_or(aarch64::ConditionCode::Al), instruction);
+        if (!condition)
+        {
+            return Result<void>::failure(condition.error());
+        }
+        const auto nzcv = static_cast<std::uint64_t>(instruction.operands[2].immediate) & 0xfU;
+        const auto select_flag = [&](ir::ValueId fallback_source,
+                                     std::uint8_t fallback_bit) -> Result<ir::ValueId> {
+            const auto fallback = constant(ir::i1_type(), (nzcv >> fallback_bit) & 1U, instruction);
+            if (!fallback)
+            {
+                return Result<ir::ValueId>::failure(fallback.error());
+            }
+            ir::Instruction select;
+            select.opcode = ir::Opcode::Select;
+            select.result_type = ir::i1_type();
+            select.operands = {condition.value(), fallback_source, fallback.value()};
+            select.source = source_location(instruction);
+            return emit_value(std::move(select));
+        };
+        const auto n = select_flag(computed.value().negative, 3U);
+        const auto z = select_flag(computed.value().zero, 2U);
+        const auto c = select_flag(computed.value().carry, 1U);
+        const auto v = select_flag(computed.value().overflow, 0U);
+        if (!n || !z || !c || !v)
+        {
+            return Result<void>::failure(!n ? n.error() : !z ? z.error() : !c ? c.error() : v.error());
+        }
+        return write_flags(ArithmeticFlags{n.value(), z.value(), c.value(), v.value()}, instruction);
     }
 
     [[nodiscard]] Result<void> emit_logic_flags(ir::ValueId result, ir::Type type,
@@ -1854,6 +1990,33 @@ class FunctionLifter
             }
         }
         return write_register(instruction.operands[0].reg, result.value(), instruction);
+    }
+
+    [[nodiscard]] Result<void> lift_divide(const DecodedInstruction& instruction)
+    {
+        if (instruction.operands.size() != 3U ||
+            instruction.operands[0].kind != aarch64::OperandKind::Register ||
+            instruction.operands[1].kind != aarch64::OperandKind::Register ||
+            instruction.operands[2].kind != aarch64::OperandKind::Register)
+        {
+            return Result<void>::failure(unsupported(instruction, "divide requires three register operands"));
+        }
+        const auto& destination = instruction.operands[0].reg;
+        const auto type = type_for_width(destination.width);
+        const auto left = operand_value(instruction.operands[1], type, instruction);
+        const auto right = operand_value(instruction.operands[2], type, instruction);
+        if (!left || !right)
+        {
+            return Result<void>::failure(!left ? left.error() : right.error());
+        }
+        const auto opcode = instruction.id == aarch64::InstructionId::Udiv ? ir::Opcode::DivideUnsigned
+                                                                          : ir::Opcode::DivideSigned;
+        const auto result = binary(opcode, left.value(), right.value(), type, instruction);
+        if (!result)
+        {
+            return Result<void>::failure(result.error());
+        }
+        return write_register(destination, result.value(), instruction);
     }
 
     [[nodiscard]] Result<void> lift_bitfield(const DecodedInstruction& instruction)
@@ -3264,6 +3427,10 @@ class FunctionLifter
             return lift_cmp(instruction);
         case aarch64::InstructionId::Cmn:
             return lift_cmn(instruction);
+        case aarch64::InstructionId::Ccmp:
+            return lift_conditional_compare(instruction, true);
+        case aarch64::InstructionId::Ccmn:
+            return lift_conditional_compare(instruction, false);
         case aarch64::InstructionId::Tst:
             return lift_test(instruction);
         case aarch64::InstructionId::And:
@@ -3328,6 +3495,9 @@ class FunctionLifter
         case aarch64::InstructionId::Umulh:
         case aarch64::InstructionId::Smulh:
             return lift_multiply(instruction);
+        case aarch64::InstructionId::Udiv:
+        case aarch64::InstructionId::Sdiv:
+            return lift_divide(instruction);
         case aarch64::InstructionId::Adr:
         case aarch64::InstructionId::Adrp:
             return lift_pc_relative(instruction);
@@ -3405,6 +3575,10 @@ bool is_instruction_liftable(aarch64::InstructionId id) noexcept
     case aarch64::InstructionId::Mvn:
     case aarch64::InstructionId::Cmp:
     case aarch64::InstructionId::Cmn:
+    case aarch64::InstructionId::Ccmp:
+    case aarch64::InstructionId::Ccmn:
+    case aarch64::InstructionId::Udiv:
+    case aarch64::InstructionId::Sdiv:
     case aarch64::InstructionId::Tst:
     case aarch64::InstructionId::Neg:
     case aarch64::InstructionId::Negs:
@@ -3462,10 +3636,6 @@ bool is_instruction_liftable(aarch64::InstructionId id) noexcept
     case aarch64::InstructionId::Tbnz:
         return true;
     case aarch64::InstructionId::Unknown:
-    case aarch64::InstructionId::Ccmp:
-    case aarch64::InstructionId::Ccmn:
-    case aarch64::InstructionId::Udiv:
-    case aarch64::InstructionId::Sdiv:
     case aarch64::InstructionId::FpSimd:
     case aarch64::InstructionId::Ldxr:
     case aarch64::InstructionId::Ldxrb:
@@ -3530,6 +3700,8 @@ bool is_instruction_liftable(const aarch64::DecodedInstruction& instruction) noe
     case aarch64::SimdOperation::Fmax:
     case aarch64::SimdOperation::Fcmp:
     case aarch64::SimdOperation::Fcmpe:
+    case aarch64::SimdOperation::Fccmp:
+    case aarch64::SimdOperation::Fccmpe:
     case aarch64::SimdOperation::Fcsel:
     case aarch64::SimdOperation::Scvtf:
     case aarch64::SimdOperation::Ucvtf:

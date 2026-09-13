@@ -344,7 +344,7 @@ TEST_CASE("M16 UMULH lifts to project IR, preserves NZCV, aliases operands, and 
 TEST_CASE("M17 diagnostic lifting executes UMULH before a typed unsupported boundary")
 {
     constexpr memory::GuestAddress address = 0x200000U;
-    const auto bytes = words({0x9bc97d49U, 0x7a400900U, 0xd65f03c0U});
+    const auto bytes = words({0x9bc97d49U, 0x4e22cc20U, 0xd65f03c0U});
     memory::GuestMemory memory;
     REQUIRE(memory.map(address, std::span<const std::byte>(bytes),
                        memory::GuestMemoryPermissions::Read |
@@ -375,8 +375,8 @@ TEST_CASE("M17 diagnostic lifting executes UMULH before a typed unsupported boun
     REQUIRE(cpu.x[9] == 1U);
     REQUIRE(result.value().boundary.kind == runtime::ExecutionBoundaryKind::UnsupportedInstruction);
     REQUIRE(result.value().boundary.source_guest_pc == address + 4U);
-    REQUIRE(result.value().boundary.target_provenance.find("ccmp") != std::string::npos);
-    REQUIRE(result.value().boundary.target_provenance.find("0x7a400900") == std::string::npos);
+    REQUIRE(result.value().boundary.target_provenance.find("fmla") != std::string::npos);
+    REQUIRE(result.value().boundary.target_provenance.find("0x4e22cc20") == std::string::npos);
 }
 
 TEST_CASE("M16 UMULH honors architecturally valid XZR source and destination aliases")

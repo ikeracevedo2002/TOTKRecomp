@@ -247,6 +247,8 @@ std::string_view simd_operation_name(SimdOperation operation) noexcept
     case SimdOperation::Fmax: return "fmax";
     case SimdOperation::Fcmp: return "fcmp";
     case SimdOperation::Fcmpe: return "fcmpe";
+    case SimdOperation::Fccmp: return "fccmp";
+    case SimdOperation::Fccmpe: return "fccmpe";
     case SimdOperation::Fcsel: return "fcsel";
     case SimdOperation::Scvtf: return "scvtf";
     case SimdOperation::Ucvtf: return "ucvtf";

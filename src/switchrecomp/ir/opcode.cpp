@@ -15,6 +15,8 @@ std::string_view opcode_name(Opcode opcode) noexcept
     case Opcode::Mul: return "mul";
     case Opcode::MulHighUnsigned: return "mul_high_unsigned";
     case Opcode::MulHighSigned: return "mul_high_signed";
+    case Opcode::DivideUnsigned: return "divide_unsigned";
+    case Opcode::DivideSigned: return "divide_signed";
     case Opcode::And: return "and";
     case Opcode::Or: return "or";
     case Opcode::Xor: return "xor";

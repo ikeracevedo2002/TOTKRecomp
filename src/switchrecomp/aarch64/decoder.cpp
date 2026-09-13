@@ -786,6 +786,8 @@ namespace
     case ARM64_INS_FMAXNM: return SimdOperation::Fmax;
     case ARM64_INS_FCMP: return SimdOperation::Fcmp;
     case ARM64_INS_FCMPE: return SimdOperation::Fcmpe;
+    case ARM64_INS_FCCMP: return SimdOperation::Fccmp;
+    case ARM64_INS_FCCMPE: return SimdOperation::Fccmpe;
     case ARM64_INS_FCSEL: return SimdOperation::Fcsel;
     case ARM64_INS_SCVTF: return SimdOperation::Scvtf;
     case ARM64_INS_UCVTF: return SimdOperation::Ucvtf;

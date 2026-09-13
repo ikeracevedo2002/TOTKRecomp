@@ -54,6 +54,8 @@ enum class Opcode : std::uint8_t
     Mul,
     MulHighUnsigned,
     MulHighSigned,
+    DivideUnsigned,
+    DivideSigned,
     And,
     Or,
     Xor,

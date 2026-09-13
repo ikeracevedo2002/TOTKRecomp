@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <new>
 #include <sstream>
@@ -613,6 +614,41 @@ class ModuleLowerer
                              ? builder_.CreateAShr(product, ConstantInt::get(wide_type, 64U), "smulh.high")
                              : builder_.CreateLShr(product, ConstantInt::get(wide_type, 64U), "umulh.high");
             assign(instruction, builder_.CreateTrunc(high, Type::getInt64Ty(context_), "umulh.result"));
+            return Result<void>::success();
+        }
+        case ir::Opcode::DivideUnsigned:
+        case ir::Opcode::DivideSigned:
+        {
+            const auto left = require_value(instruction.operands[0]);
+            const auto right = require_value(instruction.operands[1]);
+            if (!left || !right)
+            {
+                return Result<void>::failure(!left ? left.error() : right.error());
+            }
+            auto* type = left.value()->getType();
+            const bool signed_divide = instruction.opcode == ir::Opcode::DivideSigned;
+            auto* zero = ConstantInt::get(type, 0U);
+            auto* one = ConstantInt::get(type, 1U);
+            auto* is_zero = builder_.CreateICmpEQ(right.value(), zero, "div.zero");
+            auto* safe_divisor = builder_.CreateSelect(is_zero, one, right.value(), "div.safe");
+            Value* quotient = signed_divide
+                                  ? builder_.CreateSDiv(left.value(), safe_divisor, "sdiv")
+                                  : builder_.CreateUDiv(left.value(), safe_divisor, "udiv");
+            Value* result = quotient;
+            if (signed_divide)
+            {
+                auto* minus_one = ConstantInt::getSigned(type, -1);
+                auto* is_minus_one = builder_.CreateICmpEQ(right.value(), minus_one, "div.minusone");
+                const auto bits = instruction.result_type.bit_width();
+                auto* minimum = ConstantInt::getSigned(
+                    type, bits == 32U
+                              ? static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::min())
+                              : std::numeric_limits<std::int64_t>::min());
+                auto* is_minimum = builder_.CreateICmpEQ(left.value(), minimum, "div.minimum");
+                auto* overflow = builder_.CreateAnd(is_minus_one, is_minimum, "div.overflow");
+                result = builder_.CreateSelect(overflow, left.value(), quotient, "sdiv.overflow");
+            }
+            assign(instruction, builder_.CreateSelect(is_zero, zero, result, "div.result"));
             return Result<void>::success();
         }
         case ir::Opcode::Not:
