@@ -85,6 +85,15 @@ if(TOTKRECOMP_BUILD_TESTS)
 endif()
 
 function(totkrecomp_enable_project_warnings target)
+    # Apple Clang 14's libc++ lacks std::bit_cast even in -std=c++20. Keep
+    # this compatibility layer project-owned and target-local rather than
+    # relying on an undocumented developer-specific forced include.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND APPLE)
+        target_compile_options(${target} PRIVATE
+            -include ${CMAKE_CURRENT_SOURCE_DIR}/include/switchrecomp/common/cxx20_compat.hpp
+        )
+    endif()
+
     if(NOT TOTKRECOMP_ENABLE_WARNINGS)
         return()
     endif()
@@ -334,8 +343,14 @@ if(TOTKRECOMP_ENABLE_LLVM)
         totkrecomp_enable_project_warnings(switchrecomp-codegen-llvm)
         totkrecomp_enable_sanitizers(switchrecomp-codegen-llvm)
     else()
-        message(WARNING "TOTKRECOMP_ENABLE_LLVM=ON but LLVM was not found; LLVM backend is disabled")
+        message(FATAL_ERROR
+            "TOTKRECOMP_ENABLE_LLVM=ON but LLVM 18 was not found. "
+            "Install LLVM 18 development files and set LLVM_DIR, or configure with "
+            "-DTOTKRECOMP_ENABLE_LLVM=OFF explicitly; silently disabling the backend is prohibited.")
     endif()
+else()
+    message(STATUS
+        "TOTKRECOMP_ENABLE_LLVM=OFF: optional LLVM lowering/JIT backend is not compiled")
 endif()
 
 add_library(switchrecomp-module-translation
