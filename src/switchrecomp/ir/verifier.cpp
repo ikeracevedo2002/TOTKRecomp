@@ -467,6 +467,30 @@ Result<void> verify(const Function& function)
                 }
                 break;
             }
+            case Opcode::AddWithCarry:
+            case Opcode::AddWithCarryCarry:
+            case Opcode::AddWithCarryOverflow:
+            {
+                if (instruction.operands.size() != 3U)
+                {
+                    checked = invalid("add_with_carry requires two integer operands and a carry input");
+                    break;
+                }
+                const auto left = operand_type(function, instruction.operands[0], "add_with_carry");
+                const auto right = operand_type(function, instruction.operands[1], "add_with_carry");
+                const auto carry = operand_type(function, instruction.operands[2], "add_with_carry");
+                if (!left || !right || !carry || !valid_integer_type(left.value()) ||
+                    left.value() != right.value() || carry.value() != i1_type())
+                {
+                    checked = invalid("add_with_carry operand types are invalid");
+                }
+                else
+                {
+                    checked = require_result(instruction.opcode == Opcode::AddWithCarry
+                                                  ? left.value() : i1_type());
+                }
+                break;
+            }
             case Opcode::Truncate:
             case Opcode::ZeroExtend:
             case Opcode::SignExtend:
@@ -844,6 +868,20 @@ Result<void> verify(const Function& function)
                     if (!address || address.value() != i64_type() || instruction.memory_size != 16U ||
                         instruction.result_type != v128_type())
                         checked = invalid("vector guest load requires i64 address and 16-byte V128 result");
+                }
+                break;
+            case Opcode::Crc32:
+                checked = require_arity(instruction, 2U);
+                if (checked)
+                {
+                    const auto accumulator = operand_type(function, instruction.operands[0], "crc32 accumulator");
+                    const auto source = operand_type(function, instruction.operands[1], "crc32 source");
+                    if (!accumulator || !source || accumulator.value() != i32_type() ||
+                        (source.value() != i32_type() && source.value() != i64_type()) ||
+                        instruction.result_type != i32_type() ||
+                        (instruction.memory_size != 1U && instruction.memory_size != 2U &&
+                         instruction.memory_size != 4U && instruction.memory_size != 8U))
+                        checked = invalid("crc32 requires W accumulator, W/X source, and byte width");
                 }
                 break;
             case Opcode::GuestStoreVector:

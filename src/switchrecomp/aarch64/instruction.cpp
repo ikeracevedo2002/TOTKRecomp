@@ -96,11 +96,18 @@ std::string_view instruction_id_name(InstructionId id) noexcept
     switch (id)
     {
     case InstructionId::Unknown: return "unknown";
+    case InstructionId::Udf: return "udf";
     case InstructionId::Nop: return "nop";
     case InstructionId::Add: return "add";
     case InstructionId::Adds: return "adds";
     case InstructionId::Sub: return "sub";
     case InstructionId::Subs: return "subs";
+    case InstructionId::Adc: return "adc";
+    case InstructionId::Adcs: return "adcs";
+    case InstructionId::Sbc: return "sbc";
+    case InstructionId::Sbcs: return "sbcs";
+    case InstructionId::Ngc: return "ngc";
+    case InstructionId::Ngcs: return "ngcs";
     case InstructionId::And: return "and";
     case InstructionId::Ands: return "ands";
     case InstructionId::Orr: return "orr";
@@ -144,8 +151,16 @@ std::string_view instruction_id_name(InstructionId id) noexcept
     case InstructionId::Mneg: return "mneg";
     case InstructionId::Umulh: return "umulh";
     case InstructionId::Smulh: return "smulh";
+    case InstructionId::Umaddl: return "umaddl";
+    case InstructionId::Umsubl: return "umsubl";
+    case InstructionId::Smaddl: return "smaddl";
+    case InstructionId::Smsubl: return "smsubl";
     case InstructionId::Udiv: return "udiv";
     case InstructionId::Sdiv: return "sdiv";
+    case InstructionId::Crc32: return "crc32";
+    case InstructionId::Prfm: return "prfm";
+    case InstructionId::Rev: return "rev";
+    case InstructionId::Rev16: return "rev16";
     case InstructionId::Adr: return "adr";
     case InstructionId::Adrp: return "adrp";
     case InstructionId::Ldr: return "ldr";
@@ -236,7 +251,9 @@ std::string_view simd_operation_name(SimdOperation operation) noexcept
     case SimdOperation::None: return "none";
     case SimdOperation::Fmov: return "fmov";
     case SimdOperation::Movi: return "movi";
+    case SimdOperation::Mvni: return "mvni";
     case SimdOperation::Fadd: return "fadd";
+    case SimdOperation::Faddp: return "faddp";
     case SimdOperation::Fsub: return "fsub";
     case SimdOperation::Fmul: return "fmul";
     case SimdOperation::Fdiv: return "fdiv";
@@ -282,7 +299,18 @@ std::string_view simd_operation_name(SimdOperation operation) noexcept
     case SimdOperation::Cmge: return "cmge";
     case SimdOperation::Cmhi: return "cmhi";
     case SimdOperation::Cmhs: return "cmhs";
+    case SimdOperation::Bif: return "bif";
+    case SimdOperation::Bit: return "bit";
+    case SimdOperation::Bsl: return "bsl";
     case SimdOperation::St1: return "st1";
+    case SimdOperation::Ld1: return "ld1";
+    case SimdOperation::Ld1r: return "ld1r";
+    case SimdOperation::Ld2: return "ld2";
+    case SimdOperation::Ld2r: return "ld2r";
+    case SimdOperation::Ld3: return "ld3";
+    case SimdOperation::Ld3r: return "ld3r";
+    case SimdOperation::Ld4: return "ld4";
+    case SimdOperation::Ld4r: return "ld4r";
     }
     return "unknown";
 }

@@ -674,6 +674,36 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                 }
                 break;
             }
+            case ir::Opcode::AddWithCarry:
+            case ir::Opcode::AddWithCarryCarry:
+            case ir::Opcode::AddWithCarryOverflow:
+            {
+                const auto left = read(instruction.operands[0]);
+                const auto right = read(instruction.operands[1]);
+                const auto carry = read(instruction.operands[2]);
+                const auto type = function.value(instruction.operands[0])->type;
+                if (!left || !right || !carry)
+                {
+                    return Result<runtime::ExecutionResult>::failure(!left ? left.error()
+                                                                  : !right ? right.error() : carry.error());
+                }
+                const auto mask = mask_for(type);
+                const auto left_value = left.value() & mask;
+                const auto right_value = right.value() & mask;
+                const auto partial = left_value + right_value;
+                const auto result = (partial + (carry.value() != 0U ? 1U : 0U)) & mask;
+                const bool carry_out = partial < left_value || result < partial;
+                const bool overflow = signed_bit(left_value, type) == signed_bit(right_value, type) &&
+                                      signed_bit(result, type) != signed_bit(left_value, type);
+                const auto value = instruction.opcode == ir::Opcode::AddWithCarry
+                                       ? result
+                                       : instruction.opcode == ir::Opcode::AddWithCarryCarry
+                                             ? (carry_out ? 1U : 0U)
+                                             : (overflow ? 1U : 0U);
+                const auto stored = store_result(value);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
             case ir::Opcode::AddCarry:
             case ir::Opcode::SubCarry:
             case ir::Opcode::AddOverflow:
@@ -967,6 +997,26 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                     runtime::Vector128{left.value(), left_high.value()}, runtime::Vector128{right.value(), right_high.value()},
                     static_cast<std::uint8_t>(instruction.immediate));
                 const auto stored = store_result(result_vector.lo, result_vector.hi);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::Crc32:
+            {
+                const auto accumulator = read(instruction.operands[0]);
+                const auto source = read(instruction.operands[1]);
+                if (!accumulator || !source)
+                    return Result<runtime::ExecutionResult>::failure(!accumulator ? accumulator.error() : source.error());
+                std::uint32_t crc = static_cast<std::uint32_t>(accumulator.value());
+                const auto polynomial = instruction.signed_operation ? 0x82f63b78U : 0xedb88320U;
+                const auto bytes = instruction.memory_size;
+                const auto input = source.value();
+                for (std::uint8_t byte = 0U; byte < bytes; ++byte)
+                {
+                    crc ^= static_cast<std::uint32_t>((input >> (byte * 8U)) & 0xffU);
+                    for (unsigned int bit = 0U; bit < 8U; ++bit)
+                        crc = (crc & 1U) != 0U ? (crc >> 1U) ^ polynomial : crc >> 1U;
+                }
+                const auto stored = store_result(crc);
                 if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
                 break;
             }

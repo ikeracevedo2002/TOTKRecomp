@@ -6,6 +6,7 @@
 #include "switchrecomp/memory/guest_memory.hpp"
 #include "switchrecomp/version.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -18,6 +19,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace
@@ -31,6 +33,13 @@ enum class ExitCode : int
     AnalysisFailure = 3,
 };
 
+[[nodiscard]] std::size_t default_coverage_workers() noexcept
+{
+    const auto hardware = std::thread::hardware_concurrency();
+    if (hardware == 0U) return 1U;
+    return std::min<std::size_t>(4U, hardware);
+}
+
 void print_help(std::ostream& output)
 {
     output << "Usage: aarch64-analyze [options] file\n\n"
@@ -43,6 +52,7 @@ void print_help(std::ostream& output)
               "  --max-instructions N  Maximum decoded instructions.\n"
               "  --max-blocks N        Maximum basic blocks.\n"
               "  --coverage             Scan every instruction in the input range.\n"
+              "  --coverage-workers N  Bounded coverage worker count (default: up to 4).\n"
               "  --json                 Emit deterministic JSON coverage output.\n"
               "\nThe input is project-owned synthetic data or a locally supplied prepared image;\n"
               "this tool does not extract or decrypt game content.\n";
@@ -123,6 +133,7 @@ int main(int argc, char** argv)
         switchrecomp::analysis::AnalysisOptions options;
         bool coverage = false;
         bool json = false;
+        std::size_t coverage_workers = default_coverage_workers();
         for (int index = 1; index < argc; ++index)
         {
             const std::string_view argument(argv[index]);
@@ -173,6 +184,16 @@ int main(int argc, char** argv)
                     throw std::runtime_error("invalid entry address: " + std::string(value));
                 }
                 entry = parsed;
+                continue;
+            }
+            if (argument == "--coverage-workers")
+            {
+                const auto value = require_value(argument);
+                if (!parse_size(value, coverage_workers) || coverage_workers == 0U)
+                {
+                    throw std::runtime_error("invalid positive coverage worker count: " +
+                                             std::string(value));
+                }
                 continue;
             }
             if (argument == "--max-instructions" || argument == "--max-blocks")
@@ -260,7 +281,7 @@ int main(int argc, char** argv)
         {
             const auto report = switchrecomp::analysis::scan_coverage(
                 memory, analysis_base, analysis_size, std::filesystem::path(input_path).filename().string(),
-                switchrecomp::analysis::CoverageOptions{options.max_instructions});
+                switchrecomp::analysis::CoverageOptions{options.max_instructions, coverage_workers});
             if (!report)
             {
                 print_error(report.error());

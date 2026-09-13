@@ -14,6 +14,10 @@ namespace switchrecomp::analysis
 struct CoverageOptions
 {
     std::size_t max_instructions = 4'000'000U;
+    // Coverage workers own independent decoder handles. The default API value
+    // remains serial for predictable library cost; command-line tools may
+    // opt into a bounded pool.
+    std::size_t workers = 1U;
 };
 
 struct CoverageOpcodeCount

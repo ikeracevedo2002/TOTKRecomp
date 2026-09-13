@@ -76,6 +76,9 @@ enum class Opcode : std::uint8_t
     AddOverflow,
     SubCarry,
     SubOverflow,
+    AddWithCarry,
+    AddWithCarryCarry,
+    AddWithCarryOverflow,
     EvaluateCondition,
     ReadRegister,
     WriteRegister,
@@ -113,6 +116,7 @@ enum class Opcode : std::uint8_t
     VectorShuffle,
     GuestLoadVector,
     GuestStoreVector,
+    Crc32,
 };
 
 enum class FpBinaryOperation : std::uint8_t { Add, Sub, Mul, Div, Min, Max };

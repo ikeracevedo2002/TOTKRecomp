@@ -469,6 +469,9 @@ if(TOTKRECOMP_BUILD_TESTS)
         tests/milestone36_scalar_integer_convergence_tests.cpp
         tests/milestone37_incremental_entry_index_tests.cpp
         tests/milestone38_semantic_convergence_tests.cpp
+        tests/milestone39_coverage_convergence_tests.cpp
+        tests/milestone40_semantic_convergence_tests.cpp
+        tests/milestone41_structure_load_tests.cpp
     )
     target_link_libraries(switchrecomp-tests
         PRIVATE

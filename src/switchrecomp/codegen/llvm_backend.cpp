@@ -878,6 +878,42 @@ class ModuleLowerer
             assign(instruction, builder_.CreateLoad(vector_type(), output, "shuffle.value"));
             return Result<void>::success();
         }
+        case ir::Opcode::AddWithCarry:
+        case ir::Opcode::AddWithCarryCarry:
+        case ir::Opcode::AddWithCarryOverflow:
+        {
+            const auto left = require_value(instruction.operands[0]);
+            const auto right = require_value(instruction.operands[1]);
+            const auto carry = require_value(instruction.operands[2]);
+            if (!left || !right || !carry)
+            {
+                return Result<void>::failure(!left ? left.error() : !right ? right.error() : carry.error());
+            }
+            auto* type = left.value()->getType();
+            auto* carry_wide = builder_.CreateZExt(carry.value(), type, "adc.carry");
+            auto* partial = builder_.CreateAdd(left.value(), right.value(), "adc.partial");
+            auto* result = builder_.CreateAdd(partial, carry_wide, "adc.result");
+            if (instruction.opcode == ir::Opcode::AddWithCarry)
+            {
+                assign(instruction, result);
+            }
+            else if (instruction.opcode == ir::Opcode::AddWithCarryCarry)
+            {
+                auto* first = builder_.CreateICmpULT(partial, left.value(), "adc.carry.first");
+                auto* second = builder_.CreateICmpULT(result, partial, "adc.carry.second");
+                assign(instruction, builder_.CreateOr(first, second, "adc.carry.out"));
+            }
+            else
+            {
+                auto* xor_lr = builder_.CreateXor(left.value(), right.value(), "adc.xor.lr");
+                auto* xor_result = builder_.CreateXor(left.value(), result, "adc.xor.result");
+                auto* bits = builder_.CreateAnd(builder_.CreateNot(xor_lr), xor_result, "adc.overflow.bits");
+                auto* shifted = builder_.CreateLShr(
+                    bits, ConstantInt::get(type, type->getIntegerBitWidth() - 1U), "adc.overflow.shift");
+                assign(instruction, builder_.CreateTrunc(shifted, Type::getInt1Ty(context_), "adc.overflow"));
+            }
+            return Result<void>::success();
+        }
         case ir::Opcode::AddCarry:
         case ir::Opcode::SubCarry:
         case ir::Opcode::AddOverflow:
@@ -1017,6 +1053,36 @@ class ModuleLowerer
                 loaded = builder_.CreateTrunc(loaded, type(instruction.result_type), "guest.load.narrow");
             }
             assign(instruction, loaded);
+            return Result<void>::success();
+        }
+        case ir::Opcode::Crc32:
+        {
+            const auto accumulator = require_value(instruction.operands[0]);
+            const auto source = require_value(instruction.operands[1]);
+            if (!accumulator || !source)
+                return Result<void>::failure(!accumulator ? accumulator.error() : source.error());
+            auto* source_wide = source.value();
+            if (source_wide->getType()->getIntegerBitWidth() != 64U)
+                source_wide = builder_.CreateZExt(source_wide, Type::getInt64Ty(context_), "crc32.source.wide");
+            auto* crc = accumulator.value();
+            auto* polynomial = ConstantInt::get(Type::getInt32Ty(context_),
+                                                 instruction.signed_operation ? 0x82f63b78U : 0xedb88320U);
+            for (std::uint8_t byte = 0U; byte < instruction.memory_size; ++byte)
+            {
+                auto* shifted = builder_.CreateLShr(source_wide,
+                    ConstantInt::get(Type::getInt64Ty(context_), byte * 8U), "crc32.byte.shift");
+                auto* value = builder_.CreateTrunc(shifted, Type::getInt32Ty(context_), "crc32.byte");
+                crc = builder_.CreateXor(crc, builder_.CreateAnd(value, ConstantInt::get(Type::getInt32Ty(context_), 0xffU), "crc32.byte.mask"), "crc32.mix");
+                for (unsigned int bit = 0U; bit < 8U; ++bit)
+                {
+                    auto* low = builder_.CreateAnd(crc, ConstantInt::get(Type::getInt32Ty(context_), 1U), "crc32.low");
+                    auto* set = builder_.CreateICmpNE(low, ConstantInt::get(Type::getInt32Ty(context_), 0U), "crc32.set");
+                    auto* feedback = builder_.CreateSelect(set, polynomial,
+                                                            ConstantInt::get(Type::getInt32Ty(context_), 0U), "crc32.feedback");
+                    crc = builder_.CreateXor(builder_.CreateLShr(crc, ConstantInt::get(Type::getInt32Ty(context_), 1U), "crc32.shift"), feedback, "crc32.step");
+                }
+            }
+            assign(instruction, crc);
             return Result<void>::success();
         }
         case ir::Opcode::GuestLoadVector:

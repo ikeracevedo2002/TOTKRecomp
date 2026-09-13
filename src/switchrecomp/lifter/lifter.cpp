@@ -5,6 +5,7 @@
 #include "switchrecomp/ir/builder.hpp"
 #include "switchrecomp/ir/verifier.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <iomanip>
 #include <limits>
@@ -792,6 +793,21 @@ class FunctionLifter
             unsupported(instruction, "vector lane source must be a general or vector register"));
     }
 
+    [[nodiscard]] Result<ir::ValueId> emit_vector_binary(ir::ValueId left, ir::ValueId right,
+                                                         ir::VectorArrangement arrangement,
+                                                         ir::VectorOperation operation,
+                                                         const DecodedInstruction& instruction)
+    {
+        ir::Instruction vector;
+        vector.opcode = ir::Opcode::VectorBinary;
+        vector.result_type = ir::v128_type();
+        vector.operands = {left, right};
+        vector.arrangement = arrangement;
+        vector.vector_operation = operation;
+        vector.source = source_location(instruction);
+        return emit_value(std::move(vector));
+    }
+
     [[nodiscard]] Result<void> lift_vector_common(const DecodedInstruction& instruction)
     {
         if (instruction.operands.size() < 3U || instruction.operands[0].kind != aarch64::OperandKind::Register ||
@@ -835,19 +851,135 @@ class FunctionLifter
             }
             break;
         }
-        ir::Instruction vector;
-        vector.opcode = ir::Opcode::VectorBinary;
-        vector.result_type = ir::v128_type();
-        vector.operands = {left.value(), right.value()};
-        vector.arrangement = arrangement.value();
-        vector.vector_operation = operation;
-        vector.source = source_location(instruction);
-        const auto result = emit_value(std::move(vector));
+        const auto result = emit_vector_binary(left.value(), right.value(), arrangement.value(), operation,
+                                               instruction);
         if (!result)
         {
             return Result<void>::failure(result.error());
         }
         return write_vector(instruction.operands[0].reg, result.value(), instruction);
+    }
+
+    [[nodiscard]] Result<void> lift_vector_bit_select(const DecodedInstruction& instruction)
+    {
+        if (instruction.operands.size() != 3U ||
+            instruction.operands[0].kind != aarch64::OperandKind::Register ||
+            instruction.operands[1].kind != aarch64::OperandKind::Register ||
+            instruction.operands[2].kind != aarch64::OperandKind::Register ||
+            instruction.operands[0].reg.kind != aarch64::RegisterKind::Vector ||
+            instruction.operands[1].reg.kind != aarch64::RegisterKind::Vector ||
+            instruction.operands[2].reg.kind != aarch64::RegisterKind::Vector)
+        {
+            return Result<void>::failure(unsupported(instruction, "bit-select requires three vector registers"));
+        }
+        const auto arrangement = vector_arrangement(instruction.operands[0], instruction);
+        if (!arrangement || (arrangement.value() != ir::VectorArrangement::B8 &&
+                             arrangement.value() != ir::VectorArrangement::B16))
+        {
+            return Result<void>::failure(!arrangement ? arrangement.error()
+                                                      : unsupported(instruction, "bit-select requires a B8/B16 arrangement"));
+        }
+        const auto destination = read_vector(instruction.operands[0].reg, instruction);
+        const auto first = read_vector(instruction.operands[1].reg, instruction);
+        const auto second = read_vector(instruction.operands[2].reg, instruction);
+        if (!destination || !first || !second)
+        {
+            return Result<void>::failure(!destination ? destination.error()
+                                      : !first ? first.error() : second.error());
+        }
+        // BIF: D = (D & N) | (M & ~N)
+        // BIT: D = (D & ~N) | (M & N)
+        // BSL: D = (N & D) | (M & ~D)
+        const bool bit = instruction.simd_operation == aarch64::SimdOperation::Bit;
+        const bool bsl = instruction.simd_operation == aarch64::SimdOperation::Bsl;
+        const auto preserve_value = bsl ? first.value() : destination.value();
+        const auto mask = bsl ? destination.value() : first.value();
+        const auto preserve = emit_vector_binary(
+            preserve_value, mask, arrangement.value(), bit ? ir::VectorOperation::Bic
+                                                            : ir::VectorOperation::And,
+            instruction);
+        const auto insert = emit_vector_binary(
+            second.value(), mask, arrangement.value(), bit ? ir::VectorOperation::And
+                                                             : ir::VectorOperation::Bic,
+            instruction);
+        if (!preserve || !insert)
+        {
+            return Result<void>::failure(!preserve ? preserve.error() : insert.error());
+        }
+        const auto result = emit_vector_binary(preserve.value(), insert.value(), arrangement.value(),
+                                               ir::VectorOperation::Or, instruction);
+        return result ? write_vector(instruction.operands[0].reg, result.value(), instruction)
+                      : Result<void>::failure(result.error());
+    }
+
+    [[nodiscard]] Result<void> lift_vector_pairwise_add(const DecodedInstruction& instruction)
+    {
+        if (instruction.operands.size() != 3U ||
+            instruction.operands[0].kind != aarch64::OperandKind::Register ||
+            instruction.operands[1].kind != aarch64::OperandKind::Register ||
+            instruction.operands[2].kind != aarch64::OperandKind::Register ||
+            instruction.operands[0].reg.kind != aarch64::RegisterKind::Vector ||
+            instruction.operands[1].reg.kind != aarch64::RegisterKind::Vector ||
+            instruction.operands[2].reg.kind != aarch64::RegisterKind::Vector)
+        {
+            return Result<void>::failure(unsupported(instruction, "FADDP requires three vector registers"));
+        }
+        const auto arrangement = vector_arrangement(instruction.operands[0], instruction);
+        if (!arrangement || (arrangement.value() != ir::VectorArrangement::S2 &&
+                             arrangement.value() != ir::VectorArrangement::S4 &&
+                             arrangement.value() != ir::VectorArrangement::D2))
+        {
+            return Result<void>::failure(!arrangement ? arrangement.error()
+                                                      : unsupported(instruction, "FADDP supports S2, S4, or D2"));
+        }
+        const auto left = read_vector(instruction.operands[1].reg, instruction);
+        const auto right = read_vector(instruction.operands[2].reg, instruction);
+        if (!left || !right)
+        {
+            return Result<void>::failure(!left ? left.error() : right.error());
+        }
+        const bool is_double = arrangement.value() == ir::VectorArrangement::D2;
+        const auto fp_type = is_double ? ir::f64_type() : ir::f32_type();
+        const auto integer_type = is_double ? ir::i64_type() : ir::i32_type();
+        const std::uint8_t pairs_per_source = arrangement.value() == ir::VectorArrangement::S4 ? 2U : 1U;
+        auto result_vector = zero_vector(instruction);
+        if (!result_vector) return Result<void>::failure(result_vector.error());
+        for (std::uint8_t source = 0U; source < 2U; ++source)
+        {
+            const auto input = source == 0U ? left.value() : right.value();
+            for (std::uint8_t pair = 0U; pair < pairs_per_source; ++pair)
+            {
+                const auto first_lane = vector_extract(input, arrangement.value(),
+                                                       static_cast<std::uint8_t>(pair * 2U), instruction);
+                const auto second_lane = vector_extract(input, arrangement.value(),
+                                                        static_cast<std::uint8_t>(pair * 2U + 1U), instruction);
+                if (!first_lane || !second_lane)
+                {
+                    return Result<void>::failure(!first_lane ? first_lane.error() : second_lane.error());
+                }
+                const auto first_fp = bitcast(first_lane.value(), fp_type, instruction);
+                const auto second_fp = bitcast(second_lane.value(), fp_type, instruction);
+                if (!first_fp || !second_fp)
+                {
+                    return Result<void>::failure(!first_fp ? first_fp.error() : second_fp.error());
+                }
+                const auto sum = emit_fp_binary(first_fp.value(), second_fp.value(), fp_type,
+                                                ir::FpBinaryOperation::Add, instruction);
+                if (!sum) return Result<void>::failure(sum.error());
+                const auto sum_bits = bitcast(sum.value(), integer_type, instruction);
+                if (!sum_bits) return Result<void>::failure(sum_bits.error());
+                ir::Instruction insert;
+                insert.opcode = ir::Opcode::VectorInsertLane;
+                insert.result_type = ir::v128_type();
+                insert.operands = {result_vector.value(), sum_bits.value()};
+                insert.arrangement = arrangement.value();
+                insert.lane_index = static_cast<std::uint8_t>(source * pairs_per_source + pair);
+                insert.source = source_location(instruction);
+                result_vector = emit_value(std::move(insert));
+                if (!result_vector) return Result<void>::failure(result_vector.error());
+            }
+        }
+        return write_vector(instruction.operands[0].reg, result_vector.value(), instruction);
     }
 
     struct ArithmeticFlags
@@ -914,7 +1046,7 @@ class FunctionLifter
                        : instruction.operands[0].reg.width == aarch64::RegisterWidth::D64 ? ir::f64_type()
                                                                                           : ir::void_type();
         };
-        if (op == Op::Movi)
+        if (op == Op::Movi || op == Op::Mvni)
         {
             if (instruction.operands.size() != 2U || !destination_is_vector ||
                 instruction.operands[1].kind != aarch64::OperandKind::Immediate)
@@ -965,6 +1097,19 @@ class FunctionLifter
         if (op == Op::St1)
         {
             return lift_vector_lane_store(instruction);
+        }
+        if (op == Op::Ld1 || op == Op::Ld1r || op == Op::Ld2 || op == Op::Ld2r ||
+            op == Op::Ld3 || op == Op::Ld3r || op == Op::Ld4 || op == Op::Ld4r)
+        {
+            return lift_vector_structure_load(instruction);
+        }
+        if (op == Op::Faddp)
+        {
+            return lift_vector_pairwise_add(instruction);
+        }
+        if (op == Op::Bif || op == Op::Bit || op == Op::Bsl)
+        {
+            return lift_vector_bit_select(instruction);
         }
         const auto scalar_binary = [&](ir::FpBinaryOperation operation) -> Result<void> {
             if (instruction.operands.size() != 3U || !destination_is_vector)
@@ -1379,6 +1524,102 @@ class FunctionLifter
             {
                 return flags;
             }
+        }
+        return write_register(instruction.operands[0].reg, result.value(), instruction);
+    }
+
+    [[nodiscard]] Result<void> lift_add_with_carry(const DecodedInstruction& instruction)
+    {
+        const bool negate = instruction.id == aarch64::InstructionId::Sbc ||
+                            instruction.id == aarch64::InstructionId::Sbcs ||
+                            instruction.id == aarch64::InstructionId::Ngc ||
+                            instruction.id == aarch64::InstructionId::Ngcs;
+        const bool set_flags = instruction.id == aarch64::InstructionId::Adcs ||
+                               instruction.id == aarch64::InstructionId::Sbcs ||
+                               instruction.id == aarch64::InstructionId::Ngcs;
+        const bool negated_alias = instruction.id == aarch64::InstructionId::Ngc ||
+                                   instruction.id == aarch64::InstructionId::Ngcs;
+        const std::size_t expected_operands = negated_alias ? 2U : 3U;
+        if (instruction.operands.size() != expected_operands ||
+            instruction.operands[0].kind != aarch64::OperandKind::Register ||
+            instruction.operands[0].reg.kind != aarch64::RegisterKind::General ||
+            (instruction.operands[0].reg.width != aarch64::RegisterWidth::W32 &&
+             instruction.operands[0].reg.width != aarch64::RegisterWidth::X64))
+        {
+            return Result<void>::failure(unsupported(instruction, "ADC/SBC requires W/X scalar registers"));
+        }
+        const auto type = type_for_width(instruction.operands[0].reg.width);
+        Result<ir::ValueId> left = Result<ir::ValueId>::failure(
+            unsupported(instruction, "ADC/SBC operand is not a register"));
+        Result<ir::ValueId> right = left;
+        if (negated_alias)
+        {
+            if (instruction.operands[1].kind != aarch64::OperandKind::Register ||
+                instruction.operands[1].reg.width != instruction.operands[0].reg.width)
+            {
+                return Result<void>::failure(unsupported(instruction, "NGC source width differs from destination"));
+            }
+            left = constant(type, 0U, instruction);
+            right = operand_value(instruction.operands[1], type, instruction);
+        }
+        else
+        {
+            if (instruction.operands[1].kind != aarch64::OperandKind::Register ||
+                instruction.operands[2].kind != aarch64::OperandKind::Register ||
+                instruction.operands[1].reg.width != instruction.operands[0].reg.width ||
+                instruction.operands[2].reg.width != instruction.operands[0].reg.width)
+            {
+                return Result<void>::failure(unsupported(instruction, "ADC/SBC source width differs from destination"));
+            }
+            left = operand_value(instruction.operands[1], type, instruction);
+            right = operand_value(instruction.operands[2], type, instruction);
+        }
+        if (!left || !right)
+        {
+            return Result<void>::failure(!left ? left.error() : right.error());
+        }
+        if (negate)
+        {
+            right = unary(ir::Opcode::Not, right.value(), type, instruction);
+            if (!right) return Result<void>::failure(right.error());
+        }
+        const auto carry = read_flag(ir::Flag::C, instruction);
+        if (!carry) return Result<void>::failure(carry.error());
+        ir::Instruction add;
+        add.opcode = ir::Opcode::AddWithCarry;
+        add.result_type = type;
+        add.operands = {left.value(), right.value(), carry.value()};
+        add.source = source_location(instruction);
+        const auto result = emit_value(std::move(add));
+        if (!result) return Result<void>::failure(result.error());
+        if (set_flags)
+        {
+            const auto zero = constant(type, 0U, instruction);
+            const auto is_zero = zero ? binary(ir::Opcode::CompareEqual, result.value(), zero.value(),
+                                                ir::i1_type(), instruction)
+                                      : Result<ir::ValueId>::failure(zero.error());
+            const auto shift = constant(type, type.bit_width() - 1U, instruction);
+            const auto shifted = shift ? binary(ir::Opcode::LogicalShiftRight, result.value(), shift.value(),
+                                                 type, instruction)
+                                       : Result<ir::ValueId>::failure(shift.error());
+            const auto negative = shifted ? cast(ir::Opcode::Truncate, shifted.value(), ir::i1_type(), instruction)
+                                          : Result<ir::ValueId>::failure(shifted.error());
+            if (!is_zero || !negative) return Result<void>::failure(!is_zero ? is_zero.error() : negative.error());
+            ir::Instruction carry_out;
+            carry_out.opcode = ir::Opcode::AddWithCarryCarry;
+            carry_out.result_type = ir::i1_type();
+            carry_out.operands = {left.value(), right.value(), carry.value()};
+            carry_out.source = source_location(instruction);
+            const auto c = emit_value(std::move(carry_out));
+            ir::Instruction overflow;
+            overflow.opcode = ir::Opcode::AddWithCarryOverflow;
+            overflow.result_type = ir::i1_type();
+            overflow.operands = {left.value(), right.value(), carry.value()};
+            overflow.source = source_location(instruction);
+            const auto v = emit_value(std::move(overflow));
+            if (!c || !v) return Result<void>::failure(!c ? c.error() : v.error());
+            const auto flags = write_flags(ArithmeticFlags{negative.value(), is_zero.value(), c.value(), v.value()}, instruction);
+            if (!flags) return flags;
         }
         return write_register(instruction.operands[0].reg, result.value(), instruction);
     }
@@ -1923,8 +2164,147 @@ class FunctionLifter
         return write_register(instruction.operands[0].reg, result.value(), instruction);
     }
 
+    [[nodiscard]] Result<void> lift_long_multiply(const DecodedInstruction& instruction)
+    {
+        if (instruction.operands.size() != 4U ||
+            instruction.operands[0].kind != aarch64::OperandKind::Register ||
+            instruction.operands[1].kind != aarch64::OperandKind::Register ||
+            instruction.operands[2].kind != aarch64::OperandKind::Register ||
+            instruction.operands[3].kind != aarch64::OperandKind::Register ||
+            instruction.operands[0].reg.kind != aarch64::RegisterKind::General ||
+            instruction.operands[1].reg.kind != aarch64::RegisterKind::General ||
+            instruction.operands[2].reg.kind != aarch64::RegisterKind::General ||
+            instruction.operands[3].reg.kind != aarch64::RegisterKind::General ||
+            instruction.operands[0].reg.width != aarch64::RegisterWidth::X64 ||
+            instruction.operands[1].reg.width != aarch64::RegisterWidth::W32 ||
+            instruction.operands[2].reg.width != aarch64::RegisterWidth::W32 ||
+            instruction.operands[3].reg.width != aarch64::RegisterWidth::X64)
+        {
+            return Result<void>::failure(unsupported(
+                instruction, "long multiply-add requires X destination/accumulator and W sources"));
+        }
+        const auto left = read_register(instruction.operands[1].reg, instruction);
+        const auto right = read_register(instruction.operands[2].reg, instruction);
+        const auto accumulator = read_register(instruction.operands[3].reg, instruction);
+        if (!left || !right || !accumulator)
+        {
+            return Result<void>::failure(!left ? left.error() : !right ? right.error() : accumulator.error());
+        }
+        const bool signed_operation = instruction.id == aarch64::InstructionId::Smaddl ||
+                                      instruction.id == aarch64::InstructionId::Smsubl;
+        const auto extend = [&](ir::ValueId value) {
+            return cast(signed_operation ? ir::Opcode::SignExtend : ir::Opcode::ZeroExtend,
+                        value, ir::i64_type(), instruction);
+        };
+        const auto left_wide = extend(left.value());
+        const auto right_wide = extend(right.value());
+        if (!left_wide || !right_wide)
+        {
+            return Result<void>::failure(!left_wide ? left_wide.error() : right_wide.error());
+        }
+        const auto product = binary(ir::Opcode::Mul, left_wide.value(), right_wide.value(),
+                                     ir::i64_type(), instruction);
+        if (!product)
+        {
+            return Result<void>::failure(product.error());
+        }
+        const bool subtract = instruction.id == aarch64::InstructionId::Umsubl ||
+                              instruction.id == aarch64::InstructionId::Smsubl;
+        const auto result = binary(subtract ? ir::Opcode::Sub : ir::Opcode::Add,
+                                   accumulator.value(), product.value(), ir::i64_type(), instruction);
+        return result ? write_register(instruction.operands[0].reg, result.value(), instruction)
+                      : Result<void>::failure(result.error());
+    }
+
+    [[nodiscard]] Result<void> lift_crc32(const DecodedInstruction& instruction)
+    {
+        if (instruction.operands.size() != 3U || instruction.crc_width == 0U ||
+            instruction.crc_width > 64U || (instruction.crc_width % 8U) != 0U ||
+            instruction.operands[0].kind != aarch64::OperandKind::Register ||
+            instruction.operands[1].kind != aarch64::OperandKind::Register ||
+            instruction.operands[2].kind != aarch64::OperandKind::Register ||
+            instruction.operands[0].reg.width != aarch64::RegisterWidth::W32 ||
+            instruction.operands[1].reg.width != aarch64::RegisterWidth::W32 ||
+            (instruction.crc_width == 64U
+                 ? instruction.operands[2].reg.width != aarch64::RegisterWidth::X64
+                 : instruction.operands[2].reg.width != aarch64::RegisterWidth::W32))
+        {
+            return Result<void>::failure(unsupported(instruction, "CRC32 requires a W accumulator and matching source form"));
+        }
+        const auto accumulator = read_register(instruction.operands[1].reg, instruction);
+        const auto source = read_register(instruction.operands[2].reg, instruction);
+        if (!accumulator || !source)
+        {
+            return Result<void>::failure(!accumulator ? accumulator.error() : source.error());
+        }
+        ir::Instruction crc;
+        crc.opcode = ir::Opcode::Crc32;
+        crc.result_type = ir::i32_type();
+        crc.operands = {accumulator.value(), source.value()};
+        crc.memory_size = static_cast<std::uint8_t>(instruction.crc_width / 8U);
+        crc.signed_operation = instruction.crc32c;
+        crc.source = source_location(instruction);
+        const auto result = emit_value(std::move(crc));
+        return result ? write_register(instruction.operands[0].reg, result.value(), instruction)
+                      : Result<void>::failure(result.error());
+    }
+
+    [[nodiscard]] Result<void> lift_reverse(const DecodedInstruction& instruction)
+    {
+        if (instruction.operands.size() != 2U ||
+            instruction.operands[0].kind != aarch64::OperandKind::Register ||
+            instruction.operands[1].kind != aarch64::OperandKind::Register ||
+            instruction.operands[0].reg.kind != aarch64::RegisterKind::General ||
+            instruction.operands[1].reg.kind != aarch64::RegisterKind::General ||
+            instruction.operands[0].reg.width != instruction.operands[1].reg.width ||
+            (instruction.operands[0].reg.width != aarch64::RegisterWidth::W32 &&
+             instruction.operands[0].reg.width != aarch64::RegisterWidth::X64))
+        {
+            return Result<void>::failure(unsupported(instruction, "REV requires matching W/X scalar registers"));
+        }
+        const auto type = instruction.operands[0].reg.width == aarch64::RegisterWidth::W32
+                              ? ir::i32_type() : ir::i64_type();
+        const unsigned int bytes = type.bit_width() / 8U;
+        const auto source = read_register(instruction.operands[1].reg, instruction);
+        const auto zero = constant(type, 0U, instruction);
+        const auto mask = constant(type, 0xffU, instruction);
+        if (!source || !zero || !mask)
+        {
+            return Result<void>::failure(!source ? source.error() : !zero ? zero.error() : mask.error());
+        }
+        auto result = zero.value();
+        for (unsigned int input = 0U; input < bytes; ++input)
+        {
+            const auto source_shift = constant(type, input * 8U, instruction);
+            if (!source_shift) return Result<void>::failure(source_shift.error());
+            const auto shifted = binary(ir::Opcode::LogicalShiftRight, source.value(), source_shift.value(),
+                                        type, instruction);
+            if (!shifted) return Result<void>::failure(shifted.error());
+            const auto byte = binary(ir::Opcode::And, shifted.value(), mask.value(), type, instruction);
+            if (!byte) return Result<void>::failure(byte.error());
+            const unsigned int output = instruction.id == aarch64::InstructionId::Rev16
+                                            ? input ^ 1U : bytes - 1U - input;
+            const auto output_shift = constant(type, output * 8U, instruction);
+            if (!output_shift) return Result<void>::failure(output_shift.error());
+            const auto placed = binary(ir::Opcode::ShiftLeft, byte.value(), output_shift.value(),
+                                       type, instruction);
+            if (!placed) return Result<void>::failure(placed.error());
+            const auto combined = binary(ir::Opcode::Or, result, placed.value(), type, instruction);
+            if (!combined) return Result<void>::failure(combined.error());
+            result = combined.value();
+        }
+        return write_register(instruction.operands[0].reg, result, instruction);
+    }
+
     [[nodiscard]] Result<void> lift_multiply(const DecodedInstruction& instruction)
     {
+        if (instruction.id == aarch64::InstructionId::Umaddl ||
+            instruction.id == aarch64::InstructionId::Umsubl ||
+            instruction.id == aarch64::InstructionId::Smaddl ||
+            instruction.id == aarch64::InstructionId::Smsubl)
+        {
+            return lift_long_multiply(instruction);
+        }
         if (instruction.operands.size() < 3U || instruction.operands[0].kind != aarch64::OperandKind::Register ||
             instruction.operands[1].kind != aarch64::OperandKind::Register)
         {
@@ -2535,6 +2915,292 @@ class FunctionLifter
         return writeback_memory(memory_operand, base.value(), false, instruction);
     }
 
+    [[nodiscard]] Result<void> lift_vector_structure_load(const DecodedInstruction& instruction)
+    {
+        using Op = aarch64::SimdOperation;
+        const auto op = instruction.simd_operation;
+        const auto destination_count_for = [&]() -> std::size_t {
+            switch (op)
+            {
+            case Op::Ld1:
+                return 0U; // LD1 has one through four destinations.
+            case Op::Ld1r:
+            case Op::Ld2r:
+            case Op::Ld3r:
+            case Op::Ld4r:
+                return op == Op::Ld1r ? 1U : op == Op::Ld2r ? 2U : op == Op::Ld3r ? 3U : 4U;
+            case Op::Ld2: return 2U;
+            case Op::Ld3: return 3U;
+            case Op::Ld4: return 4U;
+            default: return 0U;
+            }
+        };
+        const auto memory_index = std::find_if(
+            instruction.operands.begin(), instruction.operands.end(),
+            [](const aarch64::Operand& operand) { return operand.kind == aarch64::OperandKind::Memory; });
+        if (memory_index == instruction.operands.end())
+        {
+            return Result<void>::failure(unsupported(instruction,
+                                                      "structure load has no memory operand"));
+        }
+        const auto destination_count = static_cast<std::size_t>(
+            memory_index - instruction.operands.begin());
+        const auto fixed_destination_count = destination_count_for();
+        if ((op != Op::Ld1 && destination_count != fixed_destination_count) ||
+            (op == Op::Ld1 && (destination_count < 1U || destination_count > 4U)) ||
+            instruction.operands.size() > destination_count + 2U)
+        {
+            return Result<void>::failure(unsupported(instruction,
+                                                      "structure load has an invalid register list"));
+        }
+        const auto& memory_operand = *memory_index;
+        const bool has_register_post_index = instruction.operands.size() == destination_count + 2U;
+        if (has_register_post_index &&
+            (memory_operand.memory.addressing != aarch64::MemoryAddressingMode::PostIndex ||
+             instruction.operands.back().kind != aarch64::OperandKind::Register ||
+             instruction.operands.back().reg.kind != aarch64::RegisterKind::General ||
+             instruction.operands.back().reg.width != aarch64::RegisterWidth::X64))
+        {
+            return Result<void>::failure(unsupported(
+                instruction, "structure load register post-index requires an X register"));
+        }
+        if (memory_operand.memory.addressing != aarch64::MemoryAddressingMode::Base &&
+            memory_operand.memory.addressing != aarch64::MemoryAddressingMode::PreIndex &&
+            memory_operand.memory.addressing != aarch64::MemoryAddressingMode::PostIndex)
+        {
+            return Result<void>::failure(unsupported(
+                instruction, "structure load requires base or writeback addressing"));
+        }
+
+        const bool replicate = op == Op::Ld1r || op == Op::Ld2r || op == Op::Ld3r || op == Op::Ld4r;
+        const bool lane_load = op == Op::Ld1 &&
+                               instruction.operands[0].kind == aarch64::OperandKind::Register &&
+                               instruction.operands[0].vector_index >= 0;
+        if (lane_load && destination_count != 1U)
+        {
+            return Result<void>::failure(unsupported(instruction,
+                                                      "single-lane LD1 has one destination"));
+        }
+        if (replicate && destination_count != fixed_destination_count)
+        {
+            return Result<void>::failure(unsupported(instruction,
+                                                      "replicate structure load has an invalid register list"));
+        }
+        if (instruction.operands.size() != destination_count + 1U && !has_register_post_index)
+        {
+            return Result<void>::failure(unsupported(instruction,
+                                                      "structure load has an invalid post-index operand"));
+        }
+
+        const auto& first_operand = instruction.operands[0];
+        if (first_operand.kind != aarch64::OperandKind::Register ||
+            !is_vector_register(first_operand.reg) ||
+            first_operand.arrangement == aarch64::VectorArrangement::Invalid)
+        {
+            return Result<void>::failure(unsupported(
+                instruction, "structure load requires typed vector destinations"));
+        }
+        const auto arrangement = ir_arrangement(first_operand.arrangement);
+        if (arrangement == ir::VectorArrangement::Raw128)
+        {
+            return Result<void>::failure(unsupported(
+                instruction, "structure load requires a B/H/S/D arrangement"));
+        }
+        if (!lane_load && (op == Op::Ld2 || op == Op::Ld3 || op == Op::Ld4) &&
+            first_operand.arrangement == aarch64::VectorArrangement::D1)
+        {
+            return Result<void>::failure(unsupported(
+                instruction, "multi-structure load does not support a one-lane D arrangement"));
+        }
+        const auto element_bits = aarch64::vector_element_bits(first_operand.arrangement);
+        const auto lane_count = aarch64::vector_lane_count(first_operand.arrangement);
+        if (element_bits == 0U || lane_count == 0U || element_bits % 8U != 0U)
+        {
+            return Result<void>::failure(unsupported(
+                instruction, "structure load arrangement has no byte-sized lanes"));
+        }
+        const auto element_bytes = static_cast<std::uint8_t>(element_bits / 8U);
+        const auto raw_type = element_bits == 8U ? ir::i8_type()
+                              : element_bits == 16U ? ir::i16_type()
+                              : element_bits == 32U ? ir::i32_type() : ir::i64_type();
+        const auto base = read_register(memory_operand.memory.base, instruction);
+        const auto address = address_for_memory(memory_operand, instruction);
+        if (!base || !address)
+        {
+            return Result<void>::failure(!base ? base.error() : address.error());
+        }
+        const auto pre_writeback = writeback_memory(memory_operand, base.value(), true, instruction);
+        if (!pre_writeback)
+        {
+            return pre_writeback;
+        }
+
+        for (std::size_t destination = 0U; destination < destination_count; ++destination)
+        {
+            const auto& operand = instruction.operands[destination];
+            if (operand.kind != aarch64::OperandKind::Register || !is_vector_register(operand.reg) ||
+                operand.arrangement != first_operand.arrangement ||
+                operand.reg.index != static_cast<std::uint8_t>((first_operand.reg.index + destination) % 32U))
+            {
+                return Result<void>::failure(unsupported(
+                    instruction, "structure load destinations must be consecutive and equally arranged"));
+            }
+        }
+
+        auto current_address = address.value();
+        const auto advance = [&](ir::ValueId current) -> Result<ir::ValueId> {
+            ir::Instruction add;
+            add.opcode = ir::Opcode::GuestAddressAdd;
+            add.result_type = ir::i64_type();
+            add.operands = {current};
+            add.immediate = static_cast<std::int64_t>(element_bytes);
+            add.source = source_location(instruction);
+            return emit_value(std::move(add));
+        };
+        const auto load_element = [&](ir::ValueId element_address) -> Result<ir::ValueId> {
+            ir::Instruction load;
+            load.opcode = ir::Opcode::GuestLoad;
+            load.result_type = raw_type;
+            load.operands = {element_address};
+            load.memory_size = element_bytes;
+            load.source = source_location(instruction);
+            return emit_value(std::move(load));
+        };
+        const auto insert_element = [&](ir::ValueId vector, ir::ValueId element,
+                                        std::uint8_t lane) -> Result<ir::ValueId> {
+            ir::Instruction insert;
+            insert.opcode = ir::Opcode::VectorInsertLane;
+            insert.result_type = ir::v128_type();
+            insert.operands = {vector, element};
+            insert.arrangement = arrangement;
+            insert.lane_index = lane;
+            insert.source = source_location(instruction);
+            return emit_value(std::move(insert));
+        };
+
+        if (lane_load)
+        {
+            const auto lane = static_cast<std::uint8_t>(first_operand.vector_index);
+            if (lane >= lane_count)
+            {
+                return Result<void>::failure(unsupported(
+                    instruction, "single-lane LD1 index is outside the arrangement"));
+            }
+            const auto old_vector = read_vector(first_operand.reg, instruction);
+            const auto element = load_element(current_address);
+            if (!old_vector || !element)
+            {
+                return Result<void>::failure(!old_vector ? old_vector.error() : element.error());
+            }
+            const auto result = insert_element(old_vector.value(), element.value(), lane);
+            if (!result)
+            {
+                return Result<void>::failure(result.error());
+            }
+            const auto written = write_vector(first_operand.reg, result.value(), instruction);
+            if (!written)
+            {
+                return written;
+            }
+        }
+        else
+        {
+            std::vector<ir::ValueId> result_vectors;
+            result_vectors.reserve(destination_count);
+            for (std::size_t destination = 0U; destination < destination_count; ++destination)
+            {
+                const auto old_vector = read_vector(instruction.operands[destination].reg, instruction);
+                if (!old_vector)
+                {
+                    return Result<void>::failure(old_vector.error());
+                }
+                result_vectors.push_back(old_vector.value());
+            }
+            if (replicate)
+            {
+                for (std::size_t destination = 0U; destination < destination_count; ++destination)
+                {
+                    const auto element = load_element(current_address);
+                    if (!element)
+                    {
+                        return Result<void>::failure(element.error());
+                    }
+                    for (std::uint8_t lane = 0U; lane < lane_count; ++lane)
+                    {
+                        const auto result = insert_element(result_vectors[destination], element.value(), lane);
+                        if (!result)
+                        {
+                            return Result<void>::failure(result.error());
+                        }
+                        result_vectors[destination] = result.value();
+                    }
+                    if (destination + 1U < destination_count)
+                    {
+                        const auto next = advance(current_address);
+                        if (!next) return Result<void>::failure(next.error());
+                        current_address = next.value();
+                    }
+                }
+            }
+            else
+            {
+                const auto structure_count = destination_count;
+                for (std::uint8_t lane = 0U; lane < lane_count; ++lane)
+                {
+                    for (std::size_t destination = 0U; destination < structure_count; ++destination)
+                    {
+                        const auto element = load_element(current_address);
+                        if (!element)
+                        {
+                            return Result<void>::failure(element.error());
+                        }
+                        const auto result = insert_element(
+                            result_vectors[destination], element.value(), lane);
+                        if (!result)
+                        {
+                            return Result<void>::failure(result.error());
+                        }
+                        result_vectors[destination] = result.value();
+                        if (lane + 1U < lane_count || destination + 1U < structure_count)
+                        {
+                            const auto next = advance(current_address);
+                            if (!next) return Result<void>::failure(next.error());
+                            current_address = next.value();
+                        }
+                    }
+                }
+            }
+            for (std::size_t destination = 0U; destination < destination_count; ++destination)
+            {
+                const auto written = write_vector(instruction.operands[destination].reg,
+                                                   result_vectors[destination], instruction);
+                if (!written)
+                {
+                    return written;
+                }
+            }
+        }
+
+        if (has_register_post_index)
+        {
+            const auto offset = read_register(instruction.operands.back().reg, instruction);
+            if (!offset)
+            {
+                return Result<void>::failure(offset.error());
+            }
+            ir::Instruction add;
+            add.opcode = ir::Opcode::GuestAddressAddValue;
+            add.result_type = ir::i64_type();
+            add.operands = {base.value(), offset.value()};
+            add.address_offset_signed = false;
+            add.source = source_location(instruction);
+            const auto updated = emit_value(std::move(add));
+            if (!updated) return Result<void>::failure(updated.error());
+            return write_register(memory_operand.memory.base, updated.value(), instruction);
+        }
+        return writeback_memory(memory_operand, base.value(), false, instruction);
+    }
+
     [[nodiscard]] Result<void> lift_vector_lane_store(const DecodedInstruction& instruction)
     {
         if (instruction.operands.size() != 2U ||
@@ -2992,6 +3658,13 @@ class FunctionLifter
         const auto& flow = instruction.control_flow;
         ir::Terminator terminator;
         terminator.source = source_location(instruction);
+        if (flow.kind == aarch64::ControlFlowKind::Trap &&
+            instruction.id == aarch64::InstructionId::Udf)
+        {
+            terminator.kind = ir::TerminatorKind::Trap;
+            terminator.trap_reason = "udf";
+            return builder_.set_terminator(std::move(terminator));
+        }
         if (flow.kind == aarch64::ControlFlowKind::Return)
         {
             const auto return_register = flow.return_register.value_or(aarch64::Register{
@@ -3342,6 +4015,7 @@ class FunctionLifter
                 }
                 case aarch64::InstructionId::Ret:
                 case aarch64::InstructionId::Br:
+                case aarch64::InstructionId::Udf:
                     break;
                 default:
                     if (instruction.control_flow.kind != aarch64::ControlFlowKind::Return)
@@ -3404,6 +4078,7 @@ class FunctionLifter
         switch (instruction.id)
         {
         case aarch64::InstructionId::Nop:
+        case aarch64::InstructionId::Prfm:
             return emit_void(ir::Instruction{ir::Opcode::Nop, ir::invalid_value, ir::void_type(), {}, {},
                                              ir::Flag::N, ir::ConditionCode::Al, 0, 0, 0,
                                              source_location(instruction)});
@@ -3419,6 +4094,13 @@ class FunctionLifter
             return lift_arithmetic(instruction, ir::Opcode::Add, false);
         case aarch64::InstructionId::Adds:
             return lift_arithmetic(instruction, ir::Opcode::Add, true);
+        case aarch64::InstructionId::Adc:
+        case aarch64::InstructionId::Adcs:
+        case aarch64::InstructionId::Sbc:
+        case aarch64::InstructionId::Sbcs:
+        case aarch64::InstructionId::Ngc:
+        case aarch64::InstructionId::Ngcs:
+            return lift_add_with_carry(instruction);
         case aarch64::InstructionId::Sub:
             return lift_arithmetic(instruction, ir::Opcode::Sub, false);
         case aarch64::InstructionId::Subs:
@@ -3494,7 +4176,16 @@ class FunctionLifter
         case aarch64::InstructionId::Mneg:
         case aarch64::InstructionId::Umulh:
         case aarch64::InstructionId::Smulh:
+        case aarch64::InstructionId::Umaddl:
+        case aarch64::InstructionId::Umsubl:
+        case aarch64::InstructionId::Smaddl:
+        case aarch64::InstructionId::Smsubl:
             return lift_multiply(instruction);
+        case aarch64::InstructionId::Crc32:
+            return lift_crc32(instruction);
+        case aarch64::InstructionId::Rev:
+        case aarch64::InstructionId::Rev16:
+            return lift_reverse(instruction);
         case aarch64::InstructionId::Udiv:
         case aarch64::InstructionId::Sdiv:
             return lift_divide(instruction);
@@ -3558,9 +4249,16 @@ bool is_instruction_liftable(aarch64::InstructionId id) noexcept
 {
     switch (id)
     {
+    case aarch64::InstructionId::Udf:
     case aarch64::InstructionId::Nop:
     case aarch64::InstructionId::Add:
     case aarch64::InstructionId::Adds:
+    case aarch64::InstructionId::Adc:
+    case aarch64::InstructionId::Adcs:
+    case aarch64::InstructionId::Sbc:
+    case aarch64::InstructionId::Sbcs:
+    case aarch64::InstructionId::Ngc:
+    case aarch64::InstructionId::Ngcs:
     case aarch64::InstructionId::Sub:
     case aarch64::InstructionId::Subs:
     case aarch64::InstructionId::And:
@@ -3608,6 +4306,14 @@ bool is_instruction_liftable(aarch64::InstructionId id) noexcept
     case aarch64::InstructionId::Mneg:
     case aarch64::InstructionId::Umulh:
     case aarch64::InstructionId::Smulh:
+    case aarch64::InstructionId::Umaddl:
+    case aarch64::InstructionId::Umsubl:
+    case aarch64::InstructionId::Smaddl:
+    case aarch64::InstructionId::Smsubl:
+    case aarch64::InstructionId::Crc32:
+    case aarch64::InstructionId::Prfm:
+    case aarch64::InstructionId::Rev:
+    case aarch64::InstructionId::Rev16:
     case aarch64::InstructionId::Adr:
     case aarch64::InstructionId::Adrp:
     case aarch64::InstructionId::Ldr:
@@ -3682,6 +4388,67 @@ bool is_instruction_liftable(const aarch64::DecodedInstruction& instruction) noe
     {
         return false;
     }
+    const auto register_operand = [&instruction](std::size_t index) {
+        return index < instruction.operands.size() &&
+               instruction.operands[index].kind == aarch64::OperandKind::Register;
+    };
+    if (instruction.id == aarch64::InstructionId::Adc ||
+        instruction.id == aarch64::InstructionId::Adcs ||
+        instruction.id == aarch64::InstructionId::Sbc ||
+        instruction.id == aarch64::InstructionId::Sbcs)
+    {
+        return instruction.operands.size() == 3U && register_operand(0U) && register_operand(1U) &&
+               register_operand(2U) && instruction.operands[0].reg.kind == aarch64::RegisterKind::General &&
+               instruction.operands[1].reg.kind == aarch64::RegisterKind::General &&
+               instruction.operands[2].reg.kind == aarch64::RegisterKind::General &&
+               instruction.operands[0].reg.width == instruction.operands[1].reg.width &&
+               instruction.operands[0].reg.width == instruction.operands[2].reg.width &&
+               (instruction.operands[0].reg.width == aarch64::RegisterWidth::W32 ||
+                instruction.operands[0].reg.width == aarch64::RegisterWidth::X64);
+    }
+    if (instruction.id == aarch64::InstructionId::Ngc ||
+        instruction.id == aarch64::InstructionId::Ngcs)
+    {
+        return instruction.operands.size() == 2U && register_operand(0U) && register_operand(1U) &&
+               instruction.operands[0].reg.kind == aarch64::RegisterKind::General &&
+               instruction.operands[1].reg.kind == aarch64::RegisterKind::General &&
+               instruction.operands[0].reg.width == instruction.operands[1].reg.width &&
+               (instruction.operands[0].reg.width == aarch64::RegisterWidth::W32 ||
+                instruction.operands[0].reg.width == aarch64::RegisterWidth::X64);
+    }
+    if (instruction.id == aarch64::InstructionId::Crc32)
+    {
+        return instruction.operands.size() == 3U && instruction.crc_width != 0U &&
+               instruction.crc_width <= 64U && (instruction.crc_width % 8U) == 0U &&
+               register_operand(0U) && register_operand(1U) && register_operand(2U) &&
+               instruction.operands[0].reg.width == aarch64::RegisterWidth::W32 &&
+               instruction.operands[1].reg.width == aarch64::RegisterWidth::W32 &&
+               (instruction.crc_width == 64U
+                    ? instruction.operands[2].reg.width == aarch64::RegisterWidth::X64
+                    : instruction.operands[2].reg.width == aarch64::RegisterWidth::W32);
+    }
+    if (instruction.id == aarch64::InstructionId::Umaddl ||
+        instruction.id == aarch64::InstructionId::Umsubl ||
+        instruction.id == aarch64::InstructionId::Smaddl ||
+        instruction.id == aarch64::InstructionId::Smsubl)
+    {
+        return instruction.operands.size() == 4U && register_operand(0U) && register_operand(1U) &&
+               register_operand(2U) && register_operand(3U) &&
+               instruction.operands[0].reg.width == aarch64::RegisterWidth::X64 &&
+               instruction.operands[1].reg.width == aarch64::RegisterWidth::W32 &&
+               instruction.operands[2].reg.width == aarch64::RegisterWidth::W32 &&
+               instruction.operands[3].reg.width == aarch64::RegisterWidth::X64;
+    }
+    if (instruction.id == aarch64::InstructionId::Rev ||
+        instruction.id == aarch64::InstructionId::Rev16)
+    {
+        return instruction.operands.size() == 2U && register_operand(0U) && register_operand(1U) &&
+               instruction.operands[0].reg.kind == aarch64::RegisterKind::General &&
+               instruction.operands[1].reg.kind == aarch64::RegisterKind::General &&
+               instruction.operands[0].reg.width == instruction.operands[1].reg.width &&
+               (instruction.operands[0].reg.width == aarch64::RegisterWidth::W32 ||
+                instruction.operands[0].reg.width == aarch64::RegisterWidth::X64);
+    }
     if (instruction.id != aarch64::InstructionId::FpSimd)
     {
         return is_instruction_liftable(instruction.id);
@@ -3732,12 +4499,125 @@ bool is_instruction_liftable(const aarch64::DecodedInstruction& instruction) noe
     case aarch64::SimdOperation::Cmhi:
     case aarch64::SimdOperation::Cmhs:
         return true;
+    case aarch64::SimdOperation::Faddp:
+        return instruction.operands.size() == 3U &&
+               instruction.operands[0].kind == aarch64::OperandKind::Register &&
+               instruction.operands[1].kind == aarch64::OperandKind::Register &&
+               instruction.operands[2].kind == aarch64::OperandKind::Register &&
+               instruction.operands[0].reg.kind == aarch64::RegisterKind::Vector &&
+               instruction.operands[1].reg.kind == aarch64::RegisterKind::Vector &&
+               instruction.operands[2].reg.kind == aarch64::RegisterKind::Vector &&
+               (instruction.operands[0].arrangement == aarch64::VectorArrangement::S2 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::S4 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::D2);
+    case aarch64::SimdOperation::Bif:
+    case aarch64::SimdOperation::Bit:
+    case aarch64::SimdOperation::Bsl:
+        return instruction.operands.size() == 3U &&
+               instruction.operands[0].kind == aarch64::OperandKind::Register &&
+               instruction.operands[1].kind == aarch64::OperandKind::Register &&
+               instruction.operands[2].kind == aarch64::OperandKind::Register &&
+               instruction.operands[0].reg.kind == aarch64::RegisterKind::Vector &&
+               instruction.operands[1].reg.kind == aarch64::RegisterKind::Vector &&
+               instruction.operands[2].reg.kind == aarch64::RegisterKind::Vector &&
+               (instruction.operands[0].arrangement == aarch64::VectorArrangement::B8 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::B16);
     case aarch64::SimdOperation::Movi:
+    case aarch64::SimdOperation::Mvni:
         return instruction.operands.size() == 2U &&
                instruction.operands[0].kind == aarch64::OperandKind::Register &&
                instruction.operands[0].reg.kind == aarch64::RegisterKind::Vector &&
-               instruction.operands[0].arrangement != aarch64::VectorArrangement::Invalid &&
+               (instruction.operands[0].arrangement == aarch64::VectorArrangement::B8 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::B16 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::H4 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::H8 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::S2 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::S4 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::D1 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::D2) &&
                instruction.operands[1].kind == aarch64::OperandKind::Immediate;
+    case aarch64::SimdOperation::Ld1:
+    case aarch64::SimdOperation::Ld1r:
+    case aarch64::SimdOperation::Ld2:
+    case aarch64::SimdOperation::Ld2r:
+    case aarch64::SimdOperation::Ld3:
+    case aarch64::SimdOperation::Ld3r:
+    case aarch64::SimdOperation::Ld4:
+    case aarch64::SimdOperation::Ld4r:
+    {
+        const auto vector_register = [](const aarch64::Operand& operand) {
+            return operand.kind == aarch64::OperandKind::Register &&
+                   operand.reg.kind == aarch64::RegisterKind::Vector && operand.reg.index < 32U;
+        };
+        const auto memory = std::find_if(
+            instruction.operands.begin(), instruction.operands.end(),
+            [](const aarch64::Operand& operand) { return operand.kind == aarch64::OperandKind::Memory; });
+        if (memory == instruction.operands.end()) return false;
+        const auto destination_count = static_cast<std::size_t>(
+            memory - instruction.operands.begin());
+        const auto fixed_count = instruction.simd_operation == aarch64::SimdOperation::Ld1r ||
+                                         instruction.simd_operation == aarch64::SimdOperation::Ld2r ||
+                                         instruction.simd_operation == aarch64::SimdOperation::Ld3r ||
+                                         instruction.simd_operation == aarch64::SimdOperation::Ld4r
+                                     ? instruction.simd_operation == aarch64::SimdOperation::Ld1r
+                                           ? 1U
+                                           : instruction.simd_operation == aarch64::SimdOperation::Ld2r
+                                                 ? 2U
+                                                 : instruction.simd_operation == aarch64::SimdOperation::Ld3r ? 3U : 4U
+                                     : instruction.simd_operation == aarch64::SimdOperation::Ld2
+                                           ? 2U
+                                           : instruction.simd_operation == aarch64::SimdOperation::Ld3
+                                                 ? 3U
+                                                 : instruction.simd_operation == aarch64::SimdOperation::Ld4 ? 4U : 0U;
+        if ((instruction.simd_operation != aarch64::SimdOperation::Ld1 &&
+             destination_count != fixed_count) ||
+            (instruction.simd_operation == aarch64::SimdOperation::Ld1 &&
+             (destination_count < 1U || destination_count > 4U)) ||
+            (instruction.operands.size() != destination_count + 1U &&
+             instruction.operands.size() != destination_count + 2U) ||
+            !vector_register(instruction.operands[0]) ||
+            instruction.operands[0].arrangement == aarch64::VectorArrangement::Invalid)
+            return false;
+        const auto arrangement = instruction.operands[0].arrangement;
+        if ((instruction.simd_operation == aarch64::SimdOperation::Ld2 ||
+             instruction.simd_operation == aarch64::SimdOperation::Ld2r ||
+             instruction.simd_operation == aarch64::SimdOperation::Ld3 ||
+             instruction.simd_operation == aarch64::SimdOperation::Ld3r ||
+             instruction.simd_operation == aarch64::SimdOperation::Ld4 ||
+             instruction.simd_operation == aarch64::SimdOperation::Ld4r) &&
+            arrangement == aarch64::VectorArrangement::D1)
+            return false;
+        const auto lanes = aarch64::vector_lane_count(arrangement);
+        const auto bits = aarch64::vector_element_bits(arrangement);
+        if (lanes == 0U || bits == 0U || bits % 8U != 0U)
+            return false;
+        if (instruction.simd_operation == aarch64::SimdOperation::Ld1 &&
+            instruction.operands[0].vector_index >= 0 &&
+            (destination_count != 1U || static_cast<std::uint8_t>(instruction.operands[0].vector_index) >= lanes))
+            return false;
+        const bool register_post_index = instruction.operands.size() == destination_count + 2U;
+        if (register_post_index &&
+            (memory->memory.addressing != aarch64::MemoryAddressingMode::PostIndex ||
+             instruction.operands.back().kind != aarch64::OperandKind::Register ||
+             instruction.operands.back().reg.kind != aarch64::RegisterKind::General ||
+             instruction.operands.back().reg.width != aarch64::RegisterWidth::X64))
+            return false;
+        if (memory->memory.base.kind != aarch64::RegisterKind::General ||
+            memory->memory.base.width != aarch64::RegisterWidth::X64 ||
+            (memory->memory.addressing != aarch64::MemoryAddressingMode::Base &&
+             memory->memory.addressing != aarch64::MemoryAddressingMode::PreIndex &&
+             memory->memory.addressing != aarch64::MemoryAddressingMode::PostIndex))
+            return false;
+        for (std::size_t destination = 0U; destination < destination_count; ++destination)
+        {
+            if (!vector_register(instruction.operands[destination]) ||
+                instruction.operands[destination].arrangement != arrangement ||
+                instruction.operands[destination].reg.index !=
+                    static_cast<std::uint8_t>((instruction.operands[0].reg.index + destination) % 32U))
+                return false;
+        }
+        return true;
+    }
     case aarch64::SimdOperation::St1:
         return instruction.operands.size() == 2U &&
                instruction.operands[0].kind == aarch64::OperandKind::Register &&

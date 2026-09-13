@@ -15,11 +15,12 @@ using GuestAddress = memory::GuestAddress;
 
 enum class SimdOperation : std::uint8_t
 {
-    None, Fmov, Movi, Fadd, Fsub, Fmul, Fdiv, Fneg, Fabs, Fsqrt, Fmin, Fmax, Fcmp, Fcmpe,
+    None, Fmov, Movi, Mvni, Fadd, Faddp, Fsub, Fmul, Fdiv, Fneg, Fabs, Fsqrt, Fmin, Fmax, Fcmp, Fcmpe,
     Fccmp, Fccmpe,
     Fcsel, Scvtf, Ucvtf, Fcvtzs, Fcvtzu, Fcvt, Frintn, Frintp, Frintm, Frintz,
     Fmadd, Fmsub, Fnmadd, Fnmsub, Dup, Ins, Umov, Smov, Ext, Zip1, Zip2, Uzp1, Uzp2,
-    Trn1, Trn2, Fcmeq, Fcmgt, Fcmge, Cmeq, Cmgt, Cmge, Cmhi, Cmhs, St1,
+    Trn1, Trn2, Fcmeq, Fcmgt, Fcmge, Cmeq, Cmgt, Cmge, Cmhi, Cmhs,
+    Bif, Bit, Bsl, St1, Ld1, Ld1r, Ld2, Ld2r, Ld3, Ld3r, Ld4, Ld4r,
 };
 
 enum class AtomicMemoryOrder : std::uint8_t { Relaxed, Acquire, Release };
@@ -32,12 +33,15 @@ enum class SystemRegister : std::uint8_t { None, TpidrEl0, TpidrroEl0 };
 enum class InstructionId : std::uint16_t
 {
     Unknown,
+    Udf,
     Nop,
-    Add, Adds, Sub, Subs, And, Ands, Orr, Orn, Eor, Eon, Bic, Bics,
+    Add, Adds, Sub, Subs, Adc, Adcs, Sbc, Sbcs, Ngc, Ngcs,
+    And, Ands, Orr, Orn, Eor, Eon, Bic, Bics,
     Mov, Mvn, Cmp, Cmn, Ccmp, Ccmn, Tst, Neg, Negs,
     Csel, Csinc, Csinv, Csneg, Cset, Csetm, Cinc, Cinv, Cneg,
     Movz, Movk, Movn, Lsl, Lsr, Asr, Ror, Ubfm, Sbfm, Bfm, Extr,
-    Mul, Madd, Msub, Mneg, Umulh, Smulh, Udiv, Sdiv, Adr, Adrp,
+    Mul, Madd, Msub, Mneg, Umulh, Smulh, Umaddl, Umsubl, Smaddl, Smsubl,
+    Udiv, Sdiv, Crc32, Prfm, Rev, Rev16, Adr, Adrp,
     Ldr, Ldrb, Ldrh, Ldrsb, Ldrsh, Ldrsw, Str, Strb, Strh,
     Ldp, Stp, Ldur, Stur, LdrLiteral,
     B, Bl, BCond, Br, Blr, Ret, Cbz, Cbnz, Tbz, Tbnz,
@@ -92,6 +96,8 @@ struct DecodedInstruction
     AtomicMemoryOrder memory_order = AtomicMemoryOrder::Relaxed;
     std::uint8_t atomic_width = 0U;
     std::optional<Register> exclusive_status_register;
+    std::uint8_t crc_width = 0U;
+    bool crc32c = false;
     BarrierKind barrier_kind = BarrierKind::Dmb;
     BarrierOption barrier_option = BarrierOption::Sy;
     SystemRegister system_register = SystemRegister::None;

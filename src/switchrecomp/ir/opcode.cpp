@@ -37,6 +37,9 @@ std::string_view opcode_name(Opcode opcode) noexcept
     case Opcode::AddOverflow: return "add_overflow";
     case Opcode::SubCarry: return "sub_carry";
     case Opcode::SubOverflow: return "sub_overflow";
+    case Opcode::AddWithCarry: return "add_with_carry";
+    case Opcode::AddWithCarryCarry: return "add_with_carry_carry";
+    case Opcode::AddWithCarryOverflow: return "add_with_carry_overflow";
     case Opcode::EvaluateCondition: return "evaluate_condition";
     case Opcode::ReadRegister: return "read_register";
     case Opcode::WriteRegister: return "write_register";
@@ -74,6 +77,7 @@ std::string_view opcode_name(Opcode opcode) noexcept
     case Opcode::VectorShuffle: return "vector_shuffle";
     case Opcode::GuestLoadVector: return "guest_load_vector";
     case Opcode::GuestStoreVector: return "guest_store_vector";
+    case Opcode::Crc32: return "crc32";
     }
     return "unknown";
 }

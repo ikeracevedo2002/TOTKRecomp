@@ -15,7 +15,12 @@ backend; the optional LLVM backend lowers the same IR primitives.
 | EXTR | yes | yes | yes | W/X double-register extract with architectural immediate range checks |
 | CSEL family | yes | yes | yes | CSEL/CSINC/CSINV/CSNEG and common aliases |
 | MUL/MADD/MSUB/MNEG | yes | yes | yes | modulo-width integer multiplication |
+| ADC/ADCS/SBC/SBCS/NGC/NGCS | yes | yes | yes | architectural carry-in, no-borrow carry-out, and signed overflow |
+| UMADDL/UMSUBL/SMADDL/SMSUBL | yes | yes | yes | W×W long multiply with X accumulation; signed forms sign-extend operands |
 | UMULH | yes | yes | yes | scalar A64 unsigned high multiply; i64/X-register form only; NZCV unchanged |
+| CRC32/CRC32C | yes | yes | yes | B/H/W/X reflected CRC forms with architectural polynomials |
+| PRFM/PRFUM | yes | yes | yes | non-faulting architectural prefetch hints are explicit no-ops |
+| REV/REV16 scalar | yes | yes | yes | byte reversal for W/X and per-halfword reversal; vector REV forms remain separate |
 | LDR/STR scalar | yes | yes | yes | byte/half/word/doubleword, sign/zero extension |
 | LDUR/STUR | yes | yes | yes | signed unscaled displacement |
 | Register-offset memory | yes | yes | yes | LSL, UXTX/UXTW and SXTX/SXTW-style forms |
@@ -30,6 +35,7 @@ backend; the optional LLVM backend lowers the same IR primitives.
 | NEON DUP/INS/UMOV/SMOV/EXT and ZIP/UZP/TRN | yes | yes | yes | normalized arrangements and lane indices |
 | NEON logical/integer/FP vector arithmetic and comparisons | yes | yes | yes | B/H/S/D arrangements; FP vector operations use the reference runtime |
 | AdvSIMD ST1 single-lane store | yes | yes | yes | B/H/S/D lane extraction through checked little-endian guest memory; multiple-register forms remain explicit unsupported |
+| AdvSIMD structure loads | yes | yes | yes | LD1/LD1R/LD2/LD2R/LD3/LD3R/LD4/LD4R, lane preservation, interleaving/replication, wrapped consecutive lists, and checked post-index writeback |
 | S/D/Q LDR/STR and LDP/STP | yes | yes | yes | checked guest memory; Q uses 16-byte vector helpers |
 | FP/SIMD fused multiply-add | yes | no | no | explicit unsupported behavior |
 | LDXR/STXR (B/H/W/X) | yes | yes | yes | per-thread monitor; deterministic 64-byte reservation granules |
@@ -75,6 +81,38 @@ uses `C = NOT borrow`; CMP and CMN only write flags. Condition evaluation is
 centralized in `runtime::evaluate_condition` and represented in the IR through
 `EvaluateCondition`.
 
+## M40 scalar convergence
+
+M40 adds normalized ADC/ADCS/SBC/SBCS and NGC/NGCS carry-in semantics,
+UMADDL/UMSUBL/SMADDL/SMSUBL long multiply forms, CRC32/CRC32C B/H/W/X
+forms, scalar PRFM/PRFUM hints, and scalar REV/REV16. Carry result and
+overflow use project-owned `AddWithCarry` IR operations; CRC uses the
+reusable `Crc32` IR operation. The interpreter and LLVM lowering implement the
+same result, while NZCV, FP state, and unrelated registers remain unchanged.
+PRFM/PRFUM are explicit no-ops because no guest cache-state model exists.
+M41 adds the measured AdvSIMD structure-load subset described below; vector
+structure stores, vector table lookup, and fused FP multiply-add remain
+unsupported until their complete architectural families are implemented.
+
+## M41 AdvSIMD structure loads
+
+LD1 and LD1R are supported for B/H/S/D arrangements, including single-lane
+LD1, 64-bit and 128-bit vectors, and immediate or register post-index forms.
+LD2/LD2R, LD3/LD3R, and LD4/LD4R use the architectural structure order:
+non-replicating loads deinterleave successive memory elements into consecutive
+vector registers, while replicating loads repeat one element across each
+destination. Destination lists wrap from V31 to V0 only at the architectural
+register-list boundary; malformed or non-consecutive lists remain rejected.
+
+Only the loaded lanes are changed. Unloaded upper lanes of 64-bit forms and
+single-lane LD1 destinations are preserved. Every element access uses checked
+little-endian `GuestLoad` semantics. Immediate post-index increments are
+normalized from the structure width when Capstone omits the encoded immediate;
+register post-index uses the X offset register. Pre/post writeback and memory
+faults remain observable through the existing checked guest-memory runtime.
+The interpreter and LLVM backend consume the same verified composition of
+`GuestLoad`, `VectorInsertLane`, and address-add IR operations.
+
 ## Memory safety
 
 Every guest load/store goes through `GuestMemory` via the runtime ABI. Address
@@ -106,14 +144,16 @@ locally, scan either a raw little-endian `.text` image or the NSO itself:
 
 ```text
 build/aarch64-analyze --coverage module.nso
-build/aarch64-analyze --coverage --json module.nso
+build/aarch64-analyze --coverage --coverage-workers 4 --json module.nso
 ```
 
 The scanner reports decoded, liftable, unsupported and decode-failure counts,
-sorted opcode frequencies, and the first unsupported guest addresses. JSON uses
-schema version 1 and only prints the input basename, not a private absolute
-path. The tool performs all analysis locally and does not upload or hash-report
-the input. XCI/NSP/NCA extraction remains an external local workflow.
+sorted opcode frequencies, and the first unsupported guest addresses. Coverage
+uses a deterministic bounded worker pool by default (up to four workers); use
+`--coverage-workers N` to override it. JSON uses schema version 1 and only
+prints the input basename, not a private absolute path. The tool performs all
+analysis locally and does not upload or hash-report the input. XCI/NSP/NCA
+extraction remains an external local workflow.
 
 Coverage is an instruction-family baseline, not a correctness claim: an
 instruction only belongs in the support matrix when its normalized form is

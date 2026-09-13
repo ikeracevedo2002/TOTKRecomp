@@ -5,10 +5,15 @@
 #include "switchrecomp/common/checked_arithmetic.hpp"
 
 #include <algorithm>
+#include <exception>
 #include <iomanip>
 #include <map>
+#include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <utility>
 
 namespace switchrecomp::analysis
 {
@@ -69,8 +74,12 @@ namespace
     }
     switch (id)
     {
+    case aarch64::InstructionId::Udf:
     case aarch64::InstructionId::Nop:
     case aarch64::InstructionId::Add: case aarch64::InstructionId::Adds:
+    case aarch64::InstructionId::Adc: case aarch64::InstructionId::Adcs:
+    case aarch64::InstructionId::Sbc: case aarch64::InstructionId::Sbcs:
+    case aarch64::InstructionId::Ngc: case aarch64::InstructionId::Ngcs:
     case aarch64::InstructionId::Sub: case aarch64::InstructionId::Subs:
     case aarch64::InstructionId::And: case aarch64::InstructionId::Ands:
     case aarch64::InstructionId::Orr: case aarch64::InstructionId::Orn:
@@ -94,6 +103,10 @@ namespace
     case aarch64::InstructionId::Mul: case aarch64::InstructionId::Madd:
     case aarch64::InstructionId::Msub: case aarch64::InstructionId::Mneg:
     case aarch64::InstructionId::Umulh: case aarch64::InstructionId::Smulh:
+    case aarch64::InstructionId::Umaddl: case aarch64::InstructionId::Umsubl:
+    case aarch64::InstructionId::Smaddl: case aarch64::InstructionId::Smsubl:
+    case aarch64::InstructionId::Crc32: case aarch64::InstructionId::Prfm:
+    case aarch64::InstructionId::Rev: case aarch64::InstructionId::Rev16:
     case aarch64::InstructionId::Udiv: case aarch64::InstructionId::Sdiv:
     case aarch64::InstructionId::Adr: case aarch64::InstructionId::Adrp:
     case aarch64::InstructionId::Ldr: case aarch64::InstructionId::Ldrb:
@@ -128,6 +141,65 @@ namespace
 
 [[nodiscard]] bool fp_simd_liftable(const aarch64::DecodedInstruction& instruction) noexcept
 {
+    const auto vector_register = [](const aarch64::Operand& operand) {
+        return operand.kind == aarch64::OperandKind::Register &&
+               operand.reg.kind == aarch64::RegisterKind::Vector && operand.reg.index < 32U;
+    };
+    const auto structure_liftable = [&]() {
+        using Op = aarch64::SimdOperation;
+        const auto op = instruction.simd_operation;
+        const auto fixed_count = op == Op::Ld1r || op == Op::Ld2r || op == Op::Ld3r || op == Op::Ld4r
+                                     ? op == Op::Ld1r ? 1U : op == Op::Ld2r ? 2U : op == Op::Ld3r ? 3U : 4U
+                                     : op == Op::Ld2 ? 2U : op == Op::Ld3 ? 3U : op == Op::Ld4 ? 4U : 0U;
+        const auto memory = std::find_if(
+            instruction.operands.begin(), instruction.operands.end(),
+            [](const aarch64::Operand& operand) { return operand.kind == aarch64::OperandKind::Memory; });
+        if (memory == instruction.operands.end()) return false;
+        const auto destination_count = static_cast<std::size_t>(
+            memory - instruction.operands.begin());
+        if ((op != Op::Ld1 && destination_count != fixed_count) ||
+            (op == Op::Ld1 && (destination_count < 1U || destination_count > 4U)) ||
+            (instruction.operands.size() != destination_count + 1U &&
+             instruction.operands.size() != destination_count + 2U))
+            return false;
+        const bool register_post_index = instruction.operands.size() == destination_count + 2U;
+        if (register_post_index &&
+            (memory->memory.addressing != aarch64::MemoryAddressingMode::PostIndex ||
+             instruction.operands.back().kind != aarch64::OperandKind::Register ||
+             instruction.operands.back().reg.kind != aarch64::RegisterKind::General ||
+             instruction.operands.back().reg.width != aarch64::RegisterWidth::X64))
+            return false;
+        if (memory->memory.base.kind != aarch64::RegisterKind::General ||
+            memory->memory.base.width != aarch64::RegisterWidth::X64 ||
+            (memory->memory.addressing != aarch64::MemoryAddressingMode::Base &&
+             memory->memory.addressing != aarch64::MemoryAddressingMode::PreIndex &&
+             memory->memory.addressing != aarch64::MemoryAddressingMode::PostIndex))
+            return false;
+        if (!vector_register(instruction.operands[0]) ||
+            instruction.operands[0].arrangement == aarch64::VectorArrangement::Invalid)
+            return false;
+        const auto arrangement = instruction.operands[0].arrangement;
+        const auto lanes = aarch64::vector_lane_count(arrangement);
+        const auto bits = aarch64::vector_element_bits(arrangement);
+        if (lanes == 0U || bits == 0U || bits % 8U != 0U)
+            return false;
+        const bool lane_load = op == Op::Ld1 && instruction.operands[0].vector_index >= 0;
+        if (lane_load && (destination_count != 1U ||
+                          static_cast<std::uint8_t>(instruction.operands[0].vector_index) >= lanes))
+            return false;
+        if ((op == Op::Ld2 || op == Op::Ld3 || op == Op::Ld4) &&
+            arrangement == aarch64::VectorArrangement::D1)
+            return false;
+        for (std::size_t destination = 0U; destination < destination_count; ++destination)
+        {
+            if (!vector_register(instruction.operands[destination]) ||
+                instruction.operands[destination].arrangement != arrangement ||
+                instruction.operands[destination].reg.index !=
+                    static_cast<std::uint8_t>((instruction.operands[0].reg.index + destination) % 32U))
+                return false;
+        }
+        return true;
+    };
     switch (instruction.simd_operation)
     {
     case aarch64::SimdOperation::None:
@@ -137,11 +209,39 @@ namespace
     case aarch64::SimdOperation::Fnmsub:
         return false;
     case aarch64::SimdOperation::Movi:
-        return instruction.operands.size() == 2U &&
-               instruction.operands[0].kind == aarch64::OperandKind::Register &&
-               instruction.operands[0].reg.kind == aarch64::RegisterKind::Vector &&
-               instruction.operands[0].arrangement != aarch64::VectorArrangement::Invalid &&
+    case aarch64::SimdOperation::Mvni:
+        return instruction.operands.size() == 2U && vector_register(instruction.operands[0]) &&
+               (instruction.operands[0].arrangement == aarch64::VectorArrangement::B8 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::B16 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::H4 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::H8 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::S2 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::S4 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::D1 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::D2) &&
                instruction.operands[1].kind == aarch64::OperandKind::Immediate;
+    case aarch64::SimdOperation::Faddp:
+        return instruction.operands.size() == 3U && vector_register(instruction.operands[0]) &&
+               vector_register(instruction.operands[1]) && vector_register(instruction.operands[2]) &&
+               (instruction.operands[0].arrangement == aarch64::VectorArrangement::S2 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::S4 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::D2);
+    case aarch64::SimdOperation::Bif:
+    case aarch64::SimdOperation::Bit:
+    case aarch64::SimdOperation::Bsl:
+        return instruction.operands.size() == 3U && vector_register(instruction.operands[0]) &&
+               vector_register(instruction.operands[1]) && vector_register(instruction.operands[2]) &&
+               (instruction.operands[0].arrangement == aarch64::VectorArrangement::B8 ||
+                instruction.operands[0].arrangement == aarch64::VectorArrangement::B16);
+    case aarch64::SimdOperation::Ld1:
+    case aarch64::SimdOperation::Ld1r:
+    case aarch64::SimdOperation::Ld2:
+    case aarch64::SimdOperation::Ld2r:
+    case aarch64::SimdOperation::Ld3:
+    case aarch64::SimdOperation::Ld3r:
+    case aarch64::SimdOperation::Ld4:
+    case aarch64::SimdOperation::Ld4r:
+        return structure_liftable();
     case aarch64::SimdOperation::St1:
         return instruction.operands.size() == 2U &&
                instruction.operands[0].kind == aarch64::OperandKind::Register &&
@@ -180,12 +280,6 @@ Result<CoverageReport> scan_coverage(const memory::GuestMemory& memory, memory::
         return Result<CoverageReport>::failure(make_error(
             ErrorCode::NonExecutableAddress, "coverage range is not executable guest memory"));
     }
-    const auto decoder = aarch64::AArch64Decoder::create();
-    if (!decoder)
-    {
-        return Result<CoverageReport>::failure(decoder.error());
-    }
-
     CoverageReport report;
     report.module = std::move(module);
     report.base = base;
@@ -199,34 +293,144 @@ Result<CoverageReport> scan_coverage(const memory::GuestMemory& memory, memory::
             ErrorCode::AnalysisInstructionLimitExceeded,
             "coverage range exceeds the configured instruction limit"));
     }
-    for (std::size_t index = 0U; index < instruction_count; ++index)
+
+    struct WorkerReport
     {
-        const auto address = base + static_cast<memory::GuestAddress>(index * 4U);
-        const auto decoded = aarch64::fetch_and_decode(memory, *decoder.value(), address);
-        if (!decoded)
+        std::size_t decoded = 0U;
+        std::size_t liftable = 0U;
+        std::size_t unsupported = 0U;
+        std::size_t decode_failures = 0U;
+        std::map<std::string, std::size_t> instruction_frequency;
+        std::map<std::string, std::size_t> unsupported_frequency;
+        std::vector<std::size_t> first_unsupported_indices;
+    };
+
+    const auto worker_count = std::min(std::max<std::size_t>(options.workers, 1U),
+                                        instruction_count);
+    std::vector<std::optional<Result<WorkerReport>>> worker_reports(worker_count);
+    const auto scan_range = [&](std::size_t worker) -> Result<WorkerReport> {
+        const auto worker_decoder = aarch64::AArch64Decoder::create();
+        if (!worker_decoder)
         {
-            ++report.decode_failures;
-            continue;
+            return Result<WorkerReport>::failure(worker_decoder.error());
         }
-        ++report.decoded;
-        const auto name = std::string(aarch64::instruction_id_name(decoded.value().id));
-        ++instruction_counts[name];
-        const bool liftable = decoded.value().normalized &&
-                              (decoded.value().id == aarch64::InstructionId::FpSimd
-                                   ? fp_simd_liftable(decoded.value())
-                                   : common_liftable(decoded.value()));
-        if (liftable)
+        const auto quotient = instruction_count / worker_count;
+        const auto remainder = instruction_count % worker_count;
+        const auto begin = worker * quotient + std::min(worker, remainder);
+        const auto end = begin + quotient + (worker < remainder ? 1U : 0U);
+        WorkerReport result;
+        for (std::size_t index = begin; index < end; ++index)
         {
-            ++report.liftable;
-        }
-        else
-        {
-            ++report.unsupported;
-            ++unsupported_counts[name];
-            if (report.first_unsupported_addresses.size() < 16U)
+            const auto address = base + static_cast<memory::GuestAddress>(index * 4U);
+            const auto decoded = aarch64::fetch_and_decode(memory, *worker_decoder.value(), address);
+            if (!decoded)
             {
-                report.first_unsupported_addresses.push_back(address);
+                ++result.decode_failures;
+                continue;
             }
+            ++result.decoded;
+            const auto name = std::string(aarch64::instruction_id_name(decoded.value().id));
+            ++result.instruction_frequency[name];
+            const bool liftable = decoded.value().normalized &&
+                                  (decoded.value().id == aarch64::InstructionId::FpSimd
+                                       ? fp_simd_liftable(decoded.value())
+                                       : common_liftable(decoded.value()));
+            if (liftable)
+            {
+                ++result.liftable;
+            }
+            else
+            {
+                ++result.unsupported;
+                ++result.unsupported_frequency[name];
+                if (result.first_unsupported_indices.size() < 16U)
+                {
+                    result.first_unsupported_indices.push_back(index);
+                }
+            }
+        }
+        return Result<WorkerReport>::success(std::move(result));
+    };
+
+    std::exception_ptr worker_exception;
+    std::mutex worker_exception_mutex;
+    const auto run_worker = [&](std::size_t worker) {
+        try
+        {
+            worker_reports[worker] = scan_range(worker);
+        }
+        catch (...)
+        {
+            std::lock_guard lock(worker_exception_mutex);
+            if (worker_exception == nullptr)
+            {
+                worker_exception = std::current_exception();
+            }
+        }
+    };
+    if (worker_count == 1U)
+    {
+        run_worker(0U);
+    }
+    else
+    {
+        std::vector<std::thread> workers;
+        workers.reserve(worker_count);
+        try
+        {
+            for (std::size_t worker = 0U; worker < worker_count; ++worker)
+            {
+                workers.emplace_back(run_worker, worker);
+            }
+        }
+        catch (...)
+        {
+            for (auto& worker : workers)
+            {
+                if (worker.joinable()) worker.join();
+            }
+            return Result<CoverageReport>::failure(make_error(
+                ErrorCode::ResourceLimit, "unable to create the coverage worker pool"));
+        }
+        for (auto& worker : workers)
+        {
+            worker.join();
+        }
+    }
+    if (worker_exception != nullptr)
+    {
+        return Result<CoverageReport>::failure(make_error(
+            ErrorCode::ResourceLimit, "coverage worker failed while scanning the range"));
+    }
+    for (std::size_t worker = 0U; worker < worker_count; ++worker)
+    {
+        if (!worker_reports[worker].has_value())
+        {
+            return Result<CoverageReport>::failure(make_error(
+                ErrorCode::ResourceLimit, "coverage worker did not publish a result"));
+        }
+        const auto& result = worker_reports[worker].value();
+        if (!result)
+        {
+            return Result<CoverageReport>::failure(result.error());
+        }
+        report.decoded += result.value().decoded;
+        report.liftable += result.value().liftable;
+        report.unsupported += result.value().unsupported;
+        report.decode_failures += result.value().decode_failures;
+        for (const auto& [opcode, count] : result.value().instruction_frequency)
+        {
+            instruction_counts[opcode] += count;
+        }
+        for (const auto& [opcode, count] : result.value().unsupported_frequency)
+        {
+            unsupported_counts[opcode] += count;
+        }
+        for (const auto index : result.value().first_unsupported_indices)
+        {
+            if (report.first_unsupported_addresses.size() == 16U) break;
+            report.first_unsupported_addresses.push_back(
+                base + static_cast<memory::GuestAddress>(index * 4U));
         }
     }
     for (const auto& [opcode, count] : instruction_counts)
