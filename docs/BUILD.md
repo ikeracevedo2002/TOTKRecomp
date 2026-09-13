@@ -4,14 +4,25 @@ TOTKRecomp uses an out-of-source CMake build and requires C++20. A clean
 configure fetches the pinned nlohmann/json, Catch2, and LZ4 sources through
 CMake `FetchContent`; no game files are downloaded. Capstone v5.0.3 is fetched
 at the pinned commit listed in `docs/DEPENDENCIES.md` for the AArch64 decoder.
+On Apple Clang 14, CMake supplies a project-owned compatibility layer for
+`std::bit_cast`; no private forced-include file is required.
 
 ## Configure, build, and test
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-ctest --test-dir build --output-on-failure
+cmake --build build --parallel
+# Parallelize independently discovered Catch2 cases (use your core count).
+ctest --test-dir build --parallel 6 --output-on-failure
 ```
+
+The test suite is discovered as independent CTest cases. Use
+`ctest --test-dir build --parallel N` rather than the serial default: on the
+current development machine, the full 416-case suite takes about 36 seconds
+with six workers versus about 97 seconds in the historical serial runs. The
+number is hardware-dependent; the invariant is that parallel CTest is the
+normal development path and serial CTest is reserved for determinism or
+reproduction checks.
 
 The decoder/CFG CLI accepts a legally obtained raw AArch64 code blob. For a
 smoke test without target content, a caller can provide a synthetic four-byte
@@ -42,12 +53,14 @@ cmake -S . -B build -G Ninja \
 
 ## Semantic IR and LLVM backend
 
-The core build does not require LLVM:
+The core build does not require LLVM. Set the option explicitly when LLVM is
+not installed; CMake prints a status line that the optional backend is not
+being compiled:
 
 ```bash
 cmake -S . -B build -G Ninja -DTOTKRECOMP_ENABLE_LLVM=OFF
-cmake --build build
-ctest --test-dir build --output-on-failure
+cmake --build build --parallel
+ctest --test-dir build --parallel 6 --output-on-failure
 build/aarch64-lift --hex 0000018bc0035fd6 --show-disassembly --show-ir --execute-ir
 ```
 
