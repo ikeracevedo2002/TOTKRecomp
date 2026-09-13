@@ -289,29 +289,20 @@ namespace
     }
 }
 
-[[nodiscard]] VectorArrangement st1_lane_arrangement(std::uint32_t opcode) noexcept
+[[nodiscard]] VectorArrangement st1_lane_arrangement(std::uint32_t opcode,
+                                                        arm64_vas vas) noexcept
 {
-    // Capstone exposes the lane index for ST1 single-structure operands but
-    // leaves the arrangement invalid. Recover it from architectural fields,
-    // rather than from the printed operand text.
+    // Capstone exposes the lane index and scalar element VAS for single-
+    // structure operands, but not the complete vector arrangement. The Q bit
+    // supplies the 64/128-bit width; VAS supplies the element width.
     const auto q = static_cast<std::uint8_t>((opcode >> 30U) & 1U);
-    const auto s = static_cast<std::uint8_t>((opcode >> 12U) & 1U);
-    const auto size = static_cast<std::uint8_t>((opcode >> 10U) & 0x3U);
-    switch ((opcode >> 13U) & 0x7U)
+    switch (vas)
     {
-    case 0U:
-        return q == 0U ? VectorArrangement::B8 : VectorArrangement::B16;
-    case 2U:
-        return size == 0U ? (q == 0U ? VectorArrangement::H4 : VectorArrangement::H8)
-                          : VectorArrangement::Invalid;
-    case 4U:
-        if (size == 0U)
-            return q == 0U ? VectorArrangement::S2 : VectorArrangement::S4;
-        if (s == 0U && size == 1U)
-            return q == 0U ? VectorArrangement::D1 : VectorArrangement::D2;
-        return VectorArrangement::Invalid;
-    default:
-        return VectorArrangement::Invalid;
+    case ARM64_VAS_1B: return q == 0U ? VectorArrangement::B8 : VectorArrangement::B16;
+    case ARM64_VAS_1H: return q == 0U ? VectorArrangement::H4 : VectorArrangement::H8;
+    case ARM64_VAS_1S: return q == 0U ? VectorArrangement::S2 : VectorArrangement::S4;
+    case ARM64_VAS_1D: return q == 0U ? VectorArrangement::D1 : VectorArrangement::D2;
+    default: return VectorArrangement::Invalid;
     }
 }
 
@@ -333,36 +324,47 @@ namespace
     return value | (value << 32U);
 }
 
+[[nodiscard]] std::uint64_t maybe_invert_movi_element(std::uint64_t value,
+                                                      std::uint8_t element_bits,
+                                                      bool invert) noexcept
+{
+    if (!invert) return value;
+    const auto mask = element_bits == 8U ? 0xffU : element_bits == 16U ? 0xffffU : 0xffffffffU;
+    return (~value) & mask;
+}
+
 [[nodiscard]] std::optional<std::uint64_t> movi_immediate(std::uint32_t opcode) noexcept
 {
-    const auto q = static_cast<std::uint8_t>((opcode >> 30U) & 1U);
     const auto op = static_cast<std::uint8_t>((opcode >> 29U) & 1U);
     const auto cmode = static_cast<std::uint8_t>((opcode >> 12U) & 0xfU);
     const auto imm8 = static_cast<std::uint8_t>(((opcode >> 11U) & 0xe0U) |
                                                 ((opcode >> 5U) & 0x1fU));
-    if (op == 1U)
+    // cmode=1110 is the byte-immediate form for op=0 and the 64-bit
+    // immediate form for op=1. Both use the same eight-bit replication;
+    // the normalized destination arrangement distinguishes those forms.
+    if (cmode == 0xeU)
     {
-        if (q == 0U || cmode != 0xeU)
-            return std::nullopt;
         return replicate_movi_element(imm8, 8U);
     }
-    if (cmode == 0xeU)
-        return replicate_movi_element(imm8, 8U);
+    const bool invert = op == 1U;
     if ((cmode & 0xeU) == 0xcU)
     {
         const auto shift = static_cast<std::uint8_t>((cmode & 1U) == 0U ? 8U : 16U);
         const auto ones = (std::uint64_t{1} << shift) - 1U;
-        return replicate_movi_element((static_cast<std::uint64_t>(imm8) << shift) | ones, 32U);
+        const auto value = (static_cast<std::uint64_t>(imm8) << shift) | ones;
+        return replicate_movi_element(maybe_invert_movi_element(value, 32U, invert), 32U);
     }
     if ((cmode & 0x9U) == 0x8U)
     {
         const auto shift = static_cast<std::uint8_t>(((cmode >> 1U) & 1U) * 8U);
-        return replicate_movi_element(static_cast<std::uint64_t>(imm8) << shift, 16U);
+        const auto value = static_cast<std::uint64_t>(imm8) << shift;
+        return replicate_movi_element(maybe_invert_movi_element(value, 16U, invert), 16U);
     }
     if ((cmode & 0x9U) == 0U)
     {
         const auto shift = static_cast<std::uint8_t>(((cmode >> 1U) & 0x3U) * 8U);
-        return replicate_movi_element(static_cast<std::uint64_t>(imm8) << shift, 32U);
+        const auto value = static_cast<std::uint64_t>(imm8) << shift;
+        return replicate_movi_element(maybe_invert_movi_element(value, 32U, invert), 32U);
     }
     return std::nullopt;
 }
@@ -451,6 +453,20 @@ namespace
     {
         return InstructionId::Movn;
     }
+    // Capstone uses the architectural UMULL/SMULL aliases for the scalar
+    // long multiply encodings as well as the AdvSIMD instructions. Keep the
+    // scalar aliases in the ordinary instruction domain; vector encodings
+    // continue through the project-owned FP/SIMD operation table below.
+    if (instruction.id == ARM64_INS_UMULL &&
+        (opcode & 0xffe0fc00U) == 0x9ba07c00U)
+    {
+        return InstructionId::Umull;
+    }
+    if (instruction.id == ARM64_INS_SMULL &&
+        (opcode & 0xffe0fc00U) == 0x9b207c00U)
+    {
+        return InstructionId::Smull;
+    }
     if ((opcode & 0x3b000000U) == 0x18000000U)
     {
         const auto literal_kind = (opcode >> 30U) & 0x3U;
@@ -481,6 +497,18 @@ namespace
         return InstructionId::Add;
     case ARM64_INS_ADDS:
         return InstructionId::Adds;
+    case ARM64_INS_ADC:
+        return InstructionId::Adc;
+    case ARM64_INS_ADCS:
+        return InstructionId::Adcs;
+    case ARM64_INS_SBC:
+        return InstructionId::Sbc;
+    case ARM64_INS_SBCS:
+        return InstructionId::Sbcs;
+    case ARM64_INS_NGC:
+        return InstructionId::Ngc;
+    case ARM64_INS_NGCS:
+        return InstructionId::Ngcs;
     case ARM64_INS_SUB:
         return InstructionId::Sub;
     case ARM64_INS_SUBS:
@@ -590,6 +618,32 @@ namespace
         return InstructionId::Umulh;
     case ARM64_INS_SMULH:
         return InstructionId::Smulh;
+    case ARM64_INS_UMADDL:
+        return InstructionId::Umaddl;
+    case ARM64_INS_UMSUBL:
+        return InstructionId::Umsubl;
+    case ARM64_INS_SMADDL:
+        return InstructionId::Smaddl;
+    case ARM64_INS_SMSUBL:
+        return InstructionId::Smsubl;
+    case ARM64_INS_FMOV:
+        return InstructionId::FpSimd;
+    case ARM64_INS_CRC32B:
+    case ARM64_INS_CRC32H:
+    case ARM64_INS_CRC32W:
+    case ARM64_INS_CRC32X:
+    case ARM64_INS_CRC32CB:
+    case ARM64_INS_CRC32CH:
+    case ARM64_INS_CRC32CW:
+    case ARM64_INS_CRC32CX:
+        return InstructionId::Crc32;
+    case ARM64_INS_PRFM:
+    case ARM64_INS_PRFUM:
+        return InstructionId::Prfm;
+    case ARM64_INS_REV:
+        return InstructionId::Rev;
+    case ARM64_INS_REV16:
+        return InstructionId::Rev16;
     case ARM64_INS_UDIV:
         return InstructionId::Udiv;
     case ARM64_INS_SDIV:
@@ -667,6 +721,8 @@ namespace
     case ARM64_INS_ERETAA:
     case ARM64_INS_ERETAB:
         return InstructionId::Eret;
+    case ARM64_INS_UDF:
+        return InstructionId::Udf;
     default:
         break;
     }
@@ -773,7 +829,9 @@ namespace
     {
     case ARM64_INS_FMOV: return SimdOperation::Fmov;
     case ARM64_INS_MOVI: return SimdOperation::Movi;
+    case ARM64_INS_MVNI: return SimdOperation::Mvni;
     case ARM64_INS_FADD: return SimdOperation::Fadd;
+    case ARM64_INS_FADDP: return SimdOperation::Faddp;
     case ARM64_INS_FSUB: return SimdOperation::Fsub;
     case ARM64_INS_FMUL: return SimdOperation::Fmul;
     case ARM64_INS_FDIV: return SimdOperation::Fdiv;
@@ -786,6 +844,8 @@ namespace
     case ARM64_INS_FMAXNM: return SimdOperation::Fmax;
     case ARM64_INS_FCMP: return SimdOperation::Fcmp;
     case ARM64_INS_FCMPE: return SimdOperation::Fcmpe;
+    case ARM64_INS_FCCMP: return SimdOperation::Fccmp;
+    case ARM64_INS_FCCMPE: return SimdOperation::Fccmpe;
     case ARM64_INS_FCSEL: return SimdOperation::Fcsel;
     case ARM64_INS_SCVTF: return SimdOperation::Scvtf;
     case ARM64_INS_UCVTF: return SimdOperation::Ucvtf;
@@ -798,6 +858,8 @@ namespace
     case ARM64_INS_FRINTZ: return SimdOperation::Frintz;
     case ARM64_INS_FMADD: return SimdOperation::Fmadd;
     case ARM64_INS_FMSUB: return SimdOperation::Fmsub;
+    case ARM64_INS_FMLA: return SimdOperation::Fmla;
+    case ARM64_INS_FMLS: return SimdOperation::Fmls;
     case ARM64_INS_FNMADD: return SimdOperation::Fnmadd;
     case ARM64_INS_FNMSUB: return SimdOperation::Fnmsub;
     case ARM64_INS_DUP: return SimdOperation::Dup;
@@ -814,13 +876,43 @@ namespace
     case ARM64_INS_FCMEQ: return SimdOperation::Fcmeq;
     case ARM64_INS_FCMGT: return SimdOperation::Fcmgt;
     case ARM64_INS_FCMGE: return SimdOperation::Fcmge;
+    case ARM64_INS_FCMLT: return SimdOperation::Fcmlt;
+    case ARM64_INS_FCMLE: return SimdOperation::Fcmle;
     case ARM64_INS_CMEQ: return SimdOperation::Cmeq;
     case ARM64_INS_CMGT: return SimdOperation::Cmgt;
     case ARM64_INS_CMGE: return SimdOperation::Cmge;
     case ARM64_INS_CMHI: return SimdOperation::Cmhi;
     case ARM64_INS_CMHS: return SimdOperation::Cmhs;
+    case ARM64_INS_UMULL: return SimdOperation::Umull;
+    case ARM64_INS_UMULL2: return SimdOperation::Umull2;
+    case ARM64_INS_SMULL: return SimdOperation::Smull;
+    case ARM64_INS_SMULL2: return SimdOperation::Smull2;
+    case ARM64_INS_UMLAL: return SimdOperation::Umlal;
+    case ARM64_INS_UMLAL2: return SimdOperation::Umlal2;
+    case ARM64_INS_SMLAL: return SimdOperation::Smlal;
+    case ARM64_INS_SMLAL2: return SimdOperation::Smlal2;
+    case ARM64_INS_UMLSL: return SimdOperation::Umlsl;
+    case ARM64_INS_UMLSL2: return SimdOperation::Umlsl2;
+    case ARM64_INS_SMLSL: return SimdOperation::Smlsl;
+    case ARM64_INS_SMLSL2: return SimdOperation::Smlsl2;
+    case ARM64_INS_TBL: return SimdOperation::Tbl;
+    case ARM64_INS_TBX: return SimdOperation::Tbx;
+    case ARM64_INS_BIF: return SimdOperation::Bif;
+    case ARM64_INS_BIT: return SimdOperation::Bit;
+    case ARM64_INS_BSL: return SimdOperation::Bsl;
     case ARM64_INS_ST1: return SimdOperation::St1;
-    default: return SimdOperation::None;
+    case ARM64_INS_ST2: return SimdOperation::St2;
+    case ARM64_INS_ST3: return SimdOperation::St3;
+    case ARM64_INS_ST4: return SimdOperation::St4;
+    case ARM64_INS_LD1: return SimdOperation::Ld1;
+    case ARM64_INS_LD1R: return SimdOperation::Ld1r;
+    case ARM64_INS_LD2: return SimdOperation::Ld2;
+    case ARM64_INS_LD2R: return SimdOperation::Ld2r;
+    case ARM64_INS_LD3: return SimdOperation::Ld3;
+    case ARM64_INS_LD3R: return SimdOperation::Ld3r;
+    case ARM64_INS_LD4: return SimdOperation::Ld4;
+    case ARM64_INS_LD4R: return SimdOperation::Ld4r;
+        default: return SimdOperation::None;
     }
 }
 
@@ -1100,6 +1192,16 @@ Result<DecodedInstruction> AArch64Decoder::decode(GuestAddress address,
     result.backend_decoded = true;
     result.normalized = result.id != InstructionId::Unknown;
     result.simd_operation = normalize_simd_operation(instruction);
+    switch (instruction.id)
+    {
+    case ARM64_INS_CRC32B: case ARM64_INS_CRC32CB: result.crc_width = 8U; break;
+    case ARM64_INS_CRC32H: case ARM64_INS_CRC32CH: result.crc_width = 16U; break;
+    case ARM64_INS_CRC32W: case ARM64_INS_CRC32CW: result.crc_width = 32U; break;
+    case ARM64_INS_CRC32X: case ARM64_INS_CRC32CX: result.crc_width = 64U; break;
+    default: break;
+    }
+    result.crc32c = instruction.id == ARM64_INS_CRC32CB || instruction.id == ARM64_INS_CRC32CH ||
+                    instruction.id == ARM64_INS_CRC32CW || instruction.id == ARM64_INS_CRC32CX;
     result.disassembly = instruction.mnemonic;
     if (instruction.op_str[0] != '\0')
     {
@@ -1116,12 +1218,31 @@ Result<DecodedInstruction> AArch64Decoder::decode(GuestAddress address,
     {
         result.operands.push_back(normalize_operand(detail.operands[index], detail, result.id, opcode));
     }
-    if (result.simd_operation == SimdOperation::St1 && result.operands.size() >= 2U &&
+    if (result.simd_operation == SimdOperation::Fmov && result.operands.size() >= 2U &&
+        result.operands[1].kind == OperandKind::Register &&
+        result.operands[1].reg.kind == RegisterKind::Vector &&
+        result.operands[1].vector_index >= 0 &&
+        result.operands[1].arrangement == VectorArrangement::Invalid)
+    {
+        // FMOV Sd/Dd, Vn.S[i]/Vn.D[i] is printed as MOV by Capstone. The
+        // scalar element VAS does not carry the complete source arrangement.
+        result.operands[1].arrangement = result.operands[1].reg.width == RegisterWidth::S32
+                                             ? VectorArrangement::S4
+                                             : result.operands[1].reg.width == RegisterWidth::D64
+                                                   ? VectorArrangement::D2
+                                                   : VectorArrangement::Invalid;
+        if (result.operands[1].arrangement == VectorArrangement::Invalid)
+            result.normalized = false;
+    }
+    if ((result.simd_operation == SimdOperation::St1 ||
+         result.simd_operation == SimdOperation::Ld1) &&
+        result.operands.size() >= 2U &&
         result.operands[0].kind == OperandKind::Register &&
         result.operands[0].reg.kind == RegisterKind::Vector &&
         result.operands[0].vector_index >= 0)
     {
-        const auto arrangement = st1_lane_arrangement(opcode);
+        const auto arrangement = st1_lane_arrangement(
+            opcode, instruction.detail->arm64.operands[0].vas);
         const auto lane = static_cast<std::uint8_t>(result.operands[0].vector_index);
         if (arrangement == VectorArrangement::Invalid ||
             lane >= vector_lane_count(arrangement))
@@ -1133,8 +1254,8 @@ Result<DecodedInstruction> AArch64Decoder::decode(GuestAddress address,
             result.operands[0].arrangement = arrangement;
         }
     }
-    if (result.simd_operation == SimdOperation::Movi && result.operands.size() >= 2U &&
-        result.operands[1].kind == OperandKind::Immediate)
+    if ((result.simd_operation == SimdOperation::Movi || result.simd_operation == SimdOperation::Mvni) &&
+        result.operands.size() >= 2U && result.operands[1].kind == OperandKind::Immediate)
     {
         const auto expanded = movi_immediate(opcode);
         if (!expanded)
@@ -1144,6 +1265,18 @@ Result<DecodedInstruction> AArch64Decoder::decode(GuestAddress address,
         else
         {
             result.operands[1].immediate = static_cast<std::int64_t>(expanded.value());
+            // Capstone represents MOVI Dd, #imm without a vector
+            // arrangement. Recover the architectural one from Q.
+            if (result.operands[0].kind == OperandKind::Register &&
+                result.operands[0].reg.kind == RegisterKind::Vector &&
+                result.operands[0].reg.width == RegisterWidth::D64 &&
+                result.operands[0].arrangement == VectorArrangement::Invalid &&
+                ((opcode >> 12U) & 0xfU) == 0xeU && ((opcode >> 29U) & 1U) == 1U)
+            {
+                result.operands[0].arrangement = ((opcode >> 30U) & 1U) == 0U
+                                                      ? VectorArrangement::D1
+                                                      : VectorArrangement::D2;
+            }
         }
     }
     for (std::size_t index = 0U; index < result.operands.size(); ++index)
@@ -1157,6 +1290,56 @@ Result<DecodedInstruction> AArch64Decoder::decode(GuestAddress address,
             result.operands.erase(result.operands.begin() +
                                   static_cast<std::ptrdiff_t>(result.operands.size() - 1U));
             break;
+        }
+    }
+    if (result.simd_operation == SimdOperation::Ld1 ||
+        result.simd_operation == SimdOperation::Ld1r ||
+        result.simd_operation == SimdOperation::St1 ||
+        result.simd_operation == SimdOperation::St2 ||
+        result.simd_operation == SimdOperation::St3 ||
+        result.simd_operation == SimdOperation::St4 ||
+        result.simd_operation == SimdOperation::Ld2 ||
+        result.simd_operation == SimdOperation::Ld2r ||
+        result.simd_operation == SimdOperation::Ld3 ||
+        result.simd_operation == SimdOperation::Ld3r ||
+        result.simd_operation == SimdOperation::Ld4 ||
+        result.simd_operation == SimdOperation::Ld4r)
+    {
+        std::size_t memory_index = result.operands.size();
+        for (std::size_t index = 0U; index < result.operands.size(); ++index)
+        {
+            if (result.operands[index].kind == OperandKind::Memory)
+            {
+                memory_index = index;
+                break;
+            }
+        }
+        if (memory_index < result.operands.size() &&
+            result.operands[memory_index].memory.addressing == MemoryAddressingMode::PostIndex &&
+            result.operands.size() == memory_index + 1U &&
+            result.operands[0].kind == OperandKind::Register)
+        {
+            const auto arrangement = result.operands[0].arrangement;
+            const auto element_bits = vector_element_bits(arrangement);
+            const auto lanes = vector_lane_count(arrangement);
+            const bool lane_access = (result.simd_operation == SimdOperation::St1 ||
+                                      result.simd_operation == SimdOperation::Ld1) &&
+                                     result.operands[0].vector_index >= 0;
+            const bool replicate = result.simd_operation == SimdOperation::Ld1r ||
+                                   result.simd_operation == SimdOperation::Ld2r ||
+                                   result.simd_operation == SimdOperation::Ld3r ||
+                                   result.simd_operation == SimdOperation::Ld4r;
+            if (element_bits != 0U && lanes != 0U && result.operands[0].reg.kind == RegisterKind::Vector)
+            {
+                const auto element_bytes = static_cast<std::int64_t>(element_bits / 8U);
+                const auto bytes_per_destination = lane_access
+                                                       ? element_bytes
+                                                       : replicate
+                                                             ? element_bytes
+                                                             : element_bytes * static_cast<std::int64_t>(lanes);
+                result.operands[memory_index].memory.displacement =
+                    bytes_per_destination * static_cast<std::int64_t>(memory_index);
+            }
         }
     }
     const auto control_flow =

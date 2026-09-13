@@ -64,8 +64,10 @@ std::string_view call_kind_name(CallKind kind) noexcept
 Result<void> validate_control_flow_graph(const ControlFlowGraph& graph)
 {
     std::set<aarch64::GuestAddress> instruction_addresses;
-    for (const auto& [start, block] : graph.blocks)
+    for (const auto& block_entry : graph.blocks)
     {
+        const auto& start = block_entry.first;
+        const auto& block = block_entry.second;
         if ((start & 0x3U) != 0U || block.start != start || block.instructions.empty())
         {
             return Result<void>::failure(make_error(
@@ -167,8 +169,10 @@ std::string render_control_flow_graph(const ControlFlowGraph& graph)
     output << "entry: " << hex_address(graph.entry) << '\n'
            << "blocks: " << graph.blocks.size() << '\n'
            << "instructions: " << graph.instruction_count << '\n';
-    for (const auto& [start, block] : graph.blocks)
+    for (const auto& block_entry : graph.blocks)
     {
+        const auto& start = block_entry.first;
+        const auto& block = block_entry.second;
         output << "\nblock " << hex_address(start) << '\n';
         for (const auto& instruction : block.instructions)
         {

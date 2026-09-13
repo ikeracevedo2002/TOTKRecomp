@@ -395,6 +395,10 @@ struct FunctionMapOptions
     // are still expanded transitively and are never treated as speculative.
     std::set<memory::GuestAddress> execution_closure_roots;
     bool continue_after_function_failure = true;
+    // Independent function CFGs are analyzed in bounded waves. Results are
+    // merged in canonical-entry order so discovery and accounting remain
+    // deterministic.
+    std::size_t analysis_workers = 1U;
     // Optional immutable analysis reuse. The builder copies validated records
     // from this map and invalidates any record whose boundary dependencies are
     // touched by newly introduced strong entries before publishing a new map.

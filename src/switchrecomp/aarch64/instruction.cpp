@@ -1,5 +1,8 @@
 #include "switchrecomp/aarch64/instruction.hpp"
 
+#include <algorithm>
+#include <cstddef>
+
 namespace switchrecomp::aarch64
 {
 
@@ -96,11 +99,18 @@ std::string_view instruction_id_name(InstructionId id) noexcept
     switch (id)
     {
     case InstructionId::Unknown: return "unknown";
+    case InstructionId::Udf: return "udf";
     case InstructionId::Nop: return "nop";
     case InstructionId::Add: return "add";
     case InstructionId::Adds: return "adds";
     case InstructionId::Sub: return "sub";
     case InstructionId::Subs: return "subs";
+    case InstructionId::Adc: return "adc";
+    case InstructionId::Adcs: return "adcs";
+    case InstructionId::Sbc: return "sbc";
+    case InstructionId::Sbcs: return "sbcs";
+    case InstructionId::Ngc: return "ngc";
+    case InstructionId::Ngcs: return "ngcs";
     case InstructionId::And: return "and";
     case InstructionId::Ands: return "ands";
     case InstructionId::Orr: return "orr";
@@ -144,8 +154,18 @@ std::string_view instruction_id_name(InstructionId id) noexcept
     case InstructionId::Mneg: return "mneg";
     case InstructionId::Umulh: return "umulh";
     case InstructionId::Smulh: return "smulh";
+    case InstructionId::Umaddl: return "umaddl";
+    case InstructionId::Umsubl: return "umsubl";
+    case InstructionId::Smaddl: return "smaddl";
+    case InstructionId::Smsubl: return "smsubl";
+    case InstructionId::Umull: return "umull";
+    case InstructionId::Smull: return "smull";
     case InstructionId::Udiv: return "udiv";
     case InstructionId::Sdiv: return "sdiv";
+    case InstructionId::Crc32: return "crc32";
+    case InstructionId::Prfm: return "prfm";
+    case InstructionId::Rev: return "rev";
+    case InstructionId::Rev16: return "rev16";
     case InstructionId::Adr: return "adr";
     case InstructionId::Adrp: return "adrp";
     case InstructionId::Ldr: return "ldr";
@@ -236,7 +256,9 @@ std::string_view simd_operation_name(SimdOperation operation) noexcept
     case SimdOperation::None: return "none";
     case SimdOperation::Fmov: return "fmov";
     case SimdOperation::Movi: return "movi";
+    case SimdOperation::Mvni: return "mvni";
     case SimdOperation::Fadd: return "fadd";
+    case SimdOperation::Faddp: return "faddp";
     case SimdOperation::Fsub: return "fsub";
     case SimdOperation::Fmul: return "fmul";
     case SimdOperation::Fdiv: return "fdiv";
@@ -247,6 +269,8 @@ std::string_view simd_operation_name(SimdOperation operation) noexcept
     case SimdOperation::Fmax: return "fmax";
     case SimdOperation::Fcmp: return "fcmp";
     case SimdOperation::Fcmpe: return "fcmpe";
+    case SimdOperation::Fccmp: return "fccmp";
+    case SimdOperation::Fccmpe: return "fccmpe";
     case SimdOperation::Fcsel: return "fcsel";
     case SimdOperation::Scvtf: return "scvtf";
     case SimdOperation::Ucvtf: return "ucvtf";
@@ -275,14 +299,195 @@ std::string_view simd_operation_name(SimdOperation operation) noexcept
     case SimdOperation::Fcmeq: return "fcmeq";
     case SimdOperation::Fcmgt: return "fcmgt";
     case SimdOperation::Fcmge: return "fcmge";
+    case SimdOperation::Fcmlt: return "fcmlt";
+    case SimdOperation::Fcmle: return "fcmle";
     case SimdOperation::Cmeq: return "cmeq";
     case SimdOperation::Cmgt: return "cmgt";
     case SimdOperation::Cmge: return "cmge";
     case SimdOperation::Cmhi: return "cmhi";
     case SimdOperation::Cmhs: return "cmhs";
+    case SimdOperation::Fmla: return "fmla";
+    case SimdOperation::Fmls: return "fmls";
+    case SimdOperation::Umull: return "umull";
+    case SimdOperation::Umull2: return "umull2";
+    case SimdOperation::Smull: return "smull";
+    case SimdOperation::Smull2: return "smull2";
+    case SimdOperation::Umlal: return "umlal";
+    case SimdOperation::Umlal2: return "umlal2";
+    case SimdOperation::Smlal: return "smlal";
+    case SimdOperation::Smlal2: return "smlal2";
+    case SimdOperation::Umlsl: return "umlsl";
+    case SimdOperation::Umlsl2: return "umlsl2";
+    case SimdOperation::Smlsl: return "smlsl";
+    case SimdOperation::Smlsl2: return "smlsl2";
+    case SimdOperation::Tbl: return "tbl";
+    case SimdOperation::Tbx: return "tbx";
+    case SimdOperation::Bif: return "bif";
+    case SimdOperation::Bit: return "bit";
+    case SimdOperation::Bsl: return "bsl";
     case SimdOperation::St1: return "st1";
+    case SimdOperation::St2: return "st2";
+    case SimdOperation::St3: return "st3";
+    case SimdOperation::St4: return "st4";
+    case SimdOperation::Ld1: return "ld1";
+    case SimdOperation::Ld1r: return "ld1r";
+    case SimdOperation::Ld2: return "ld2";
+    case SimdOperation::Ld2r: return "ld2r";
+    case SimdOperation::Ld3: return "ld3";
+    case SimdOperation::Ld3r: return "ld3r";
+    case SimdOperation::Ld4: return "ld4";
+    case SimdOperation::Ld4r: return "ld4r";
     }
     return "unknown";
+}
+
+bool is_scalar_widening_multiply_form_liftable(const DecodedInstruction& instruction) noexcept
+{
+    if (instruction.id != InstructionId::Umull && instruction.id != InstructionId::Smull) return false;
+    if (instruction.operands.size() != 3U) return false;
+    for (const auto& operand : instruction.operands)
+    {
+        if (operand.kind != OperandKind::Register || operand.reg.kind != RegisterKind::General ||
+            operand.reg.index >= 32U)
+            return false;
+    }
+    return instruction.operands[0].reg.width == RegisterWidth::X64 &&
+           instruction.operands[1].reg.width == RegisterWidth::W32 &&
+           instruction.operands[2].reg.width == RegisterWidth::W32;
+}
+
+bool is_simd_widening_multiply_form_liftable(const DecodedInstruction& instruction) noexcept
+{
+    using Op = SimdOperation;
+    const auto op = instruction.simd_operation;
+    const bool supported = op == Op::Umull || op == Op::Umull2 || op == Op::Smull || op == Op::Smull2 ||
+                           op == Op::Umlal || op == Op::Umlal2 || op == Op::Smlal || op == Op::Smlal2 ||
+                           op == Op::Umlsl || op == Op::Umlsl2 || op == Op::Smlsl || op == Op::Smlsl2;
+    if (!supported || instruction.operands.size() != 3U) return false;
+    for (const auto& operand : instruction.operands)
+    {
+        if (operand.kind != OperandKind::Register || operand.reg.kind != RegisterKind::Vector ||
+            operand.reg.index >= 32U)
+            return false;
+    }
+    const auto destination_bits = vector_element_bits(instruction.operands[0].arrangement);
+    const auto source_bits = vector_element_bits(instruction.operands[1].arrangement);
+    const auto destination_lanes = vector_lane_count(instruction.operands[0].arrangement);
+    const auto source_lanes = vector_lane_count(instruction.operands[1].arrangement);
+    if (destination_bits == 0U || source_bits == 0U || destination_bits != source_bits * 2U ||
+        destination_lanes == 0U || source_lanes == 0U ||
+        instruction.operands[1].arrangement != instruction.operands[2].arrangement)
+        return false;
+    const bool upper = op == Op::Umull2 || op == Op::Smull2 || op == Op::Umlal2 ||
+                       op == Op::Smlal2 || op == Op::Umlsl2 || op == Op::Smlsl2;
+    return (!upper && source_lanes >= destination_lanes) ||
+           (upper && source_lanes >= static_cast<std::uint8_t>(destination_lanes * 2U));
+}
+
+bool is_table_lookup_form_liftable(const DecodedInstruction& instruction) noexcept
+{
+    using Op = SimdOperation;
+    if (instruction.simd_operation != Op::Tbl && instruction.simd_operation != Op::Tbx) return false;
+    if (instruction.operands.size() < 3U || instruction.operands.size() > 6U) return false;
+    const auto& destination = instruction.operands[0];
+    if (destination.kind != OperandKind::Register || destination.reg.kind != RegisterKind::Vector ||
+        destination.reg.index >= 32U ||
+        (destination.arrangement != VectorArrangement::B8 &&
+         destination.arrangement != VectorArrangement::B16))
+        return false;
+    const auto table_count = instruction.operands.size() - 2U;
+    const auto& index = instruction.operands[1U + table_count];
+    if (index.kind != OperandKind::Register || index.reg.kind != RegisterKind::Vector ||
+        index.reg.index >= 32U || index.arrangement != destination.arrangement)
+        return false;
+    const auto& first_table = instruction.operands[1];
+    if (first_table.kind != OperandKind::Register || first_table.reg.kind != RegisterKind::Vector ||
+        first_table.arrangement != VectorArrangement::B16)
+        return false;
+    for (std::size_t table = 0U; table < table_count; ++table)
+    {
+        const auto& operand = instruction.operands[1U + table];
+        if (operand.kind != OperandKind::Register || operand.reg.kind != RegisterKind::Vector ||
+            operand.reg.index >= 32U || operand.arrangement != VectorArrangement::B16 ||
+            operand.reg.index != static_cast<std::uint8_t>((first_table.reg.index + table) % 32U))
+            return false;
+    }
+    return true;
+}
+
+bool is_structure_memory_form_liftable(const DecodedInstruction& instruction) noexcept
+{
+    using Op = SimdOperation;
+    const auto op = instruction.simd_operation;
+    const bool store = op == Op::St1 || op == Op::St2 || op == Op::St3 || op == Op::St4;
+    const bool load = op == Op::Ld1 || op == Op::Ld1r || op == Op::Ld2 || op == Op::Ld2r ||
+                      op == Op::Ld3 || op == Op::Ld3r || op == Op::Ld4 || op == Op::Ld4r;
+    if (!store && !load) return false;
+
+    const auto vector_register = [](const Operand& operand) {
+        return operand.kind == OperandKind::Register && operand.reg.kind == RegisterKind::Vector &&
+               operand.reg.index < 32U;
+    };
+    const auto fixed_count = [&]() -> std::size_t {
+        switch (op)
+        {
+        case Op::St2: case Op::Ld2: case Op::Ld2r: return 2U;
+        case Op::St3: case Op::Ld3: case Op::Ld3r: return 3U;
+        case Op::St4: case Op::Ld4: case Op::Ld4r: return 4U;
+        case Op::Ld1r: return 1U;
+        default: return 0U;
+        }
+    };
+    const auto memory = std::find_if(
+        instruction.operands.begin(), instruction.operands.end(),
+        [](const Operand& operand) { return operand.kind == OperandKind::Memory; });
+    if (memory == instruction.operands.end()) return false;
+    const auto register_count = static_cast<std::size_t>(memory - instruction.operands.begin());
+    const bool variable_count = op == Op::St1 || op == Op::Ld1;
+    if ((variable_count && (register_count < 1U || register_count > 4U)) ||
+        (!variable_count && register_count != fixed_count()))
+        return false;
+    const bool register_post_index = instruction.operands.size() == register_count + 2U;
+    if (instruction.operands.size() != register_count + 1U && !register_post_index) return false;
+    if (register_post_index &&
+        (memory->memory.addressing != MemoryAddressingMode::PostIndex ||
+         instruction.operands.back().kind != OperandKind::Register ||
+         instruction.operands.back().reg.kind != RegisterKind::General ||
+         instruction.operands.back().reg.width != RegisterWidth::X64))
+        return false;
+    if (memory->memory.base.kind != RegisterKind::General ||
+        memory->memory.base.width != RegisterWidth::X64 ||
+        (memory->memory.addressing != MemoryAddressingMode::Base &&
+         memory->memory.addressing != MemoryAddressingMode::PreIndex &&
+         memory->memory.addressing != MemoryAddressingMode::PostIndex))
+        return false;
+    if (!vector_register(instruction.operands[0]) ||
+        instruction.operands[0].arrangement == VectorArrangement::Invalid)
+        return false;
+
+    const auto arrangement = instruction.operands[0].arrangement;
+    const auto lanes = vector_lane_count(arrangement);
+    const auto bits = vector_element_bits(arrangement);
+    if (lanes == 0U || bits == 0U || bits % 8U != 0U) return false;
+    const bool lane_form = op == Op::St1 || op == Op::Ld1;
+    const bool lane = lane_form && instruction.operands[0].vector_index >= 0;
+    if (lane && (register_count != 1U ||
+                 static_cast<std::uint8_t>(instruction.operands[0].vector_index) >= lanes))
+        return false;
+    if (!lane && (op == Op::St2 || op == Op::St3 || op == Op::St4 ||
+                  op == Op::Ld2 || op == Op::Ld2r || op == Op::Ld3 || op == Op::Ld3r ||
+                  op == Op::Ld4 || op == Op::Ld4r) && arrangement == VectorArrangement::D1)
+        return false;
+    const bool replicate = op == Op::Ld1r || op == Op::Ld2r || op == Op::Ld3r || op == Op::Ld4r;
+    if (replicate && register_count != fixed_count()) return false;
+    for (std::size_t index = 0U; index < register_count; ++index)
+    {
+        const auto& operand = instruction.operands[index];
+        if (!vector_register(operand) || operand.arrangement != arrangement ||
+            operand.reg.index != static_cast<std::uint8_t>((instruction.operands[0].reg.index + index) % 32U))
+            return false;
+    }
+    return true;
 }
 
 std::string_view barrier_option_name(BarrierOption option) noexcept

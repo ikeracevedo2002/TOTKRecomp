@@ -9,10 +9,12 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <utility>
 
@@ -1424,6 +1426,22 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
         cfg_options.allowed_code_range = input.identity.executable_ranges.front();
     }
     cfg_options.known_function_entries = known_function_entries;
+    // Decoder creation initializes a Capstone handle. Reuse one decoder per
+    // analysis worker for every CFG in this map build instead of paying that
+    // setup cost once per discovered function. A decoder is kept private to
+    // its worker because the underlying Capstone handle is not shared here.
+    const auto worker_count = std::max<std::size_t>(options.analysis_workers, 1U);
+    std::vector<std::unique_ptr<aarch64::AArch64Decoder>> decoders;
+    decoders.reserve(worker_count);
+    for (std::size_t index = 0U; index < worker_count; ++index)
+    {
+        auto decoder = aarch64::AArch64Decoder::create();
+        if (!decoder)
+        {
+            return Result<FinalizedFunctionMap>::failure(decoder.error());
+        }
+        decoders.push_back(std::move(decoder).value());
+    }
 
     std::size_t analyzed_instructions = 0U;
     std::size_t analyzed_blocks = 0U;
@@ -1520,23 +1538,96 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
         accounting.bytes_analyzed = analyzed_bytes;
         return Result<void>::success();
     };
-    while (!pending.empty())
-    {
-        const auto entry = *pending.begin();
-        pending.erase(pending.begin());
-        if (!processed.insert(entry).second)
+    const auto analyze_wave = [&](const std::vector<GuestAddress>& entries)
+        -> Result<std::vector<std::optional<Result<ControlFlowGraph>>>> {
+        std::vector<std::optional<Result<ControlFlowGraph>>> graphs(entries.size());
+        if (entries.size() <= 1U || worker_count <= 1U)
         {
-            continue;
+            for (std::size_t index = 0U; index < entries.size(); ++index)
+            {
+                graphs[index] = analyze_control_flow(
+                    *input.memory, *decoders[0U], entries[index], cfg_options);
+            }
+            return Result<std::vector<std::optional<Result<ControlFlowGraph>>>>::success(
+                std::move(graphs));
         }
+
+        const auto wave_workers = std::min(worker_count, entries.size());
+        std::atomic<std::size_t> next{0U};
+        std::vector<std::thread> threads;
+        threads.reserve(wave_workers);
+        const auto join_threads = [&]() noexcept {
+            for (auto& thread : threads)
+                if (thread.joinable()) thread.join();
+        };
+        try
+        {
+            for (std::size_t worker = 0U; worker < wave_workers; ++worker)
+            {
+                threads.emplace_back([&, worker]() {
+                    for (;;)
+                    {
+                        const auto index = next.fetch_add(1U, std::memory_order_relaxed);
+                        if (index >= entries.size()) return;
+                        try
+                        {
+                            graphs[index] = analyze_control_flow(
+                                *input.memory, *decoders[worker], entries[index], cfg_options);
+                        }
+                        catch (const std::bad_alloc&)
+                        {
+                            graphs[index] = Result<ControlFlowGraph>::failure(make_error(
+                                ErrorCode::ResourceLimit,
+                                "parallel function CFG analysis allocation failed"));
+                        }
+                        catch (...)
+                        {
+                            graphs[index] = Result<ControlFlowGraph>::failure(make_error(
+                                ErrorCode::ThreadCreationFailed,
+                                "parallel function CFG analysis failed unexpectedly"));
+                        }
+                    }
+                });
+            }
+        }
+        catch (const std::exception&)
+        {
+            join_threads();
+            return Result<std::vector<std::optional<Result<ControlFlowGraph>>>>::failure(
+                make_error(ErrorCode::ThreadCreationFailed,
+                           "unable to create the bounded function-analysis worker pool"));
+        }
+        catch (...)
+        {
+            join_threads();
+            return Result<std::vector<std::optional<Result<ControlFlowGraph>>>>::failure(
+                make_error(ErrorCode::ThreadCreationFailed,
+                           "unable to create the bounded function-analysis worker pool"));
+        }
+        join_threads();
+        for (const auto& graph : graphs)
+        {
+            if (!graph)
+            {
+                return Result<std::vector<std::optional<Result<ControlFlowGraph>>>>::failure(
+                    make_error(ErrorCode::ThreadCreationFailed,
+                               "function-analysis worker did not publish a result"));
+            }
+        }
+        return Result<std::vector<std::optional<Result<ControlFlowGraph>>>>::success(
+            std::move(graphs));
+    };
+
+    const auto process_graph = [&](GuestAddress entry, Result<ControlFlowGraph>& graph,
+                                   std::size_t pending_work,
+                                   std::optional<GuestAddress> next_work) -> Result<void> {
         auto record = records.find(entry);
         if (record == records.end())
         {
-            return Result<FinalizedFunctionMap>::failure(
+            return Result<void>::failure(
                 make_error(ErrorCode::InvalidFormat, "function discovery lost a pending seed"));
         }
-
-        const auto graph = analyze_control_flow(*input.memory, entry, cfg_options);
-        if (!graph)
+        if (!graph.has_value())
         {
             if (const auto dimension = cfg_budget_dimension(graph.error().code))
             {
@@ -1545,18 +1636,18 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
                     {
                     case AnalysisBudgetDimension::Instructions: return analyzed_instructions;
                     case AnalysisBudgetDimension::Blocks: return analyzed_blocks;
-                    case AnalysisBudgetDimension::Seeds: return pending.size();
+                    case AnalysisBudgetDimension::Seeds: return pending_work;
                     default: return std::size_t{0U};
                     }
                 }();
-                return Result<FinalizedFunctionMap>::failure(budget_failure(
+                return Result<void>::failure(budget_failure(
                     accounting, dimension.value(), consumed,
                     dimension.value() == AnalysisBudgetDimension::Instructions
                         ? budgets.max_instructions
                         : dimension.value() == AnalysisBudgetDimension::Blocks
                             ? budgets.max_blocks
                             : budgets.max_seeds,
-                    "cfg_discovery", pending.size(), entry,
+                    "cfg_discovery", pending_work, next_work,
                     "function CFG analysis exceeded its effective budget: " +
                         graph.error().message));
             }
@@ -1566,20 +1657,13 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
                 category_for(graph.error().code), graph.error().code, entry, std::nullopt,
                 graph.error().message});
             if (!options.continue_after_function_failure)
-            {
-                return Result<FinalizedFunctionMap>::failure(graph.error());
-            }
-            continue;
+                return Result<void>::failure(graph.error());
+            return Result<void>::success();
         }
 
         const auto& graph_value = graph.value();
-        const auto accounted = account_graph(
-            graph_value, "cfg_discovery", pending.size(),
-            pending.empty() ? std::nullopt : std::optional<GuestAddress>(*pending.begin()));
-        if (!accounted)
-        {
-            return Result<FinalizedFunctionMap>::failure(accounted.error());
-        }
+        const auto accounted = account_graph(graph_value, "cfg_discovery", pending_work, next_work);
+        if (!accounted) return accounted;
         ++accounting.functions_cfg_analyzed;
         if (reuse_enabled && previous_canonical_entries.contains(entry))
             ++accounting.reanalyzed_functions;
@@ -1598,10 +1682,8 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
                 category_for(range.error().code), range.error().code, entry, std::nullopt,
                 range.error().message});
             if (!options.continue_after_function_failure)
-            {
-                return Result<FinalizedFunctionMap>::failure(range.error());
-            }
-            continue;
+                return Result<void>::failure(range.error());
+            return Result<void>::success();
         }
         populate_boundary_dependencies(record->second, known_function_entries);
         record->second.translation_status = TranslationStatus::Analyzed;
@@ -1621,10 +1703,7 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
                 const bool was_new = records.find(target) == records.end();
                 const auto added = add_seed(records, pending, input, seed, budgets, seed_count,
                                             accounting, "direct_call_expansion");
-                if (!added)
-                {
-                    return Result<FinalizedFunctionMap>::failure(added.error());
-                }
+                if (!added) return added;
                 ++accounting.new_seeds_generated;
                 if (was_new) ++source.new_canonical_entries;
                 else
@@ -1639,6 +1718,34 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
                 }
                 cfg_options.known_function_entries = known_function_entries;
             }
+        }
+        return Result<void>::success();
+    };
+
+    while (!pending.empty())
+    {
+        std::vector<GuestAddress> entries;
+        entries.reserve(std::min(worker_count, pending.size()));
+        while (!pending.empty() && entries.size() < worker_count)
+        {
+            const auto entry = *pending.begin();
+            pending.erase(pending.begin());
+            if (processed.insert(entry).second) entries.push_back(entry);
+        }
+        const auto graphs = analyze_wave(entries);
+        if (!graphs) return Result<FinalizedFunctionMap>::failure(graphs.error());
+        auto analyzed = std::move(graphs).value();
+        for (std::size_t index = 0U; index < entries.size(); ++index)
+        {
+            std::optional<GuestAddress> next_work;
+            if (index + 1U < entries.size()) next_work = entries[index + 1U];
+            if (!pending.empty() && (!next_work || *pending.begin() < next_work.value()))
+                next_work = *pending.begin();
+            const auto processed_graph = process_graph(
+                entries[index], analyzed[index].value(),
+                pending.size() + entries.size() - index - 1U, next_work);
+            if (!processed_graph)
+                return Result<FinalizedFunctionMap>::failure(processed_graph.error());
         }
     }
 
@@ -1679,7 +1786,8 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
             {
                 continue;
             }
-            const auto graph = analyze_control_flow(*input.memory, entry, cfg_options);
+            const auto graph = analyze_control_flow(
+                *input.memory, *decoders[0U], entry, cfg_options);
             if (!graph)
             {
                 if (const auto dimension = cfg_budget_dimension(graph.error().code))

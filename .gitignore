@@ -35,3 +35,9 @@ title.keys
 .vscode/
 .idea/
 compile_commands.json
+
+# Private local game content and analysis material. NEVER delete, stage, or commit.
+# Contains the recovered ExeFS module set (~47 GB). This directory is intentional.
+# Do not run `git clean -fdx` or `git reset --hard` without confirming this is preserved.
+/local/
+.DS_Store

@@ -58,7 +58,7 @@ using json = nlohmann::json;
     case Id::Stlr: case Id::Stlrb: case Id::Stlrh: case Id::Ldxp: case Id::Ldaxp:
     case Id::Stxp: case Id::Stlxp: return "atomic";
     case Id::Dmb: case Id::Dsb: case Id::Isb: return "barrier";
-    case Id::Mrs: case Id::Msr: case Id::Svc: case Id::Brk: case Id::Hlt: case Id::Hvc:
+    case Id::Udf: case Id::Mrs: case Id::Msr: case Id::Svc: case Id::Brk: case Id::Hlt: case Id::Hvc:
     case Id::Smc: case Id::Eret: return "system";
     case Id::Ldr: case Id::Ldrb: case Id::Ldrh: case Id::Ldrsb: case Id::Ldrsh:
     case Id::Ldrsw: case Id::Str: case Id::Strb: case Id::Strh: case Id::Ldp: case Id::Stp:

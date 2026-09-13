@@ -735,6 +735,9 @@ struct IndirectTargetDiscoveryOptions
     AnalysisOptions cfg;
     bool allow_runtime_cfg_promotion = true;
     bool require_independent_static_evidence = false;
+    // Independent module-map publications may be built concurrently. The
+    // coordinator still publishes results in deterministic module order.
+    std::size_t refinement_workers = 1U;
 };
 
 // Assess a stable candidate sequence against one immutable process-map

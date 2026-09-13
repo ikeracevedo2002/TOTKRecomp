@@ -487,6 +487,54 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                 }
                 break;
             }
+            case ir::Opcode::DivideUnsigned:
+            case ir::Opcode::DivideSigned:
+            {
+                const auto left = read(instruction.operands[0]);
+                const auto right = read(instruction.operands[1]);
+                if (!left || !right)
+                {
+                    return Result<runtime::ExecutionResult>::failure(!left ? left.error() : right.error());
+                }
+                const auto type = instruction.result_type;
+                const auto mask = mask_for(type);
+                const auto dividend = left.value() & mask;
+                const auto divisor = right.value() & mask;
+                std::uint64_t quotient = 0U;
+                if (divisor != 0U)
+                {
+                    if (instruction.opcode == ir::Opcode::DivideUnsigned)
+                    {
+                        quotient = dividend / divisor;
+                    }
+                    else
+                    {
+                        const auto extend = [type, mask](std::uint64_t value) -> std::int64_t {
+                            const auto masked = value & mask;
+                            if (type.bit_width() < 64U && signed_bit(masked, type))
+                            {
+                                return static_cast<std::int64_t>(masked | ~mask);
+                            }
+                            return static_cast<std::int64_t>(masked);
+                        };
+                        const auto signed_dividend = extend(dividend);
+                        const auto signed_divisor = extend(divisor);
+                        const auto minimum =
+                            type.bit_width() == 32U
+                                ? static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::min())
+                                : std::numeric_limits<std::int64_t>::min();
+                        quotient = (signed_dividend == minimum && signed_divisor == -1)
+                                       ? (static_cast<std::uint64_t>(minimum) & mask)
+                                       : (static_cast<std::uint64_t>(signed_dividend / signed_divisor) & mask);
+                    }
+                }
+                const auto stored = store_result(quotient & mask);
+                if (!stored)
+                {
+                    return Result<runtime::ExecutionResult>::failure(stored.error());
+                }
+                break;
+            }
             case ir::Opcode::Not:
             {
                 const auto operand = read(instruction.operands[0]);
@@ -624,6 +672,36 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                 {
                     return Result<runtime::ExecutionResult>::failure(stored.error());
                 }
+                break;
+            }
+            case ir::Opcode::AddWithCarry:
+            case ir::Opcode::AddWithCarryCarry:
+            case ir::Opcode::AddWithCarryOverflow:
+            {
+                const auto left = read(instruction.operands[0]);
+                const auto right = read(instruction.operands[1]);
+                const auto carry = read(instruction.operands[2]);
+                const auto type = function.value(instruction.operands[0])->type;
+                if (!left || !right || !carry)
+                {
+                    return Result<runtime::ExecutionResult>::failure(!left ? left.error()
+                                                                  : !right ? right.error() : carry.error());
+                }
+                const auto mask = mask_for(type);
+                const auto left_value = left.value() & mask;
+                const auto right_value = right.value() & mask;
+                const auto partial = left_value + right_value;
+                const auto result = (partial + (carry.value() != 0U ? 1U : 0U)) & mask;
+                const bool carry_out = partial < left_value || result < partial;
+                const bool overflow = signed_bit(left_value, type) == signed_bit(right_value, type) &&
+                                      signed_bit(result, type) != signed_bit(left_value, type);
+                const auto value = instruction.opcode == ir::Opcode::AddWithCarry
+                                       ? result
+                                       : instruction.opcode == ir::Opcode::AddWithCarryCarry
+                                             ? (carry_out ? 1U : 0U)
+                                             : (overflow ? 1U : 0U);
+                const auto stored = store_result(value);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
                 break;
             }
             case ir::Opcode::AddCarry:
@@ -802,6 +880,21 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                 if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
                 break;
             }
+            case ir::Opcode::FpFused:
+            {
+                const auto left = read(instruction.operands[0]);
+                const auto right = read(instruction.operands[1]);
+                const auto accumulator = read(instruction.operands[2]);
+                if (!left || !right || !accumulator)
+                    return Result<runtime::ExecutionResult>::failure(!left ? left.error() : !right ? right.error() : accumulator.error());
+                const auto value = runtime::fp_fused(
+                    cpu, static_cast<runtime::FpFusedOperation>(instruction.fp_fused),
+                    instruction.result_type == ir::f32_type() ? 32U : 64U,
+                    left.value(), right.value(), accumulator.value());
+                const auto stored = store_result(value);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
             case ir::Opcode::FpUnary:
             {
                 const auto value = read(instruction.operands[0]);
@@ -919,6 +1012,56 @@ Result<runtime::ExecutionResult> execute_until_boundary(
                     runtime::Vector128{left.value(), left_high.value()}, runtime::Vector128{right.value(), right_high.value()},
                     static_cast<std::uint8_t>(instruction.immediate));
                 const auto stored = store_result(result_vector.lo, result_vector.hi);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::Crc32:
+            {
+                const auto accumulator = read(instruction.operands[0]);
+                const auto source = read(instruction.operands[1]);
+                if (!accumulator || !source)
+                    return Result<runtime::ExecutionResult>::failure(!accumulator ? accumulator.error() : source.error());
+                std::uint32_t crc = static_cast<std::uint32_t>(accumulator.value());
+                const auto polynomial = instruction.signed_operation ? 0x82f63b78U : 0xedb88320U;
+                const auto bytes = instruction.memory_size;
+                const auto input = source.value();
+                for (std::uint8_t byte = 0U; byte < bytes; ++byte)
+                {
+                    crc ^= static_cast<std::uint32_t>((input >> (byte * 8U)) & 0xffU);
+                    for (unsigned int bit = 0U; bit < 8U; ++bit)
+                        crc = (crc & 1U) != 0U ? (crc >> 1U) ^ polynomial : crc >> 1U;
+                }
+                const auto stored = store_result(crc);
+                if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
+                break;
+            }
+            case ir::Opcode::VectorTableLookup:
+            {
+                const auto table_count = instruction.vector_index;
+                runtime::Vector128 tables[4]{};
+                for (std::uint8_t table = 0U; table < table_count; ++table)
+                {
+                    const auto value = read(instruction.operands[table]);
+                    const auto high = get_high_value(function, frame.values, frame.high_values,
+                                                     instruction.operands[table]);
+                    if (!value || !high)
+                        return Result<runtime::ExecutionResult>::failure(!value ? value.error() : high.error());
+                    tables[table] = runtime::Vector128{value.value(), high.value()};
+                }
+                const auto index_value = read(instruction.operands[table_count]);
+                const auto index_high = get_high_value(function, frame.values, frame.high_values,
+                                                       instruction.operands[table_count]);
+                const auto destination_value = read(instruction.operands[table_count + 1U]);
+                const auto destination_high = get_high_value(function, frame.values, frame.high_values,
+                                                             instruction.operands[table_count + 1U]);
+                if (!index_value || !index_high || !destination_value || !destination_high)
+                    return Result<runtime::ExecutionResult>::failure(!index_value ? index_value.error() : !index_high ? index_high.error() : !destination_value ? destination_value.error() : destination_high.error());
+                const auto result = runtime::vector_table_lookup(
+                    static_cast<std::uint8_t>(instruction.arrangement), table_count,
+                    instruction.table_lookup_preserve_destination, tables,
+                    runtime::Vector128{index_value.value(), index_high.value()},
+                    runtime::Vector128{destination_value.value(), destination_high.value()});
+                const auto stored = store_result(result.lo, result.hi);
                 if (!stored) return Result<runtime::ExecutionResult>::failure(stored.error());
                 break;
             }

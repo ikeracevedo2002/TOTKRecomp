@@ -54,6 +54,8 @@ enum class Opcode : std::uint8_t
     Mul,
     MulHighUnsigned,
     MulHighSigned,
+    DivideUnsigned,
+    DivideSigned,
     And,
     Or,
     Xor,
@@ -74,6 +76,9 @@ enum class Opcode : std::uint8_t
     AddOverflow,
     SubCarry,
     SubOverflow,
+    AddWithCarry,
+    AddWithCarryCarry,
+    AddWithCarryOverflow,
     EvaluateCondition,
     ReadRegister,
     WriteRegister,
@@ -99,6 +104,7 @@ enum class Opcode : std::uint8_t
     ReadFpStatus,
     WriteFpStatus,
     FpBinary,
+    FpFused,
     FpUnary,
     FpCompare,
     FpConvert,
@@ -109,11 +115,14 @@ enum class Opcode : std::uint8_t
     VectorBinary,
     VectorCompare,
     VectorShuffle,
+    VectorTableLookup,
     GuestLoadVector,
     GuestStoreVector,
+    Crc32,
 };
 
 enum class FpBinaryOperation : std::uint8_t { Add, Sub, Mul, Div, Min, Max };
+enum class FpFusedOperation : std::uint8_t { MultiplyAdd, MultiplySubtract };
 enum class FpUnaryOperation : std::uint8_t { Neg, Abs, Sqrt };
 enum class FpConversion : std::uint8_t {
     SignedIntToFp,

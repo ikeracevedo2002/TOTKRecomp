@@ -446,10 +446,24 @@ class ProcessFunctionMap
   private:
     using MapStorage = std::vector<std::shared_ptr<const FinalizedFunctionMap>>;
 
+    struct AddressRangeIndexEntry
+    {
+        memory::GuestAddress base = 0U;
+        memory::GuestAddress end = 0U;
+        memory::GuestAddress maximum_end = 0U;
+        std::size_t map_index = 0U;
+    };
+    using AddressRangeIndex = std::vector<AddressRangeIndexEntry>;
+
     [[nodiscard]] static Result<ProcessFunctionMap> from_storage(MapStorage maps);
+    [[nodiscard]] std::optional<std::size_t> find_map_index(
+        memory::GuestAddress entry) const noexcept;
 
     MapStorage maps_;
-    std::map<memory::GuestAddress, std::size_t> entries_;
+    // The module address ranges are immutable for normal refinements. Sharing
+    // this compact interval index lets replace_module publish a new module map
+    // without rebuilding an entry node for every function in every module.
+    std::shared_ptr<const AddressRangeIndex> address_ranges_;
 };
 
 } // namespace switchrecomp::analysis

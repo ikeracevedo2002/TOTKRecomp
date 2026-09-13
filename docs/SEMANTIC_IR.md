@@ -140,7 +140,10 @@ disassembly.
 | Scalar FP and required conversions/rounding | FMOV, FADD/FSUB/FMUL/FDIV, FNEG/FABS/FSQRT, FCMP/FCSEL, SCVTF/UCVTF, FCVTZS/FCVTZU/FCVT, FRINTN/P/M/Z, FMIN/FMAX | FPCR/FPSR runtime state | read/write | supported forms |
 | NEON lane/data operations | DUP, INS, UMOV, SMOV, EXT, ZIP/UZP/TRN, logical/integer/FP vector arithmetic and comparisons | no | read/write | supported arrangements |
 | FP/SIMD memory | S/D/Q LDR/STR and LDP/STP | no | read/write | checked guest memory |
-| FP/SIMD fused multiply-add | — | — | — | explicit rejection |
+| FP/SIMD fused multiply-add | FMLA/FMLS vector and by-element forms | FPCR/FPSR runtime state | no | supported through fused reference-runtime operation |
+| AdvSIMD widening multiply | UMULL/SMULL, upper-half, UMLAL/UMLSL signed and unsigned forms | no | no | supported arrangements |
+| AdvSIMD table lookup | TBL/TBX with one-to-four 16-byte tables | no | no | B8/B16 indexes; bounded lookup and TBX preservation |
+| AdvSIMD zero compare | FCMLT/FCMLE zero-immediate forms | FPCR/FPSR runtime state | no | supported vector arrangements |
 | LDXR/STXR and LDAXR/STLXR, B/H/W/X | yes | yes | yes | deterministic per-thread 64-byte reservations |
 | LDAR/STLR, B/H/W/X | yes | yes | yes | acquire/release checked shared accesses |
 | CLREX and DMB/DSB/ISB | yes | yes | yes | explicit barrier kind and option |

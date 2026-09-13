@@ -15,8 +15,11 @@ enabled. Refinement publishes immutable process maps by sharing unchanged
 module records and rebuilding only touched modules. The rebuilt module passes
 the previous frozen map to `FunctionMapBuilder`, which retains decoded/finalized
 records until a newly introduced callable boundary invalidates their ownership
-or boundary dependency. The publication coordinator still reconstructs the
-process entry index; that is the remaining map-level reconstruction cost.
+or boundary dependency. `ProcessFunctionMap::replace_module` shares its
+immutable executable-range index when the replaced module keeps the same
+layout; only a new module or changed layout takes the complete index-building
+path. This keeps publication work proportional to the touched module and
+preserves exact canonical-entry collision checks.
 
 The refinement driver first assesses the currently pending candidates against
 one map generation. Structurally independent candidates are grouped by target
@@ -27,7 +30,8 @@ Candidate accounting and resource budgets charge each assessment and the
 aggregate analysis work exactly once, while the map-rebuild counter charges one
 publication per successful batch.
 
-Independent assessment can use a bounded worker pool:
+Independent assessment, full function CFG discovery, and independent
+touched-module map construction can use the same bounded worker setting:
 
 ```text
 build/run-entry --analysis-workers 1 ...
@@ -37,8 +41,13 @@ build/run-entry --analysis-workers 4 ...
 `1` is the serial reference behavior. The default is the lesser of four and
 the host-reported hardware concurrency. Workers receive immutable memory,
 process-image, and process-map inputs and write fixed-index result slots; the
-coordinator merges those slots in input order. Worker count is emitted only in
-the diagnostic profile stream, not in the stable JSON report.
+coordinator merges those slots in input/module/function order and publishes
+maps deterministically. Full function discovery analyzes bounded waves of
+independent entries and merges direct-call discoveries between waves. Nested
+module/function pools are avoided so the configured worker count remains a
+bound. Worker count is emitted only in the diagnostic profile stream, not in
+the stable JSON report. A failed parallel map build is reported without
+publishing a partial process map.
 
 The optional stderr stream additionally marks refinement wall time, rounds and
 transactions, target classification, IR verification, interpreter boundary
