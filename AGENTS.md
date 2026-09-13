@@ -2,25 +2,27 @@
 
 This file is persistent project context for future agent sessions. The
 external Master Spec is authoritative for milestone scope, architecture,
-invariants, stop conditions, and prohibited shortcuts. Codex and Pi must not
-silently redesign those decisions.
+invariants, stop conditions, and prohibited shortcuts. Pi must not silently
+redesign those decisions.
 
-## Roles
+## Execution model
 
-Codex is the orchestrator and primary implementer. It implements the scoped
-change, performs focused builds and tests, runs private real validation when a
-milestone requires it, creates committed checkpoints, launches Pi, consumes Pi
-reports, fixes justified blocking defects, and runs final CI.
+Pi is the sole project agent. It owns the full milestone lifecycle: implement
+the scoped change, perform focused builds and tests, run private real
+validation when a milestone requires it, create committed checkpoints,
+self-review the resulting state, fix justified blocking defects, and run final
+CI.
 
-Pi is the independent verifier. It reviews exact committed SHAs, analyzes
-invariants, attempts adversarial tests, and reports findings. Pi does not
-modify production code; Codex owns corrections.
+There is no Codex/Pi role split, verifier handoff, detached-review requirement,
+or tmux-based agent coordination. When an independent review is explicitly
+requested, treat it as an additional validation activity rather than a second
+persistent agent role.
 
 The normal topology is:
 
 ```text
-external architect -> Codex -> checkpoint SHA -> detached review worktree
-                   -> tmux Pi verifier -> report -> Codex fixes -> final validation
+external architect -> Pi -> checkpoint SHA -> validation/self-review
+                   -> Pi fixes -> final validation
 ```
 
 ## Progress metric
@@ -149,10 +151,10 @@ committed.
 - Do not merge or opportunistically rebase from `main`.
 - Preserve unrelated dirty state exactly; do not reset, stash, clean, stage, or
   commit it.
-- Review committed checkpoints in a detached worktree, never Codex's mutable
-  implementation worktree.
-- Record transient checkpoint, review, and CI identifiers in the external
-  handoff, not tracked project documents.
+- Use committed checkpoints as stable references for self-review and
+  validation when needed; no second-agent review worktree is required.
+- Record transient checkpoint and CI identifiers in the external handoff, not
+  tracked project documents.
 
 ## Build ladder
 
