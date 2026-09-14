@@ -77,3 +77,19 @@ belongs to it; a function record is invalidated when a newly introduced strong
 entry intersects its precise ownership or recorded boundary dependency; all
 other module records remain shared. No persistent disk cache is used by this
 milestone.
+
+## Compact frontier extraction
+
+Extract a path-free decision summary from a private `run-entry` report without
+copying its event history or local configuration:
+
+```text
+python3 scripts/extract_frontier.py local/private-report.json
+```
+
+The output includes the source report SHA-256, exact frontier identity, and core
+refinement counters. It contains no input paths. `scripts/test_extract_frontier.py`
+provides the non-proprietary schema/privacy regression. The M22 structural
+reproducer remains the normal sub-second development path (0.07 s measured for
+the complete required topology matrix), while only the frozen-input run can
+establish a real frontier.
