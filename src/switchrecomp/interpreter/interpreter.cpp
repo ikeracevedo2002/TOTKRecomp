@@ -149,6 +149,7 @@ Result<runtime::ExecutionResult> execute_until_boundary(
     {
         frame.reset(function);
     }
+    if (options.function_preverified) frame.function_verified = true;
     if (!frame.function_verified)
     {
         const auto verify_start = profiling_enabled() ? std::chrono::steady_clock::now()

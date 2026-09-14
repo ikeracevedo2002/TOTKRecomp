@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -15,6 +16,7 @@
 #include <set>
 #include <sstream>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 namespace switchrecomp::analysis
@@ -145,9 +147,9 @@ struct StagedModule
     return candidate.binding == format::SymbolBinding::Global;
 }
 
-[[nodiscard]] Result<void> validate_relocation_target(const memory::GuestMemory& memory,
-                                                       const format::Relocation& relocation,
-                                                       std::size_t index)
+[[nodiscard]] Result<void> validate_relocation_target(
+    const memory::GuestMemory& memory, std::span<const memory::GuestMemoryRegionInfo> regions,
+    const format::Relocation& relocation, std::size_t index)
 {
     const auto width = loader::relocation_width(relocation.type);
     if ((relocation.target_address % width) != 0U)
@@ -162,6 +164,22 @@ struct StagedModule
         return Result<void>::failure(make_error(
             ErrorCode::ArithmeticOverflow, "process relocation target range overflows"));
     }
+
+    // The process image is immutable while relocation planning runs. Avoid a
+    // lower_bound over GuestMemory's mutable region object and its Result/
+    // diagnostic construction for every relocation; retain the original
+    // validator for the uncommon invalid-target diagnostic path.
+    auto next = std::lower_bound(
+        regions.begin(), regions.end(), relocation.target_address,
+        [](const memory::GuestMemoryRegionInfo& region, GuestAddress value) {
+            return region.base < value;
+        });
+    if (next != regions.begin() && (next == regions.end() || next->base > relocation.target_address))
+        --next;
+    const bool contained = next != regions.end() && next->base <= relocation.target_address &&
+                           end.value() <= next->end();
+    if (contained) return Result<void>::success();
+
     const auto valid = memory.validate_loader_write(relocation.target_address, width);
     if (!valid)
     {
@@ -347,6 +365,23 @@ Result<ProcessSymbolNamespace> ProcessSymbolNamespace::build_impl(
     ProcessSymbolNamespace result;
     try
     {
+        // Symbol eligibility queries are read-only while the process image is
+        // being built. Snapshot the tiny mapping metadata table once instead
+        // of constructing several Result objects and searching GuestMemory
+        // for every defined dynamic symbol.
+        const auto memory_regions = memory.regions();
+        const auto mapped_region = [&](GuestAddress address) {
+            auto next = std::lower_bound(
+                memory_regions.begin(), memory_regions.end(), address,
+                [](const memory::GuestMemoryRegionInfo& region, GuestAddress value) {
+                    return region.base < value;
+                });
+            if (next != memory_regions.begin() &&
+                (next == memory_regions.end() || next->base > address))
+                --next;
+            return next != memory_regions.end() && next->base <= address &&
+                   address < next->end() ? &*next : nullptr;
+        };
         for (const auto& source : sources)
         {
             if (source.module.empty() || source.symbols == nullptr)
@@ -373,12 +408,19 @@ Result<ProcessSymbolNamespace> ProcessSymbolNamespace::build_impl(
                     else
                     {
                         address = calculated.value();
-                        mapped = memory.region_at(calculated.value()).has_value();
-                        if (mapped)
+                        const auto* region = mapped_region(calculated.value());
+                        mapped = region != nullptr;
+                        if (mapped && symbol.type == format::SymbolType::Function)
                         {
-                            const auto executable_result = memory.is_executable(
-                                calculated.value(), symbol.type == format::SymbolType::Function ? 4U : 1U);
-                            executable = executable_result && executable_result.value();
+                            const auto function_end = checked_add_u64(calculated.value(), 4U);
+                            executable = function_end && function_end.value() <= region->end() &&
+                                         memory::has_permission(
+                                             region->permissions, memory::GuestMemoryPermissions::Execute);
+                        }
+                        else if (mapped)
+                        {
+                            executable = memory::has_permission(
+                                region->permissions, memory::GuestMemoryPermissions::Execute);
                         }
                     }
                 }
@@ -419,6 +461,19 @@ Result<ProcessSymbolNamespace> ProcessSymbolNamespace::build_impl(
                       if (left.module != right.module) return left.module < right.module;
                       return left.symbol_index < right.symbol_index;
                   });
+        const auto build_index = [](const auto& entries, auto& index) {
+            std::size_t begin = 0U;
+            while (begin < entries.size())
+            {
+                std::size_t end = begin + 1U;
+                while (end < entries.size() && entries[end].symbol == entries[begin].symbol)
+                    ++end;
+                index.emplace(entries[begin].symbol, ProcessSymbolNamespace::SymbolRange{begin, end});
+                begin = end;
+            }
+        };
+        build_index(result.candidates_, result.candidate_index_);
+        build_index(result.occurrences_, result.occurrence_index_);
         return Result<ProcessSymbolNamespace>::success(std::move(result));
     }
     catch (const std::bad_alloc&)
@@ -455,13 +510,21 @@ ProviderLookup ProcessSymbolNamespace::lookup(
     ProviderLookup result;
     result.completeness = completeness;
     result.completeness_basis = basis;
-    for (const auto& occurrence : occurrences_)
+    if (const auto found = occurrence_index_.find(name); found != occurrence_index_.end())
     {
-        if (occurrence.symbol == name) result.occurrences.push_back(occurrence);
+        const auto [begin, end] = found->second;
+        result.occurrences.insert(
+            result.occurrences.end(),
+            occurrences_.begin() + static_cast<std::vector<ProviderOccurrence>::difference_type>(begin),
+            occurrences_.begin() + static_cast<std::vector<ProviderOccurrence>::difference_type>(end));
     }
-    for (const auto& candidate : candidates_)
+    if (const auto found = candidate_index_.find(name); found != candidate_index_.end())
     {
-        if (candidate.symbol == name) result.candidates.push_back(candidate);
+        const auto [begin, end] = found->second;
+        result.candidates.insert(
+            result.candidates.end(),
+            candidates_.begin() + static_cast<std::vector<ProviderCandidate>::difference_type>(begin),
+            candidates_.begin() + static_cast<std::vector<ProviderCandidate>::difference_type>(end));
     }
     // A candidate in a directory scan is evidence, not a resolved provider.
     // Do not let a partial namespace accidentally become executable state.
@@ -713,23 +776,100 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
                 ErrorCode::InvalidArgument, "primary module is not present in the process image"));
         }
 
+        // NSO digesting and materialization are independent per module and
+        // dominate cold run-entry startup. Compute them in stable input slots;
+        // all later layout, mapping, binding, and relocation publication stays
+        // ordered, so worker count cannot affect semantic output.
+        std::vector<std::optional<Result<StagedModule>>> staged_results(ordered.size());
+        const auto stage_module = [&](std::size_t index) {
+            try
+            {
+                const auto& input = ordered[index];
+                const auto digest = sha256_bytes(input.file_bytes);
+                if (!digest)
+                {
+                    staged_results[index] = Result<StagedModule>::failure(digest.error());
+                    return;
+                }
+                const auto header = format::parse_nso_header(input.file_bytes);
+                if (!header)
+                {
+                    staged_results[index] = Result<StagedModule>::failure(header.error());
+                    return;
+                }
+                const auto image = format::materialize_nso(
+                    input.file_bytes, header.value(), options.module_options.materialization_limits);
+                if (!image)
+                {
+                    staged_results[index] = Result<StagedModule>::failure(image.error());
+                    return;
+                }
+                staged_results[index] = Result<StagedModule>::success(StagedModule{
+                    input.logical_name, input.name_provenance,
+                    static_cast<std::uint64_t>(input.file_bytes.size()), header.value(),
+                    std::move(image).value(), digest.value(), input.explicit_base.value_or(0U),
+                    input.explicit_base ? ModuleBaseProvenance::ExplicitAnalysisBase
+                                        : ModuleBaseProvenance::DeterministicAnalysisLayout});
+            }
+            catch (const std::bad_alloc&)
+            {
+                staged_results[index] = Result<StagedModule>::failure(
+                    make_error(ErrorCode::ResourceLimit, "parallel NSO staging allocation failed"));
+            }
+            catch (...)
+            {
+                staged_results[index] = Result<StagedModule>::failure(
+                    make_error(ErrorCode::ThreadCreationFailed, "parallel NSO staging failed unexpectedly"));
+            }
+        };
+        const auto worker_count = std::min<std::size_t>(
+            10U, std::min(std::max<std::size_t>(options.module_workers, 1U), ordered.size()));
+        if (worker_count <= 1U || ordered.size() <= 1U)
+        {
+            for (std::size_t index = 0U; index < ordered.size(); ++index) stage_module(index);
+        }
+        else
+        {
+            std::atomic<std::size_t> next{0U};
+            std::vector<std::thread> workers;
+            workers.reserve(worker_count);
+            try
+            {
+                for (std::size_t worker = 0U; worker < worker_count; ++worker)
+                {
+                    workers.emplace_back([&]() {
+                        for (;;)
+                        {
+                            const auto index = next.fetch_add(1U, std::memory_order_relaxed);
+                            if (index >= ordered.size()) return;
+                            stage_module(index);
+                        }
+                    });
+                }
+            }
+            catch (...)
+            {
+                for (auto& worker : workers)
+                    if (worker.joinable()) worker.join();
+                return Result<ProcessImage>::failure(make_error(
+                    ErrorCode::ThreadCreationFailed, "unable to create the bounded NSO staging worker pool"));
+            }
+            for (auto& worker : workers)
+                if (worker.joinable()) worker.join();
+        }
+
         std::vector<StagedModule> staged;
         staged.reserve(ordered.size());
-        for (const auto& input : ordered)
+        for (auto& staged_result : staged_results)
         {
-            const auto digest = sha256_bytes(input.file_bytes);
-            if (!digest) return Result<ProcessImage>::failure(digest.error());
-            const auto header = format::parse_nso_header(input.file_bytes);
-            if (!header) return Result<ProcessImage>::failure(header.error());
-            const auto image = format::materialize_nso(input.file_bytes, header.value(),
-                                                        options.module_options.materialization_limits);
-            if (!image) return Result<ProcessImage>::failure(image.error());
-            staged.push_back(StagedModule{input.logical_name, input.name_provenance,
-                                          static_cast<std::uint64_t>(input.file_bytes.size()),
-                                          header.value(), std::move(image).value(),
-                                          digest.value(), input.explicit_base.value_or(0U),
-                                          input.explicit_base ? ModuleBaseProvenance::ExplicitAnalysisBase
-                                                              : ModuleBaseProvenance::DeterministicAnalysisLayout});
+            if (!staged_result)
+            {
+                return Result<ProcessImage>::failure(make_error(
+                    ErrorCode::ThreadCreationFailed, "NSO staging worker did not publish a result"));
+            }
+            if (!staged_result->has_value())
+                return Result<ProcessImage>::failure(staged_result->error());
+            staged.push_back(std::move(staged_result->value()));
         }
 
         struct AssignedRange
@@ -851,49 +991,164 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
         result.executable_state_valid_ = options.plan_relocations && options.apply_relocations;
         result.modules_.reserve(staged.size());
 
-        for (const auto& source : staged)
+        struct ParsedModuleData
         {
+            std::optional<format::ModuleMetadata> metadata;
+            std::optional<format::DynamicSymbolTable> symbols;
+            std::vector<format::Relocation> relocations;
+            std::optional<Error> error;
+        };
+        std::vector<std::optional<ParsedModuleData>> parsed_modules(staged.size());
+        const auto parse_module = [&](std::size_t index) {
+            ParsedModuleData parsed;
+            const auto& source = staged[index];
             PreparedModuleOptions module_options = options.module_options;
             module_options.module_name = source.name;
             module_options.module_base = source.base;
             module_options.apply_relocations = false;
             const auto metadata = format::parse_module_metadata(
                 result.memory_, source.base, module_options.metadata_options);
-            if (!metadata) return Result<ProcessImage>::failure(metadata.error());
-
-            std::optional<format::DynamicSymbolTable> symbols;
-            std::vector<format::Relocation> relocations;
-            if (metadata.value().dynamic)
+            if (!metadata)
             {
-                if (metadata.value().dynamic->symtab)
+                parsed.error = metadata.error();
+                parsed_modules[index] = std::move(parsed);
+                return;
+            }
+            parsed.metadata = std::move(metadata).value();
+            if (parsed.metadata->dynamic)
+            {
+                if (parsed.metadata->dynamic->symtab)
                 {
-                    const auto parsed = format::DynamicSymbolTable::parse(
-                        result.memory_, metadata.value().dynamic.value(),
+                    const auto symbols = format::DynamicSymbolTable::parse(
+                        result.memory_, parsed.metadata->dynamic.value(),
                         module_options.metadata_options.dynamic);
-                    if (!parsed) return Result<ProcessImage>::failure(parsed.error());
-                    symbols = std::move(parsed).value();
+                    if (!symbols)
+                    {
+                        parsed.error = symbols.error();
+                        parsed_modules[index] = std::move(parsed);
+                        return;
+                    }
+                    parsed.symbols = std::move(symbols).value();
                 }
                 const auto rela_entries = format::parse_rela_table(
-                    result.memory_, metadata.value().dynamic.value(), module_options.metadata_options.dynamic);
-                if (!rela_entries) return Result<ProcessImage>::failure(rela_entries.error());
-                const auto rela = format::make_relocations(rela_entries.value(),
-                                                           format::RelocationSource::Rela);
-                if (!rela) return Result<ProcessImage>::failure(rela.error());
-                relocations = std::move(rela).value();
-                const auto jmprel_entries = format::parse_jmprel_table(
-                    result.memory_, metadata.value().dynamic.value(), module_options.metadata_options.dynamic);
-                if (!jmprel_entries) return Result<ProcessImage>::failure(jmprel_entries.error());
-                const auto jmprel = format::make_relocations(jmprel_entries.value(),
-                                                             format::RelocationSource::JmpRel);
-                if (!jmprel) return Result<ProcessImage>::failure(jmprel.error());
-                relocations.insert(relocations.end(), jmprel.value().begin(), jmprel.value().end());
-                if (!relocations.empty() && !symbols)
+                    result.memory_, parsed.metadata->dynamic.value(),
+                    module_options.metadata_options.dynamic);
+                if (!rela_entries)
                 {
-                    return Result<ProcessImage>::failure(make_error(
+                    parsed.error = rela_entries.error();
+                    parsed_modules[index] = std::move(parsed);
+                    return;
+                }
+                const auto rela = format::make_relocations(
+                    rela_entries.value(), format::RelocationSource::Rela);
+                if (!rela)
+                {
+                    parsed.error = rela.error();
+                    parsed_modules[index] = std::move(parsed);
+                    return;
+                }
+                parsed.relocations = std::move(rela).value();
+                const auto jmprel_entries = format::parse_jmprel_table(
+                    result.memory_, parsed.metadata->dynamic.value(),
+                    module_options.metadata_options.dynamic);
+                if (!jmprel_entries)
+                {
+                    parsed.error = jmprel_entries.error();
+                    parsed_modules[index] = std::move(parsed);
+                    return;
+                }
+                const auto jmprel = format::make_relocations(
+                    jmprel_entries.value(), format::RelocationSource::JmpRel);
+                if (!jmprel)
+                {
+                    parsed.error = jmprel.error();
+                    parsed_modules[index] = std::move(parsed);
+                    return;
+                }
+                parsed.relocations.insert(parsed.relocations.end(), jmprel.value().begin(),
+                                          jmprel.value().end());
+                if (!parsed.relocations.empty() && !parsed.symbols)
+                {
+                    parsed.error = make_error(
                         ErrorCode::MissingImportBinding,
-                        "dynamic relocations are present without a dynamic symbol table"));
+                        "dynamic relocations are present without a dynamic symbol table");
+                    parsed_modules[index] = std::move(parsed);
+                    return;
                 }
             }
+            parsed_modules[index] = std::move(parsed);
+        };
+        const auto parse_workers = std::min<std::size_t>(
+            10U, std::min(std::max<std::size_t>(options.module_workers, 1U),
+                          std::max<std::size_t>(staged.size(), 1U)));
+        if (parse_workers <= 1U)
+        {
+            for (std::size_t index = 0U; index < staged.size(); ++index) parse_module(index);
+        }
+        else
+        {
+            std::atomic<std::size_t> next_module{0U};
+            std::vector<std::thread> workers;
+            workers.reserve(parse_workers);
+            try
+            {
+                for (std::size_t worker = 0U; worker < parse_workers; ++worker)
+                    workers.emplace_back([&]() {
+                        for (;;)
+                        {
+                            const auto index = next_module.fetch_add(1U, std::memory_order_relaxed);
+                            if (index >= staged.size()) return;
+                            try { parse_module(index); }
+                            catch (const std::bad_alloc&)
+                            {
+                                ParsedModuleData parsed;
+                                parsed.error = make_error(
+                                    ErrorCode::ResourceLimit,
+                                    "parallel module metadata allocation failed");
+                                parsed_modules[index] = std::move(parsed);
+                            }
+                            catch (...)
+                            {
+                                ParsedModuleData parsed;
+                                parsed.error = make_error(
+                                    ErrorCode::ThreadCreationFailed,
+                                    "parallel module metadata parsing failed unexpectedly");
+                                parsed_modules[index] = std::move(parsed);
+                            }
+                        }
+                    });
+            }
+            catch (...)
+            {
+                for (auto& worker : workers)
+                    if (worker.joinable()) worker.join();
+                return Result<ProcessImage>::failure(make_error(
+                    ErrorCode::ThreadCreationFailed,
+                    "unable to create the bounded module metadata worker pool"));
+            }
+            for (auto& worker : workers)
+                if (worker.joinable()) worker.join();
+        }
+        for (const auto& parsed : parsed_modules)
+        {
+            if (!parsed)
+                return Result<ProcessImage>::failure(make_error(
+                    ErrorCode::ThreadCreationFailed,
+                    "module metadata worker did not publish a result"));
+            if (parsed->error) return Result<ProcessImage>::failure(*parsed->error);
+        }
+
+        for (std::size_t source_index = 0U; source_index < staged.size(); ++source_index)
+        {
+            const auto& source = staged[source_index];
+            auto parsed = std::move(parsed_modules[source_index].value());
+            PreparedModuleOptions module_options = options.module_options;
+            module_options.module_name = source.name;
+            module_options.module_base = source.base;
+            module_options.apply_relocations = false;
+            auto metadata = std::move(parsed.metadata).value();
+            auto symbols = std::move(parsed.symbols);
+            auto relocations = std::move(parsed.relocations);
 
             ModuleIdentity identity;
             identity.module = source.name;
@@ -910,7 +1165,7 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
                                       "transactional_cross_module_relocations"};
             ProcessModule module{std::move(identity), source.name_provenance, source.input_size,
                                  source.base_provenance, source.image,
-                                 metadata.value(), std::move(symbols), std::move(relocations),
+                                 std::move(metadata), std::move(symbols), std::move(relocations),
                                  0U, {}, {}, {}, {}};
             for (const auto& region : result.memory_.regions())
             {
@@ -949,145 +1204,288 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
         if (!symbol_namespace) return Result<ProcessImage>::failure(symbol_namespace.error());
         result.symbol_namespace_ = symbol_namespace.value();
 
+        const auto relocation_regions = result.memory_.regions();
+        std::size_t relocation_capacity = 0U;
+        for (const auto& module : result.modules_)
+            relocation_capacity += module.relocations.size();
         std::vector<loader::AppliedRelocation> pending;
+        pending.reserve(relocation_capacity);
         std::vector<std::pair<std::size_t, std::size_t>> pending_owner;
+        pending_owner.reserve(relocation_capacity);
         if (options.plan_relocations)
-        for (std::size_t module_index = 0U; module_index < result.modules_.size(); ++module_index)
         {
-            auto& module = result.modules_[module_index];
-            for (std::size_t relocation_index = 0U; relocation_index < module.relocations.size();
-                 ++relocation_index)
+            struct RelocationWork
             {
-                const auto& relocation = module.relocations[relocation_index];
-                if (relocation.type == format::AArch64RelocationType::None) continue;
-                if (relocation.type == format::AArch64RelocationType::Unknown)
+                std::vector<loader::AppliedRelocation> applied;
+                std::vector<loader::UnresolvedRelocation> unresolved;
+                std::vector<ProcessBinding> bindings;
+                std::optional<Error> error;
+            };
+            struct RelocationChunk
+            {
+                std::size_t module_index;
+                std::size_t begin;
+                std::size_t end;
+            };
+
+            const auto plan_workers = std::min<std::size_t>(
+                10U, std::min(std::max<std::size_t>(options.module_workers, 1U),
+                              std::max<std::size_t>(relocation_capacity, 1U)));
+            std::vector<RelocationChunk> chunks;
+            for (std::size_t module_index = 0U; module_index < result.modules_.size(); ++module_index)
+            {
+                const auto count = result.modules_[module_index].relocations.size();
+                if (count == 0U) continue;
+                const auto parts = std::min(plan_workers, count);
+                const auto chunk_size = (count + parts - 1U) / parts;
+                for (std::size_t begin = 0U; begin < count; begin += chunk_size)
+                    chunks.push_back(RelocationChunk{module_index, begin,
+                                                     std::min(begin + chunk_size, count)});
+            }
+            std::vector<std::optional<RelocationWork>> work_results(chunks.size());
+            const auto plan_chunk = [&](const RelocationChunk& chunk) {
+                RelocationWork work;
+                const auto& module = result.modules_[chunk.module_index];
+                work.applied.reserve(chunk.end - chunk.begin);
+                for (std::size_t relocation_index = chunk.begin; relocation_index < chunk.end;
+                     ++relocation_index)
                 {
-                    std::string symbol_name;
-                    if (module.symbols)
+                    const auto& relocation = module.relocations[relocation_index];
+                    if (relocation.type == format::AArch64RelocationType::None) continue;
+                    if (relocation.type == format::AArch64RelocationType::Unknown)
                     {
-                        if (const auto* symbol = module.symbols->at(relocation.symbol_index))
-                            symbol_name = symbol->name;
+                        std::string symbol_name;
+                        if (module.symbols)
+                        {
+                            if (const auto* symbol = module.symbols->at(relocation.symbol_index))
+                                symbol_name = symbol->name;
+                        }
+                        work.error = make_error(
+                            ErrorCode::UnsupportedRelocationType,
+                            "unsupported relocation in module '" + module.identity.module +
+                                "' at index " + std::to_string(relocation_index) + ": type " +
+                                std::string(format::aarch64_relocation_type_name(relocation.type)) +
+                                " (raw " + std::to_string(relocation.raw_type) + "), offset 0x" +
+                                [&]() {
+                                    constexpr char digits[] = "0123456789abcdef";
+                                    std::string hex;
+                                    auto value = relocation.offset;
+                                    do
+                                    {
+                                        hex.push_back(digits[value & 0xfU]);
+                                        value >>= 4U;
+                                    } while (value != 0U);
+                                    std::reverse(hex.begin(), hex.end());
+                                    return hex;
+                                }() +
+                                (symbol_name.empty() ? std::string{} : ", symbol '" + symbol_name + "'"));
+                        return work;
                     }
-                    return Result<ProcessImage>::failure(make_error(
-                        ErrorCode::UnsupportedRelocationType,
-                        "unsupported relocation in module '" + module.identity.module + "' at index " +
-                            std::to_string(relocation_index) + ": type " +
-                            std::string(format::aarch64_relocation_type_name(relocation.type)) +
-                            " (raw " + std::to_string(relocation.raw_type) + "), offset 0x" +
-                            [&]() {
-                                constexpr char digits[] = "0123456789abcdef";
-                                std::string hex;
-                                auto value = relocation.offset;
-                                do
-                                {
-                                    hex.push_back(digits[value & 0xfU]);
-                                    value >>= 4U;
-                                } while (value != 0U);
-                                std::reverse(hex.begin(), hex.end());
-                                return hex;
-                            }() +
-                            (symbol_name.empty() ? std::string{} : ", symbol '" + symbol_name + "'")));
-                }
-                const auto target = validate_relocation_target(result.memory_, relocation,
-                                                               relocation_index);
-                if (!target) return Result<ProcessImage>::failure(target.error());
-                std::uint64_t value = 0U;
-                if (relocation.type == format::AArch64RelocationType::Relative)
-                {
-                    const auto calculated = checked_add_signed_u64(module.identity.guest_base,
-                                                                     relocation.addend);
-                    if (!calculated) return Result<ProcessImage>::failure(calculated.error());
-                    value = calculated.value();
-                }
-                else
-                {
-                    const auto* symbol = module.symbols ? module.symbols->at(relocation.symbol_index)
-                                                        : nullptr;
-                    if (symbol == nullptr)
+                    const auto target = validate_relocation_target(
+                        result.memory_, std::span<const memory::GuestMemoryRegionInfo>(relocation_regions),
+                        relocation, relocation_index);
+                    if (!target)
                     {
-                        return Result<ProcessImage>::failure(make_error(
-                            ErrorCode::InvalidSymbolIndex, "process relocation symbol index is invalid"));
+                        work.error = target.error();
+                        return work;
                     }
-                    ProviderLookup lookup;
-                    if (symbol->is_defined())
+                    std::uint64_t value = 0U;
+                    if (relocation.type == format::AArch64RelocationType::Relative)
                     {
-                        const auto address = symbol_address(*symbol, module.identity.guest_base);
-                        if (!address) return Result<ProcessImage>::failure(address.error());
-                        const auto calculated = checked_add_signed_u64(address.value(), relocation.addend);
-                        if (!calculated) return Result<ProcessImage>::failure(calculated.error());
+                        const auto calculated = checked_add_signed_u64(module.identity.guest_base,
+                                                                         relocation.addend);
+                        if (!calculated)
+                        {
+                            work.error = calculated.error();
+                            return work;
+                        }
                         value = calculated.value();
                     }
                     else
                     {
-                        lookup = result.symbol_namespace_.lookup(
-                            symbol->name, result.completeness_, result.completeness_basis_);
-                        ProcessBinding binding;
-                        binding.consumer_module = module.identity.module;
-                        binding.consumer_symbol_index = relocation.symbol_index;
-                        binding.symbol = symbol->name;
-                        binding.relocation_index = relocation_index;
-                        binding.relocation = relocation;
-                        binding.provider = lookup;
-                        binding.resolution_basis = "process_guest_symbol_namespace";
-                        binding.confidence = lookup.status == ProviderResolutionStatus::ResolvedGuestModule
-                                                 ? "unambiguous" : "not_selected";
-                        if (lookup.selected_candidate)
+                        const auto* symbol = module.symbols ? module.symbols->at(relocation.symbol_index)
+                                                            : nullptr;
+                        if (symbol == nullptr)
                         {
-                            const auto& provider = lookup.candidates[lookup.selected_candidate.value()];
-                            if (relocation.type == format::AArch64RelocationType::JumpSlot &&
-                                (provider.type != format::SymbolType::Function || !provider.executable))
+                            work.error = make_error(
+                                ErrorCode::InvalidSymbolIndex,
+                                "process relocation symbol index is invalid");
+                            return work;
+                        }
+                        ProviderLookup lookup;
+                        if (symbol->is_defined())
+                        {
+                            const auto address = symbol_address(*symbol, module.identity.guest_base);
+                            if (!address)
                             {
-                                return Result<ProcessImage>::failure(make_error(
-                                    ErrorCode::InvalidProviderDefinition,
-                                    "JUMP_SLOT provider is not an executable function"));
+                                work.error = address.error();
+                                return work;
                             }
-                            binding.provider_module = provider.module;
-                            binding.provider_symbol_index = provider.symbol_index;
-                            const auto provider_module_it = std::find_if(
-                                result.modules_.begin(), result.modules_.end(),
-                                [&](const auto& item) {
-                                    return item.identity.module == provider.module;
-                                });
-                            if (provider_module_it == result.modules_.end())
-                            {
-                                return Result<ProcessImage>::failure(make_error(
-                                    ErrorCode::InvalidProviderDefinition,
-                                    "selected provider module is absent from the process image"));
-                            }
-                            binding.provider_base = provider_module_it->identity.guest_base;
-                            binding.provider_symbol_value = provider.value;
-                            binding.provider_address = provider.address;
-                            const auto calculated = checked_add_signed_u64(provider.address,
+                            const auto calculated = checked_add_signed_u64(address.value(),
                                                                              relocation.addend);
-                            if (!calculated) return Result<ProcessImage>::failure(calculated.error());
+                            if (!calculated)
+                            {
+                                work.error = calculated.error();
+                                return work;
+                            }
                             value = calculated.value();
-                            binding.resolved_value = value;
-                            binding.applied = true;
                         }
                         else
                         {
-                            module.unresolved_relocations.push_back(
-                                loader::UnresolvedRelocation{relocation_index, relocation,
-                                                             format::ImportSymbol{symbol->index,
-                                                                                  symbol->name,
-                                                                                  symbol->binding,
-                                                                                  symbol->type,
-                                                                                  symbol->visibility,
-                                                                                  symbol->section_index}});
+                            lookup = result.symbol_namespace_.lookup(
+                                symbol->name, result.completeness_, result.completeness_basis_);
+                            ProcessBinding binding;
+                            binding.consumer_module = module.identity.module;
+                            binding.consumer_symbol_index = relocation.symbol_index;
+                            binding.symbol = symbol->name;
+                            binding.relocation_index = relocation_index;
+                            binding.relocation = relocation;
+                            binding.provider = lookup;
+                            binding.resolution_basis = "process_guest_symbol_namespace";
+                            binding.confidence = lookup.status == ProviderResolutionStatus::ResolvedGuestModule
+                                                     ? "unambiguous" : "not_selected";
+                            if (lookup.selected_candidate)
+                            {
+                                const auto& provider = lookup.candidates[lookup.selected_candidate.value()];
+                                if (relocation.type == format::AArch64RelocationType::JumpSlot &&
+                                    (provider.type != format::SymbolType::Function || !provider.executable))
+                                {
+                                    work.error = make_error(
+                                        ErrorCode::InvalidProviderDefinition,
+                                        "JUMP_SLOT provider is not an executable function");
+                                    return work;
+                                }
+                                binding.provider_module = provider.module;
+                                binding.provider_symbol_index = provider.symbol_index;
+                                const auto provider_module_it = std::find_if(
+                                    result.modules_.begin(), result.modules_.end(),
+                                    [&](const auto& item) {
+                                        return item.identity.module == provider.module;
+                                    });
+                                if (provider_module_it == result.modules_.end())
+                                {
+                                    work.error = make_error(
+                                        ErrorCode::InvalidProviderDefinition,
+                                        "selected provider module is absent from the process image");
+                                    return work;
+                                }
+                                binding.provider_base = provider_module_it->identity.guest_base;
+                                binding.provider_symbol_value = provider.value;
+                                binding.provider_address = provider.address;
+                                const auto calculated = checked_add_signed_u64(provider.address,
+                                                                                 relocation.addend);
+                                if (!calculated)
+                                {
+                                    work.error = calculated.error();
+                                    return work;
+                                }
+                                value = calculated.value();
+                                binding.resolved_value = value;
+                                binding.applied = true;
+                            }
+                            else
+                            {
+                                work.unresolved.push_back(
+                                    loader::UnresolvedRelocation{relocation_index, relocation,
+                                                                 format::ImportSymbol{symbol->index,
+                                                                                      symbol->name,
+                                                                                      symbol->binding,
+                                                                                      symbol->type,
+                                                                                      symbol->visibility,
+                                                                                      symbol->section_index}});
+                            }
+                            work.bindings.push_back(std::move(binding));
+                            if (!lookup.selected_candidate) continue;
                         }
-                        result.bindings_.push_back(std::move(binding));
-                        if (!lookup.selected_candidate) continue;
                     }
+                    if (relocation.type == format::AArch64RelocationType::Abs32 &&
+                        value > std::numeric_limits<std::uint32_t>::max())
+                    {
+                        work.error = make_error(
+                            ErrorCode::ArithmeticOverflow,
+                            "process ABS32 relocation value exceeds 32 bits");
+                        return work;
+                    }
+                    work.applied.push_back(loader::AppliedRelocation{
+                        relocation_index, relocation, value, loader::relocation_width(relocation.type)});
                 }
-                if (relocation.type == format::AArch64RelocationType::Abs32 &&
-                    value > std::numeric_limits<std::uint32_t>::max())
+                return work;
+            };
+
+            const auto run_chunk = [&](std::size_t index) {
+                try { work_results[index] = plan_chunk(chunks[index]); }
+                catch (const std::bad_alloc&)
                 {
-                    return Result<ProcessImage>::failure(make_error(
-                        ErrorCode::ArithmeticOverflow, "process ABS32 relocation value exceeds 32 bits"));
+                    RelocationWork work;
+                    work.error = make_error(ErrorCode::ResourceLimit,
+                                            "parallel relocation planning allocation failed");
+                    work_results[index] = std::move(work);
                 }
-                pending.push_back(loader::AppliedRelocation{relocation_index, relocation, value,
-                                                            loader::relocation_width(relocation.type)});
-                pending_owner.push_back({module_index, relocation_index});
+                catch (...)
+                {
+                    RelocationWork work;
+                    work.error = make_error(ErrorCode::ThreadCreationFailed,
+                                            "parallel relocation planning failed unexpectedly");
+                    work_results[index] = std::move(work);
+                }
+            };
+            const auto actual_workers = std::min(plan_workers, std::max<std::size_t>(chunks.size(), 1U));
+            if (actual_workers <= 1U)
+            {
+                for (std::size_t index = 0U; index < chunks.size(); ++index) run_chunk(index);
+            }
+            else
+            {
+                std::atomic<std::size_t> next_chunk{0U};
+                std::vector<std::thread> workers;
+                workers.reserve(actual_workers);
+                try
+                {
+                    for (std::size_t worker = 0U; worker < actual_workers; ++worker)
+                        workers.emplace_back([&]() {
+                            for (;;)
+                            {
+                                const auto index = next_chunk.fetch_add(1U, std::memory_order_relaxed);
+                                if (index >= chunks.size()) return;
+                                run_chunk(index);
+                            }
+                        });
+                }
+                catch (...)
+                {
+                    for (auto& worker : workers)
+                        if (worker.joinable()) worker.join();
+                    return Result<ProcessImage>::failure(make_error(
+                        ErrorCode::ThreadCreationFailed,
+                        "unable to create the bounded relocation planning worker pool"));
+                }
+                for (auto& worker : workers)
+                    if (worker.joinable()) worker.join();
+            }
+
+            // Chunks were created in module/offset order. Merge in that same
+            // order so worker scheduling cannot affect reports or bytes.
+            for (std::size_t index = 0U; index < work_results.size(); ++index)
+            {
+                if (!work_results[index])
+                    return Result<ProcessImage>::failure(make_error(
+                        ErrorCode::ThreadCreationFailed,
+                        "relocation planning worker did not publish a result"));
+                auto& work = work_results[index].value();
+                if (work.error) return Result<ProcessImage>::failure(*work.error);
+                auto& module = result.modules_[chunks[index].module_index];
+                module.unresolved_relocations.insert(
+                    module.unresolved_relocations.end(),
+                    std::make_move_iterator(work.unresolved.begin()),
+                    std::make_move_iterator(work.unresolved.end()));
+                result.bindings_.insert(
+                    result.bindings_.end(), std::make_move_iterator(work.bindings.begin()),
+                    std::make_move_iterator(work.bindings.end()));
+                for (auto& relocation : work.applied)
+                {
+                    pending_owner.push_back({chunks[index].module_index, relocation.relocation_index});
+                    pending.push_back(std::move(relocation));
+                }
             }
         }
 
@@ -1095,7 +1493,7 @@ Result<ProcessImage> load_process_image(std::span<const ProcessModuleInput> inpu
         {
             loader::RelocationPlan plan;
             plan.relocation_count = pending.size();
-            plan.applied = pending;
+            plan.applied = std::move(pending);
             const auto applied = loader::apply_relocation_plan(result.memory_, plan,
                                                                options.module_options.relocation_options);
             if (!applied) return Result<ProcessImage>::failure(applied.error());

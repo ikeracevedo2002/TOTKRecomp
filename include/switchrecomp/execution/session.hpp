@@ -605,6 +605,7 @@ class ExecutionSession
         std::optional<ir::Function> function;
         std::optional<Error> error;
         std::uint64_t cfg_identity = 0U;
+        bool function_preverified = false;
     };
 
     struct ProfileTotals
@@ -647,6 +648,7 @@ class ExecutionSession
     [[nodiscard]] Result<void> release_stack() noexcept;
     [[nodiscard]] Result<const ir::Function*> lift_for_execution(
         memory::GuestAddress entry, ExecutionSessionResult& result);
+    [[nodiscard]] bool is_function_preverified(memory::GuestAddress entry) const noexcept;
     [[nodiscard]] Result<void> enter_function(
         memory::GuestAddress entry, ExecutionSessionResult& result,
         const TransitionRequest& request);

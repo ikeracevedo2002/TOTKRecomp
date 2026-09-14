@@ -51,21 +51,19 @@ unimplemented because its contract and provider are not established; no fake
 return value is used.
 
 Milestone 13 adds deterministic multi-module process analysis, module-aware
-guest symbol-provider discovery, cross-module relocation planning, and
-process-aware guest execution. Runtime/HLE import resolution is consulted only
-after guest-module provider resolution. The available local executable set is
-currently one `main` NSO, so `__nnmusl_init_dso` remains an evidence-driven
-unresolved provider search and the real run still stops at the M12
-`runtime_import_unimplemented` boundary.
-Milestone 14 adds bounded executable-set ingestion, deterministic directory
-inventory, identity/coherence validation, provenance-aware completeness, and
-schema-4 process inspection. Milestone 15 adds load-order evidence, strict
-complete-search gating, provider-base JUMP_SLOT readback, transactional
-runtime-handler precedence, and focused real-set execution. The supplied
-four-module prepared set identifies an eligible `sdk` provider for
-`__nnmusl_init_dso`; its exact-build completeness remains not manifest-verified
-and the focused run stops at an unsupported provider `umulh` instruction. No
-host replacement is used.
+symbol-provider discovery, cross-module relocation planning, and process-aware
+execution. Milestones 14–15 add bounded executable-set ingestion,
+provenance-aware completeness, load-order evidence, strict complete-search
+gating, provider-base JUMP_SLOT readback, and transactional runtime-handler
+precedence. The historical single-`main` and incomplete-provider results remain
+recorded in those milestone documents; they are not the current exact-build
+state.
+
+Milestone 44 validates the selected four-module recovery manifest and confirms
+that `__nnmusl_init_dso` resolves to guest `sdk` without a host replacement. The
+same frozen real run now reaches the later `sdk` TLS/bootstrap boundary, where
+synthetic-zero `TPIDR_EL0` causes an honest unmapped read at `0x1f8`. No TLS or
+Horizon bootstrap state is fabricated; see [Milestone 44](docs/MILESTONE_44.md).
 
 Milestone 32 replaces the ordinary historical candidate-assessment event ceiling
 with generation-aware semantic accounting: first assessments are bounded by the

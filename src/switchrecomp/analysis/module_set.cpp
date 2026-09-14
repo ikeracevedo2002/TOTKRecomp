@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -16,6 +17,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 namespace switchrecomp::analysis
@@ -261,31 +263,111 @@ struct load_order_key
                     ErrorCode::ResourceLimit,
                     "executable module exceeds the configured input-size budget"));
             }
-            const auto digest = sha256_bytes(input.file_bytes);
-            if (!digest) return Result<ModuleSetInventory>::failure(digest.error());
-            const auto sha = sha256_to_hex(digest.value());
+        }
+
+        struct ValidatedModule
+        {
+            Sha256Digest digest{};
+            format::NsoHeader header{};
+        };
+        std::vector<std::optional<Result<ValidatedModule>>> validated(inputs.size());
+        const auto validate_module = [&](std::size_t index) {
+            try
+            {
+                const auto& input = inputs[index];
+                const auto digest = sha256_bytes(input.file_bytes);
+                if (!digest)
+                {
+                    validated[index] = Result<ValidatedModule>::failure(digest.error());
+                    return;
+                }
+                const auto header = format::parse_nso_header(input.file_bytes);
+                if (!header)
+                {
+                    validated[index] = Result<ValidatedModule>::failure(make_error(
+                        ErrorCode::ModuleParseFailed,
+                        "executable module failed NSO parsing: " + header.error().message));
+                    return;
+                }
+                const auto image = format::materialize_nso(input.file_bytes, header.value());
+                if (!image)
+                {
+                    validated[index] = Result<ValidatedModule>::failure(make_error(
+                        ErrorCode::ModuleMaterializationFailed,
+                        "executable module failed materialization: " + image.error().message));
+                    return;
+                }
+                validated[index] = Result<ValidatedModule>::success(
+                    ValidatedModule{digest.value(), header.value()});
+            }
+            catch (const std::bad_alloc&)
+            {
+                validated[index] = Result<ValidatedModule>::failure(make_error(
+                    ErrorCode::ResourceLimit, "parallel module validation allocation failed"));
+            }
+            catch (...)
+            {
+                validated[index] = Result<ValidatedModule>::failure(make_error(
+                    ErrorCode::ThreadCreationFailed, "parallel module validation failed unexpectedly"));
+            }
+        };
+        const auto worker_count = std::min<std::size_t>(
+            10U, std::min(std::max<std::size_t>(options.workers, 1U), inputs.size()));
+        if (worker_count <= 1U || inputs.size() <= 1U)
+        {
+            for (std::size_t index = 0U; index < inputs.size(); ++index) validate_module(index);
+        }
+        else
+        {
+            std::atomic<std::size_t> next{0U};
+            std::vector<std::thread> workers;
+            workers.reserve(worker_count);
+            try
+            {
+                for (std::size_t worker = 0U; worker < worker_count; ++worker)
+                {
+                    workers.emplace_back([&]() {
+                        for (;;)
+                        {
+                            const auto index = next.fetch_add(1U, std::memory_order_relaxed);
+                            if (index >= inputs.size()) return;
+                            validate_module(index);
+                        }
+                    });
+                }
+            }
+            catch (...)
+            {
+                for (auto& worker : workers)
+                    if (worker.joinable()) worker.join();
+                return Result<ModuleSetInventory>::failure(make_error(
+                    ErrorCode::ThreadCreationFailed,
+                    "unable to create the bounded module-validation worker pool"));
+            }
+            for (auto& worker : workers)
+                if (worker.joinable()) worker.join();
+        }
+
+        for (std::size_t index = 0U; index < inputs.size(); ++index)
+        {
+            const auto& input = inputs[index];
+            if (!validated[index])
+            {
+                return Result<ModuleSetInventory>::failure(make_error(
+                    ErrorCode::ThreadCreationFailed, "module validation worker did not publish a result"));
+            }
+            if (!validated[index]->has_value())
+                return Result<ModuleSetInventory>::failure(validated[index]->error());
+            const auto& payload = validated[index]->value();
+            const auto sha = sha256_to_hex(payload.digest);
             if (!digests.insert(sha).second)
             {
                 return Result<ModuleSetInventory>::failure(make_error(
                     ErrorCode::ModuleSetIdentityConflict,
                     "the same exact executable module was supplied under multiple logical names"));
             }
-            const auto header = format::parse_nso_header(input.file_bytes);
-            if (!header)
-            {
-                return Result<ModuleSetInventory>::failure(make_error(
-                    ErrorCode::ModuleParseFailed,
-                    "executable module failed NSO parsing: " + header.error().message));
-            }
-            const auto image = format::materialize_nso(input.file_bytes, header.value());
-            if (!image)
-            {
-                return Result<ModuleSetInventory>::failure(make_error(
-                    ErrorCode::ModuleMaterializationFailed,
-                    "executable module failed materialization: " + image.error().message));
-            }
-            const auto bss_offset = checked_add_u64(header.value().data.memory_offset,
-                                                    header.value().data.memory_size);
+            const auto bss_offset = checked_add_u64(payload.header.data.memory_offset,
+                                                    payload.header.data.memory_size);
             if (!bss_offset || bss_offset.value() > std::numeric_limits<std::uint32_t>::max())
             {
                 return Result<ModuleSetInventory>::failure(make_error(
@@ -300,15 +382,15 @@ struct load_order_key
                 input.logical_name,
                 input.name_provenance,
                 sha,
-                format::module_id_hex(header.value()),
+                format::module_id_hex(payload.header),
                 static_cast<std::uint64_t>(input.file_bytes.size()),
-                header.value().flags,
+                payload.header.flags,
                 "materialized",
-                {header.value().text.memory_offset, header.value().text.memory_size},
-                {header.value().rodata.memory_offset, header.value().rodata.memory_size},
-                {header.value().data.memory_offset, header.value().data.memory_size},
+                {payload.header.text.memory_offset, payload.header.text.memory_size},
+                {payload.header.rodata.memory_offset, payload.header.rodata.memory_size},
+                {payload.header.data.memory_offset, payload.header.data.memory_size},
                 {static_cast<std::uint32_t>(bss_offset.value()),
-                 header.value().bss_size},
+                 payload.header.bss_size},
                 input.explicit_base,
                 input.explicit_base,
                 input.explicit_base ? "explicit_analysis_base" : "pending_process_layout",
@@ -319,7 +401,7 @@ struct load_order_key
                 0U,
                 0U,
                 0U,
-                header.value().text.memory_size != 0U,
+                payload.header.text.memory_size != 0U,
                 true,
                 false,
                 {}});

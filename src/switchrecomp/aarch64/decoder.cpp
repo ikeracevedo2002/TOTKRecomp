@@ -28,6 +28,16 @@ namespace
     return output.str();
 }
 
+// A small number of exact-build text paths use the ARM-state UDF encoding
+// as an unreachable trap sentinel in an AArch64 image. Capstone correctly
+// rejects it in ARM64 mode, but it is still architecturally non-fallthrough
+// data for this decoder. Restrict the fallback to the fixed A32-UDF encoding
+// class; arbitrary backend decode failures must remain decode failures.
+[[nodiscard]] constexpr bool is_legacy_undefined_word(std::uint32_t opcode) noexcept
+{
+    return (opcode & 0xfff000f0U) == 0xe7f000f0U;
+}
+
 [[nodiscard]] std::int64_t sign_extend(std::uint64_t value, unsigned int bit_count) noexcept
 {
     const std::uint64_t sign_bit = std::uint64_t{1} << (bit_count - 1U);
@@ -1162,6 +1172,19 @@ Result<DecodedInstruction> AArch64Decoder::decode(GuestAddress address,
         if (instructions != nullptr)
         {
             cs_free(instructions, count);
+        }
+        if (is_legacy_undefined_word(opcode))
+        {
+            DecodedInstruction result;
+            result.address = address;
+            result.opcode = opcode;
+            result.id = InstructionId::Udf;
+            result.disassembly = "udf (legacy undefined encoding)";
+            result.backend_decoded = false;
+            result.normalized = true;
+            result.control_flow.kind = ControlFlowKind::Trap;
+            result.control_flow.has_fallthrough = false;
+            return Result<DecodedInstruction>::success(std::move(result));
         }
         return Result<DecodedInstruction>::failure(make_error(
             ErrorCode::DecodeFailed,

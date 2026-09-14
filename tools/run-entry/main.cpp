@@ -130,7 +130,7 @@ void help(std::ostream& output)
               "  --entry KIND                   dt-init, dt-fini, text-start, process.\n"
               "  --entry-address ADDR           Unverified analyst address.\n"
               "  --analysis-focus-symbol NAME  Analyze only the bounded startup/provider closure for NAME.\n"
-              "  --analysis-workers N          Bounded independent function/refinement workers.\n"
+              "  --analysis-workers N          Independent function/refinement workers (1-10).\n"
               "  --backend interpreter           M11 reference backend.\n"
               "  --stack-size N                 Synthetic guest stack size.\n"
               "  --report PATH                  Write deterministic JSON report.\n"
@@ -277,11 +277,13 @@ refinement_analysis_dimension_for_option(std::string_view argument)
     return std::nullopt;
 }
 
+inline constexpr std::size_t max_analysis_workers = 10U;
+
 [[nodiscard]] std::size_t default_analysis_workers() noexcept
 {
     const auto hardware = std::thread::hardware_concurrency();
     if (hardware == 0U) return 1U;
-    return std::min<std::size_t>(4U, hardware);
+    return std::min(max_analysis_workers, static_cast<std::size_t>(hardware));
 }
 
 [[nodiscard]] bool ranges_overlap(
@@ -647,6 +649,8 @@ int main(int argc, char** argv)
             destination = static_cast<T>(parsed);
             if ((refinement_analysis_dimension_for_option(argument) ||
                  argument == "--analysis-workers") && parsed == 0U)
+                invalid_number = true;
+            if (argument == "--analysis-workers" && parsed > max_analysis_workers)
                 invalid_number = true;
             return true;
         };
@@ -1262,6 +1266,7 @@ int main(int argc, char** argv)
             inventory_options.coherence_basis = module_set_coherence_basis;
             inventory_options.expected_logical_names = expected_module_names;
             inventory_options.expected_modules = expected_modules;
+            inventory_options.workers = analysis_workers;
             inventory_options.explicit_bases = configured_bases;
             if (module_set_completeness == analysis::ModuleSetCompleteness::Incomplete &&
                 module_set_completeness_basis == analysis::ModuleSetCompletenessBasis::LegacyConfigFalse)
@@ -1292,6 +1297,7 @@ int main(int argc, char** argv)
             inventory_options.coherence_basis = module_set_coherence_basis;
             inventory_options.expected_logical_names = expected_module_names;
             inventory_options.expected_modules = expected_modules;
+            inventory_options.workers = analysis_workers;
             const auto loaded = analysis::ingest_module_files(file_inputs, inventory_options);
             if (!loaded) { print_error(loaded.error()); return static_cast<int>(ExitCode::InfrastructureFailure); }
             inventory = std::move(loaded).value();
@@ -1322,7 +1328,9 @@ int main(int argc, char** argv)
         process_options.ignored_module_entries = inventory.ignored_entries;
         process_options.module_order = analysis::ProcessModuleOrderEvidence{
             inventory.module_load_order, inventory.module_load_order_basis};
+        process_options.module_workers = analysis_workers;
         process_options.module_options = load_options;
+        process_options.module_options.relocation_options.workers = analysis_workers;
         process_options.module_options.module_base = 0U;
         process_options.module_options.module_name = "";
         auto process = analysis::load_process_image(module_inputs, process_options);
@@ -1497,7 +1505,7 @@ int main(int argc, char** argv)
                 break;
             }
             const auto execution_start = std::chrono::steady_clock::now();
-            const auto run = [&]() {
+            auto run = [&]() {
                 if (!last_run_result) return session.run(selected.value());
                 auto previous = std::move(last_run_result.value());
                 last_run_result.reset();

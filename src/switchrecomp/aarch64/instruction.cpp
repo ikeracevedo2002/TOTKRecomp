@@ -415,6 +415,36 @@ bool is_table_lookup_form_liftable(const DecodedInstruction& instruction) noexce
     return true;
 }
 
+bool is_fp_unary_form_liftable(const DecodedInstruction& instruction) noexcept
+{
+    using Op = SimdOperation;
+    if (instruction.id != InstructionId::FpSimd ||
+        (instruction.simd_operation != Op::Fneg && instruction.simd_operation != Op::Fabs &&
+         instruction.simd_operation != Op::Fsqrt) ||
+        instruction.operands.size() != 2U)
+        return false;
+    const auto& destination = instruction.operands[0];
+    const auto& source = instruction.operands[1];
+    const auto vector_register = [](const Operand& operand) {
+        return operand.kind == OperandKind::Register && operand.reg.kind == RegisterKind::Vector &&
+               operand.reg.index < 32U;
+    };
+    if (!vector_register(destination) || !vector_register(source)) return false;
+    if (destination.reg.width == RegisterWidth::S32 || destination.reg.width == RegisterWidth::D64)
+    {
+        return source.reg.width == destination.reg.width &&
+               source.arrangement == VectorArrangement::Invalid;
+    }
+    if (destination.reg.width != RegisterWidth::Q128 || source.reg.width != RegisterWidth::Q128)
+        return false;
+    const auto arrangement = destination.arrangement;
+    const bool lane_addressable = arrangement == VectorArrangement::S2 ||
+                                   arrangement == VectorArrangement::S4 ||
+                                   arrangement == VectorArrangement::D1 ||
+                                   arrangement == VectorArrangement::D2;
+    return lane_addressable && source.arrangement == arrangement;
+}
+
 bool is_structure_memory_form_liftable(const DecodedInstruction& instruction) noexcept
 {
     using Op = SimdOperation;

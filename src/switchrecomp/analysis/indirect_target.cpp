@@ -705,7 +705,12 @@ void account_cfg(const ControlFlowGraph& cfg, IndirectTargetValidation& validati
     FunctionMapOptions result;
     result.budgets = options.budgets;
     result.cfg = options.cfg;
-    result.continue_after_function_failure = false;
+    // A refinement transaction may discover an unrelated malformed direct-call
+    // closure while the observed candidate itself has a validated CFG. Keep
+    // that failed callee in the immutable map so execution reaches it only if
+    // the guest actually calls it; the candidate transaction remains atomic and
+    // the failed callee is still represented honestly as non-executable.
+    result.continue_after_function_failure = true;
     result.analysis_workers = options.refinement_workers;
     return result;
 }
@@ -1396,11 +1401,16 @@ Result<IndirectTargetAssessment> assess_indirect_target(
         validation.ownership = record->canonical_entry == observed.target
                                    ? IndirectTargetOwnership::TrustedExistingEntry
                                    : IndirectTargetOwnership::ExistingSecondaryEntry;
-        validation.cfg = *record->cfg;
-        validation.cfg_status = record->cfg
-                                    ? IndirectTargetCFGStatus::ExistingTrustedCFG
-                                    : IndirectTargetCFGStatus::NotAnalyzed;
-        if (record->cfg) account_cfg(*record->cfg, validation);
+        if (record->cfg)
+        {
+            validation.cfg = *record->cfg;
+            validation.cfg_status = IndirectTargetCFGStatus::ExistingTrustedCFG;
+            account_cfg(*record->cfg, validation);
+        }
+        else
+        {
+            validation.cfg_status = IndirectTargetCFGStatus::NotAnalyzed;
+        }
         validation.candidate_owned_code_ranges = record->owned_code_ranges;
         add_record_evidence(record, assessment.static_evidence);
         normalize_evidence(assessment.static_evidence);

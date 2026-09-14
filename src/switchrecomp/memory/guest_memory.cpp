@@ -3,11 +3,14 @@
 #include "switchrecomp/common/checked_arithmetic.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <iomanip>
 #include <limits>
+#include <mutex>
 #include <new>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace switchrecomp::memory
@@ -130,6 +133,206 @@ Result<void> GuestMemory::map(GuestAddress base, std::span<const std::byte> init
     return map_bytes(base, initial_data, size.value(), permissions, name, kind);
 }
 
+Result<void> GuestMemory::map_batch(std::span<const GuestMemoryMapRequest> requests)
+{
+    const auto saved_total = total_mapped_size_;
+    const auto saved_cumulative = cumulative_mapped_size_;
+    const auto saved_peak_size = peak_live_mapped_size_;
+    const auto saved_peak_regions = peak_region_count_;
+    const auto saved_high_water = virtual_address_high_water_;
+    std::size_t mapped_count = 0U;
+    const auto rollback = [&]() noexcept {
+        // Only successful requests before mapped_count may be removed. This
+        // avoids confusing a failed request at an existing base with a new
+        // region that must be rolled back.
+        for (std::size_t index = mapped_count; index > 0U; --index)
+        {
+            const auto& request = requests[index - 1U];
+            if (request.initial_data.empty()) continue;
+            const auto found = std::lower_bound(
+                regions_.begin(), regions_.end(), request.base,
+                [](const GuestRegion& region, GuestAddress value) {
+                    return region.info.base < value;
+                });
+            if (found != regions_.end() && found->info.base == request.base)
+                regions_.erase(found);
+        }
+        total_mapped_size_ = saved_total;
+        cumulative_mapped_size_ = saved_cumulative;
+        peak_live_mapped_size_ = saved_peak_size;
+        peak_region_count_ = saved_peak_regions;
+        virtual_address_high_water_ = saved_high_water;
+    };
+
+    try
+    {
+        struct RequestRange
+        {
+            GuestAddress base;
+            GuestAddress end;
+            GuestSize size;
+        };
+        std::vector<RequestRange> ranges;
+        ranges.reserve(requests.size());
+        GuestSize added_size = 0U;
+        std::size_t added_regions = 0U;
+        for (const auto& request : requests)
+        {
+            const auto size = guest_size_from_host(request.initial_data.size());
+            if (!size) return Result<void>::failure(size.error());
+            if (!is_valid_permissions(request.permissions))
+                return Result<void>::failure(
+                    mapping_error(ErrorCode::InvalidArgument, "contains unknown permission bits"));
+            if (size.value() == 0U) continue;
+            if (size.value() > limits_.max_region_size)
+                return Result<void>::failure(mapping_error(
+                    ErrorCode::ResourceLimit,
+                    "requested region size exceeds the configured maximum region size"));
+            const auto range = checked_guest_range(request.base, size.value());
+            if (!range) return Result<void>::failure(mapping_error(
+                ErrorCode::ArithmeticOverflow, "guest address range overflows the 64-bit address space"));
+            const auto next_added = checked_add_u64(added_size, size.value());
+            if (!next_added) return Result<void>::failure(mapping_error(
+                ErrorCode::ArithmeticOverflow, "batch mapped guest size overflows"));
+            added_size = next_added.value();
+            ++added_regions;
+            const auto next = std::lower_bound(
+                regions_.begin(), regions_.end(), request.base,
+                [](const GuestRegion& region, GuestAddress value) {
+                    return region.info.base < value;
+                });
+            if ((next != regions_.end() && next->info.base < range.value().end()) ||
+                (next != regions_.begin() && (next - 1)->info.end() > request.base))
+                return Result<void>::failure(
+                    mapping_error(ErrorCode::InvalidArgument, "batch mapping overlaps existing mapping"));
+            for (const auto& previous : ranges)
+                if (request.base < previous.end && previous.base < range.value().end())
+                    return Result<void>::failure(
+                        mapping_error(ErrorCode::InvalidArgument,
+                                      "batch mapping request overlaps another batch request"));
+            ranges.push_back(RequestRange{request.base, range.value().end(), size.value()});
+        }
+        const auto total = checked_add_u64(total_mapped_size_, added_size);
+        if (!total) return Result<void>::failure(mapping_error(
+            ErrorCode::ArithmeticOverflow, "total mapped guest size overflows the size domain"));
+        if (total.value() > limits_.max_total_size)
+            return Result<void>::failure(mapping_error(
+                ErrorCode::ResourceLimit, "total mapped guest size exceeds the configured maximum"));
+        const auto region_count = checked_add(regions_.size(), added_regions);
+        if (!region_count) return Result<void>::failure(
+            mapping_error(ErrorCode::ArithmeticOverflow, "region count overflows"));
+        if (region_count.value() > limits_.max_regions)
+            return Result<void>::failure(mapping_error(
+                ErrorCode::ResourceLimit, "number of guest regions exceeds the configured maximum"));
+        const auto cumulative = checked_add_u64(cumulative_mapped_size_, added_size);
+        if (!cumulative) return Result<void>::failure(mapping_error(
+            ErrorCode::ArithmeticOverflow, "cumulative mapped size overflows"));
+
+        // Allocate and initialize each backing vector independently. Mapping
+        // metadata is published below in the caller's request order.
+        std::vector<std::optional<std::vector<std::byte>>> prepared(requests.size());
+        std::optional<Error> prepare_error;
+        std::mutex prepare_error_mutex;
+        const auto prepare_one = [&](std::size_t index) {
+            try
+            {
+                if (requests[index].initial_data.empty()) return;
+                const auto host = host_size(requests[index].initial_data.size());
+                if (!host)
+                {
+                    std::lock_guard lock(prepare_error_mutex);
+                    prepare_error = host.error();
+                    return;
+                }
+                std::vector<std::byte> bytes(host.value(), std::byte{0});
+                std::copy(requests[index].initial_data.begin(), requests[index].initial_data.end(),
+                          bytes.begin());
+                prepared[index] = std::move(bytes);
+            }
+            catch (const std::bad_alloc&)
+            {
+                std::lock_guard lock(prepare_error_mutex);
+                prepare_error = mapping_error(ErrorCode::ResourceLimit,
+                                              "guest memory batch backing allocation failed");
+            }
+            catch (...)
+            {
+                std::lock_guard lock(prepare_error_mutex);
+                prepare_error = mapping_error(ErrorCode::InvalidArgument,
+                                              "guest memory batch backing preparation failed");
+            }
+        };
+        const auto prepare_workers = std::min<std::size_t>(10U, std::max<std::size_t>(requests.size(), 1U));
+        if (prepare_workers <= 1U)
+        {
+            for (std::size_t index = 0U; index < requests.size(); ++index) prepare_one(index);
+        }
+        else
+        {
+            std::atomic<std::size_t> next{0U};
+            std::vector<std::thread> workers;
+            workers.reserve(prepare_workers);
+            try
+            {
+                for (std::size_t worker = 0U; worker < prepare_workers; ++worker)
+                    workers.emplace_back([&]() {
+                        for (;;)
+                        {
+                            const auto index = next.fetch_add(1U, std::memory_order_relaxed);
+                            if (index >= requests.size()) return;
+                            prepare_one(index);
+                        }
+                    });
+            }
+            catch (...)
+            {
+                for (auto& worker : workers)
+                    if (worker.joinable()) worker.join();
+                return Result<void>::failure(mapping_error(
+                    ErrorCode::ThreadCreationFailed, "unable to create batch mapping workers"));
+            }
+            for (auto& worker : workers)
+                if (worker.joinable()) worker.join();
+        }
+        if (prepare_error) return Result<void>::failure(*prepare_error);
+
+        for (std::size_t index = 0U; index < requests.size(); ++index)
+        {
+            const auto& request = requests[index];
+            std::vector<std::byte>* backing = prepared[index] ? &prepared[index].value() : nullptr;
+            const auto mapped = map_bytes(request.base, request.initial_data,
+                                          ranges.empty() ? 0U :
+                                              (backing != nullptr ? static_cast<GuestSize>(backing->size()) : 0U),
+                                          request.permissions, request.name, request.kind, {}, backing);
+            if (!mapped)
+            {
+                rollback();
+                return mapped;
+            }
+            ++mapped_count;
+        }
+    }
+    catch (const std::bad_alloc&)
+    {
+        rollback();
+        return Result<void>::failure(
+            mapping_error(ErrorCode::ResourceLimit, "guest memory batch mapping allocation failed"));
+    }
+    catch (const std::length_error&)
+    {
+        rollback();
+        return Result<void>::failure(
+            mapping_error(ErrorCode::ResourceLimit, "guest memory batch mapping exceeds host limits"));
+    }
+    catch (...)
+    {
+        rollback();
+        return Result<void>::failure(
+            mapping_error(ErrorCode::InvalidArgument, "guest memory batch mapping failed unexpectedly"));
+    }
+    return Result<void>::success();
+}
+
 Result<GuestMemoryMappingToken> GuestMemory::map_owned(
     GuestAddress base, GuestSize size, GuestMemoryPermissions permissions, std::string_view name,
     GuestRegionKind kind)
@@ -202,7 +405,8 @@ Result<GuestMemoryMappingToken> GuestMemory::map_owned(
 Result<void> GuestMemory::map_bytes(GuestAddress base, std::span<const std::byte> initial_data,
                                     GuestSize size, GuestMemoryPermissions permissions,
                                     std::string_view name, GuestRegionKind kind,
-                                    std::shared_ptr<const void> owned_mapping)
+                                    std::shared_ptr<const void> owned_mapping,
+                                    std::vector<std::byte>* prepared_bytes)
 {
     if (!is_valid_permissions(permissions))
     {
@@ -332,10 +536,21 @@ Result<void> GuestMemory::map_bytes(GuestAddress base, std::span<const std::byte
 
     try
     {
+        std::vector<std::byte> backing;
+        if (prepared_bytes != nullptr)
+        {
+            if (prepared_bytes->size() != host_region_size.value())
+                return Result<void>::failure(mapping_error(
+                    ErrorCode::InvalidArgument, "prepared guest backing size does not match mapping"));
+            backing = std::move(*prepared_bytes);
+        }
+        else
+        {
+            backing.assign(host_region_size.value(), std::byte{0});
+            std::copy(initial_data.begin(), initial_data.end(), backing.begin());
+        }
         GuestRegion region{GuestMemoryRegionInfo{base, size, permissions, kind, std::string(name)},
-                           std::vector<std::byte>(host_region_size.value(), std::byte{0}),
-                           std::move(owned_mapping)};
-        std::copy(initial_data.begin(), initial_data.end(), region.bytes.begin());
+                           std::move(backing), std::move(owned_mapping)};
 
         const auto insertion_index = static_cast<std::size_t>(next - regions_.begin());
         regions_.reserve(next_region_count.value());

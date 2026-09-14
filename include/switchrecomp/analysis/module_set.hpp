@@ -83,6 +83,9 @@ struct ModuleSetIngestionOptions
     std::string source = "explicit";
     std::vector<std::string> expected_logical_names;
     std::vector<ExpectedModule> expected_modules;
+    // Independent digest/NSO validation workers. Results are joined and
+    // committed in input order, preserving deterministic diagnostics.
+    std::size_t workers = 1U;
     std::size_t max_modules = 128U;
     std::size_t max_file_size = std::size_t{512U} * 1024U * 1024U;
 };

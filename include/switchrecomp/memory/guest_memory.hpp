@@ -97,6 +97,18 @@ struct GuestMemoryLimits
     std::size_t max_regions = guest_default_max_regions;
 };
 
+// A batch is committed directly and rolled back if any member cannot be
+// mapped. The input spans remain owned by the caller for the duration of the
+// call and are copied into GuestMemory backing storage.
+struct GuestMemoryMapRequest
+{
+    GuestAddress base = 0U;
+    std::span<const std::byte> initial_data;
+    GuestMemoryPermissions permissions = GuestMemoryPermissions::None;
+    std::string_view name;
+    GuestRegionKind kind = GuestRegionKind::Other;
+};
+
 // A mapping token is an exact capability for one dynamically owned mapping.
 // It intentionally exposes no address or name that a caller could use to
 // request an imprecise unmap. GuestMemory authenticates both the memory domain
@@ -161,6 +173,11 @@ class GuestMemory
                                    GuestMemoryPermissions permissions, std::string_view name = {},
                                    GuestRegionKind kind = GuestRegionKind::Other);
 
+    // Map several immutable loader segments without copying all pre-existing
+    // guest bytes. The operation has the same all-or-nothing contract as the
+    // old staging implementation.
+    [[nodiscard]] Result<void> map_batch(std::span<const GuestMemoryMapRequest> requests);
+
     [[nodiscard]] Result<GuestMemoryMappingToken> map_owned(
         GuestAddress base, GuestSize size, GuestMemoryPermissions permissions,
         std::string_view name = {}, GuestRegionKind kind = GuestRegionKind::Other);
@@ -220,7 +237,8 @@ class GuestMemory
     [[nodiscard]] Result<void> map_bytes(GuestAddress base, std::span<const std::byte> initial_data,
                                          GuestSize size, GuestMemoryPermissions permissions,
                                          std::string_view name, GuestRegionKind kind,
-                                         std::shared_ptr<const void> owned_mapping = {});
+                                         std::shared_ptr<const void> owned_mapping = {},
+                                         std::vector<std::byte>* prepared_bytes = nullptr);
 
     [[nodiscard]] const GuestRegion* find_region(GuestAddress address) const noexcept;
     [[nodiscard]] GuestRegion* find_region(GuestAddress address) noexcept;

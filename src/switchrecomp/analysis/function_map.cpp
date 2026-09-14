@@ -1571,7 +1571,8 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
     // analysis worker for every CFG in this map build instead of paying that
     // setup cost once per discovered function. A decoder is kept private to
     // its worker because the underlying Capstone handle is not shared here.
-    const auto worker_count = std::max<std::size_t>(options.analysis_workers, 1U);
+    const auto worker_count = std::min<std::size_t>(
+        10U, std::max<std::size_t>(options.analysis_workers, 1U));
     std::vector<std::unique_ptr<aarch64::AArch64Decoder>> decoders;
     decoders.reserve(worker_count);
     for (std::size_t index = 0U; index < worker_count; ++index)

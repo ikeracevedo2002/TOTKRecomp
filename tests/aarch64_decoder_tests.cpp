@@ -209,6 +209,14 @@ TEST_CASE("AArch64 decoder handles memory, SIMD, atomics and system instructions
     REQUIRE(udf);
     REQUIRE(udf.value().control_flow.kind == ControlFlowKind::Trap);
     REQUIRE_FALSE(udf.value().control_flow.has_fallthrough);
+
+    // The exact-build trap sentinel is the legacy ARM-state UDF encoding;
+    // Capstone rejects it in ARM64 mode, but it remains a non-fallthrough UDF.
+    const auto legacy_udf = decoder.value()->decode(0x1000U, 0xe7ffdefeU);
+    REQUIRE(legacy_udf);
+    REQUIRE(legacy_udf.value().id == InstructionId::Udf);
+    REQUIRE(legacy_udf.value().control_flow.kind == ControlFlowKind::Trap);
+    REQUIRE_FALSE(legacy_udf.value().control_flow.has_fallthrough);
 }
 
 TEST_CASE("Instruction fetch is aligned, little-endian and executable-only")

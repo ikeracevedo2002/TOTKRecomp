@@ -62,6 +62,10 @@ struct ExecutionOptions
     // resource. The interpreter yields with an exact frame cursor when it
     // reaches the quantum.
     std::size_t slice_ir_operations = 4'096U;
+    // ExecutionSession pre-verifies immutable lifted functions and sets this
+    // flag. Standalone interpreter callers leave it false and retain the
+    // normal verifier-before-execution contract.
+    bool function_preverified = false;
     std::span<const std::uint64_t> observed_guest_pcs;
     std::size_t max_observed_guest_pcs = 32U;
 };

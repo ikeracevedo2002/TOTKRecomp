@@ -178,6 +178,38 @@ TEST_CASE("M22 disjoint candidate promotion is transactional and idempotent")
     REQUIRE(repeated.value().map.functions().size() == refinement.value().map.functions().size());
 }
 
+TEST_CASE("M22 refinement keeps an honest failed direct-call closure separate from the candidate")
+{
+    auto code = std::vector<std::byte>(0x80U, std::byte{});
+    write_words(code, 0U, {0xd65f03c0U});
+    write_words(code, 0x20U, {branch(0x1020U, 0x1040U, true), 0xd65f03c0U});
+    write_words(code, 0x40U, {branch(0x1040U, 0x1050U)});
+    write_words(code, 0x50U, {0xffffffffU});
+    auto fixture = make_fixture(0x1000U, 0x80U, std::move(code), {manual_seed(0x1000U)});
+    REQUIRE(fixture);
+
+    const auto refinement = analysis::refine_function_map(
+        fixture.value().map, input_for(fixture.value()), observed(0x1020U));
+    REQUIRE(refinement);
+    REQUIRE(refinement.value().assessment.decision.promoted);
+
+    const auto* candidate = refinement.value().map.find_exact_entry(0x1020U);
+    REQUIRE(candidate != nullptr);
+    REQUIRE(candidate->cfg != nullptr);
+    const auto* failed_callee = refinement.value().map.find_exact_entry(0x1040U);
+    REQUIRE(failed_callee != nullptr);
+    REQUIRE(failed_callee->cfg == nullptr);
+    REQUIRE(failed_callee->translation_status == analysis::TranslationStatus::Failed);
+
+    // An exact failed record is not dereferenced as though it had a CFG.
+    const auto failed_assessment = analysis::assess_indirect_target(
+        observed(0x1040U), fixture.value().memory, &refinement.value().map);
+    REQUIRE(failed_assessment);
+    REQUIRE_FALSE(failed_assessment.value().decision.eligible_for_promotion);
+    REQUIRE(failed_assessment.value().decision.kind ==
+            IndirectTargetDecisionKind::InsufficientEvidence);
+}
+
 TEST_CASE("M22 internal fallthrough overlap remains a typed conflict")
 {
     auto code = std::vector<std::byte>(0x80U, std::byte{});
@@ -305,6 +337,38 @@ TEST_CASE("M22 execution resumes an exact refined indirect-call boundary without
     REQUIRE(resumed.value().stop_reason == execution::ExecutionStopReason::EntryReturned);
     REQUIRE(resumed.value().guest_instruction_count == prefix_instructions + 2U);
     REQUIRE(resumed.value().indirect_calls == 1U);
+}
+
+TEST_CASE("M22 refinement clears stale boundary diagnostics before resumed execution")
+{
+    auto code = std::vector<std::byte>(0x40U, std::byte{});
+    write_words(code, 0U, {0xd2820410U, 0xd63f0200U, 0xd65f03c0U});
+    write_words(code, 0x20U, {0xf9400000U, 0xd65f03c0U});
+    auto fixture = make_fixture(0x1000U, 0x40U, std::move(code), {manual_seed(0x1000U)});
+    REQUIRE(fixture);
+    execution::ExecutionSession session(fixture.value().memory, fixture.value().map, {});
+    execution::EntrySelection selection;
+    selection.kind = execution::EntrySelectionKind::AnalystAddress;
+    selection.address = 0x1000U;
+    selection.source = "M22 stale diagnostic reset fixture";
+    selection.confidence = FunctionConfidence::Manual;
+
+    auto first = session.run(selection);
+    REQUIRE(first);
+    REQUIRE(first.value().stop_reason == execution::ExecutionStopReason::UnknownGuestFunction);
+    const auto refinement = analysis::refine_function_map(
+        fixture.value().map, input_for(fixture.value()), observed(0x1020U));
+    REQUIRE(refinement);
+    REQUIRE(refinement.value().assessment.decision.promoted);
+    fixture.value().map = refinement.value().map;
+
+    auto resumed = session.resume_after_refinement(std::move(first).value());
+    REQUIRE(resumed);
+    REQUIRE(resumed.value().stop_reason == execution::ExecutionStopReason::MemoryFault);
+    REQUIRE_FALSE(resumed.value().diagnostic_pc.has_value());
+    REQUIRE_FALSE(resumed.value().diagnostic_opcode.has_value());
+    REQUIRE(resumed.value().diagnostic_instruction_id.empty());
+    REQUIRE(resumed.value().diagnostic_instruction.empty());
 }
 
 TEST_CASE("M22 immutable lift artifacts survive deterministic session reruns")

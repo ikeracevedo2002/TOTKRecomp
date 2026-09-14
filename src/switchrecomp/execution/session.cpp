@@ -2,6 +2,7 @@
 
 #include "switchrecomp/aarch64/decoder.hpp"
 #include "switchrecomp/common/checked_arithmetic.hpp"
+#include "switchrecomp/ir/verifier.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2289,9 +2290,33 @@ Result<const ir::Function*> ExecutionSession::lift_for_execution(
         lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, lifted.error(), identity});
         return Result<const ir::Function*>::failure(lifted.error());
     }
-    auto inserted = lift_cache_.emplace(entry, LiftCacheEntry{lifted.value(), std::nullopt, identity});
+    const auto verification_start = profiling_enabled() ? std::chrono::steady_clock::now()
+                                                          : std::chrono::steady_clock::time_point{};
+    const auto verified = ir::verify(lifted.value());
+    if (profiling_enabled())
+    {
+        result.performance.ir_verification_elapsed_us += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - verification_start)
+                .count());
+        ++result.performance.ir_verification_calls;
+    }
+    if (!verified)
+    {
+        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, verified.error(), identity, false});
+        return Result<const ir::Function*>::failure(verified.error());
+    }
+    auto inserted = lift_cache_.emplace(
+        entry, LiftCacheEntry{lifted.value(), std::nullopt, identity, true});
     ++result.performance.functions_lifted;
     return Result<const ir::Function*>::success(&inserted.first->second.function.value());
+}
+
+bool ExecutionSession::is_function_preverified(memory::GuestAddress entry) const noexcept
+{
+    const auto found = lift_cache_.find(entry);
+    return found != lift_cache_.end() && found->second.function.has_value() &&
+           found->second.function_preverified;
 }
 
 FunctionTransitionEvidence ExecutionSession::make_transition_evidence(
@@ -3198,6 +3223,13 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         result.diagnostic.clear();
         result.target.reset();
         result.source_pc.reset();
+        result.diagnostic_pc.reset();
+        result.diagnostic_opcode.reset();
+        result.diagnostic_instruction_id.clear();
+        result.diagnostic_instruction.clear();
+        result.import_boundary.reset();
+        result.terminal_ir_block.reset();
+        result.terminal_ir_operation_index.reset();
         result.target_register.clear();
         result.target_provenance.clear();
         const auto dispatched = call ? dispatch_call(boundary, result)
@@ -3468,6 +3500,7 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
                                                           result.ir_operations)
                                                     : std::nullopt;
         interpreter_options.slice_ir_operations = options_.budgets.slice_ir_operations;
+        interpreter_options.function_preverified = is_function_preverified(current_.function_entry);
         interpreter_options.observed_guest_pcs =
             std::span<const memory::GuestAddress>(instruction_observation_targets_);
         interpreter_options.max_observed_guest_pcs = 32U;

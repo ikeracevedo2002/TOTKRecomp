@@ -86,13 +86,11 @@ extern "C" std::uint32_t switchrecomp_runtime_guest_load(RuntimeContext* runtime
             return failure(runtime, make_error(ErrorCode::InvalidRuntimeContext,
                 "guest load requires memory, result, and context"));
         const auto valid = validate_size(size); if (!valid) return failure(runtime, valid.error());
-        if (runtime->shared != nullptr) {
-            const auto loaded = synchronized_load(*runtime->shared, address, size, ir::MemoryOrder::Relaxed);
-            if (!loaded) return failure(runtime, loaded.error());
-            *result = loaded.value(); return 0U;
-        }
         std::array<std::byte, 8> bytes{};
-        const auto read = runtime->memory->read(address, std::span<std::byte>(bytes).first(size));
+        const auto destination = std::span<std::byte>(bytes).first(size);
+        const auto read = runtime->shared != nullptr
+            ? synchronized_read_bytes(*runtime->shared, address, destination)
+            : runtime->memory->read(address, destination);
         if (!read) return failure(runtime, read.error());
         *result = load_le(std::span<const std::byte>(bytes).first(size)); return 0U;
     } catch (const std::exception& ex) { return failure(runtime, make_error(ErrorCode::ResourceLimit, ex.what())); }
@@ -107,12 +105,12 @@ extern "C" std::uint32_t switchrecomp_runtime_guest_store(RuntimeContext* runtim
             return failure(runtime, make_error(ErrorCode::InvalidRuntimeContext,
                 "guest store requires memory and context"));
         const auto valid = validate_size(size); if (!valid) return failure(runtime, valid.error());
-        if (runtime->shared != nullptr) {
-            const auto stored = synchronized_store(*runtime->shared, address, size, value, ir::MemoryOrder::Relaxed);
-            return stored ? 0U : failure(runtime, stored.error());
-        }
-        std::array<std::byte, 8> bytes{}; store_le(std::span<std::byte>(bytes).first(size), value);
-        const auto write = runtime->memory->write(address, std::span<const std::byte>(bytes).first(size));
+        std::array<std::byte, 8> bytes{};
+        store_le(std::span<std::byte>(bytes).first(size), value);
+        const auto source = std::span<const std::byte>(bytes).first(size);
+        const auto write = runtime->shared != nullptr
+            ? synchronized_write_bytes(*runtime->shared, address, source)
+            : runtime->memory->write(address, source);
         return write ? 0U : failure(runtime, write.error());
     } catch (const std::exception& ex) { return failure(runtime, make_error(ErrorCode::ResourceLimit, ex.what())); }
     catch (...) { return failure(runtime, make_error(ErrorCode::InvalidRuntimeContext, "guest store failed unexpectedly")); }

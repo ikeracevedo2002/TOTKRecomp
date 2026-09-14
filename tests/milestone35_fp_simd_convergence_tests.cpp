@@ -173,6 +173,30 @@ TEST_CASE("M35 FMOV vector immediates preserve negative and varied exponent/frac
     REQUIRE(runtime::read_lane_bits(varied_cpu.vreg[1], 32U, 3U) == 0x3f000000U);
 }
 
+TEST_CASE("M35 vector FNEG normalizes, lifts, and negates every S lane")
+{
+    const auto decoder = aarch64::AArch64Decoder::create();
+    REQUIRE(decoder);
+    const auto decoded = decoder.value()->decode(code_address, 0x6ea0f820U);
+    REQUIRE(decoded);
+    REQUIRE(decoded.value().id == aarch64::InstructionId::FpSimd);
+    REQUIRE(decoded.value().simd_operation == aarch64::SimdOperation::Fneg);
+    REQUIRE(decoded.value().normalized);
+    REQUIRE(decoded.value().operands.size() == 2U);
+    REQUIRE(decoded.value().operands[0].arrangement == aarch64::VectorArrangement::S4);
+    REQUIRE(decoded.value().operands[1].arrangement == aarch64::VectorArrangement::S4);
+    REQUIRE(aarch64::is_fp_unary_form_liftable(decoded.value()));
+
+    auto program = lift_program({0x6ea0f820U, ret}); // fneg v0.4s, v1.4s
+    REQUIRE(program);
+    REQUIRE(ir::verify(program.value().function));
+    runtime::CpuState cpu;
+    cpu.vreg[1] = runtime::Vector128{0xbf8000003f800000ULL, 0x8000000000000000ULL};
+    REQUIRE(execute_program(program.value(), cpu));
+    REQUIRE(cpu.vreg[0] == (runtime::Vector128{0x3f800000bf800000ULL,
+                                               0x0000000080000000ULL}));
+}
+
 TEST_CASE("M35 scalar FMOV immediates remain scalar after vector FMOV support")
 {
     auto single = lift_program({0x1e2e1000U, ret}); // fmov s0, #1.0

@@ -438,7 +438,7 @@ TEST_CASE("M36 worker counts produce byte-identical synthetic assessments")
         fixture.value().image, options, 2U);
     const auto higher_parallel = analysis::assess_indirect_targets(
         candidates, fixture.value().image.memory(), fixture.value().map,
-        fixture.value().image, options, 4U);
+        fixture.value().image, options, 10U);
     REQUIRE(serial);
     REQUIRE(parallel);
     REQUIRE(higher_parallel);

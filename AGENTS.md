@@ -63,19 +63,25 @@ expected frontier and expected next stop_reason for that exact input
 
 ## Current blocker state
 
-Real execution is blocked at the guest-provider boundary `__nnmusl_init_dso`.
-The local executable set declares the owning module incomplete, and the
-eligible candidate found in `sdk` is discarded by the completeness policy.
-Refusing that candidate is correct behaviour, not a defect to route around.
+The historical provider/completeness blocker is resolved for the selected exact
+four-module contract: the manifest-verified `rtld`, `main`, `subsdk0`, and `sdk`
+set is coherent, and `__nnmusl_init_dso` resolves to guest `sdk`. That history
+remains recorded in the earlier milestone evidence.
 
-- Treat this provider/completeness blocker as the primary project bottleneck.
-  It has priority over instruction-family convergence.
+Current real execution stops later at the `sdk` TLS/bootstrap boundary: the
+controlled run intentionally initializes `TPIDR_EL0` to synthetic zero, and the
+guest subsequently reads `0x1f8` from that unmapped address. No faithful runtime
+bootstrap/TLS evidence is available yet. Refusing to invent that state is
+correct behaviour, not a defect to route around.
+
+- Treat the missing faithful TLS/bootstrap evidence as the primary project
+  bottleneck. It has priority over unreachable instruction-family convergence.
 - Do not spend a milestone on another instruction family in order to avoid the
   blocker. A family that is unreachable from the current frontier is not
   capability work.
 - Do not clear the blocker by asserting completeness, weakening the policy,
-  adding a host stub, or inventing rtld/bootstrap state. Clear it with a
-  manifest-verified complete module set and faithful bootstrap evidence.
+  adding a host stub, or inventing rtld/bootstrap/TLS state. Clear it only with
+  faithful bootstrap evidence and a manifest-verified exact input contract.
 
 ## Time budget
 
