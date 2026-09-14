@@ -1,7 +1,9 @@
 # Milestone 44 — Deterministic frontier continuation and reuse
 
-**Status:** implementation, real validation, final A/B, sanitizer, and remote CI
-validation complete.
+**Status:** implementation and validation complete; convergence is blocked at the
+fourth advancing frontier pending faithful TLS/bootstrap evidence. The fifth
+run is retained as a non-advancing terminal confirmation, not counted as a new
+frontier.
 
 ## Contract and provider state
 

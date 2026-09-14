@@ -18,6 +18,7 @@ not reproduce or embed any of them.
 | SHA-256 values | validated privately; intentionally not committed |
 | expected baseline | 32,265 guest instructions; `unknown_guest_function` at `main + 0x3a2650` |
 | observed baseline | matched exactly; provider `__nnmusl_init_dso` resolves to guest `sdk` |
+| frozen profile reference | 1,187.09 s in the private contract; this is a historical profile reference, not the `/usr/bin/time` wall field below |
 
 The private check was run before implementation and again at final validation
 with `scripts/verify_measurement_contract.py`. It returned `CONTRACT_MATCH`.
@@ -31,7 +32,7 @@ refinement interval and report generation.
 
 | measured component | seconds / count | evidence meaning |
 | --- | ---: | --- |
-| total wall | 1,201.590 | `/usr/bin/time` real; user 1,187.960, system 11.270 |
+| total wall | 1,201.590 | observed `/usr/bin/time` real; user 1,187.960, system 11.270; 1,187.09 s is the separately frozen profile reference (14.50 s / 1.2% difference) |
 | analysis/refinement interval | 1,112.028416 | 92.62% of measured wall |
 | guest execution and prefix replay | 851.703098; 743 attempts | cumulative 12,166,864 guest instructions |
 | lifting / execution lookup | 288.324366; 7,759 calls | `lift_for_execution` cumulative phase |
@@ -50,6 +51,9 @@ refinement interval and report generation.
 The profiler therefore identifies prefix replay and repeated immutable map
 publication as the dominant measured costs. The post-change comparable wall
 measurement is 564.45 s: 53.02% lower (2.13x faster), below the 600 s gate.
+The two baseline numbers are retained rather than silently reconciled: 1,187.09
+s is the contract's reference value, while 1,201.590 s is the timed run from
+which the phase decomposition was collected.
 The compact development reproducer is 0.07 s, and frontier extraction is 1.73
 s. These figures are not static unsupported-instruction counts.
 
