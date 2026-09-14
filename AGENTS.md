@@ -25,6 +25,32 @@ external architect -> Pi -> checkpoint SHA -> validation/self-review
                    -> Pi fixes -> final validation
 ```
 
+### Delegation policy
+
+Delegation is bounded support for Pi, not a transfer of project ownership. Every
+subagent call must name one of the project agents explicitly; omitted or
+unknown agent types are not a valid fallback because built-in agents are
+disabled globally.
+
+Use the narrowest suitable agent:
+
+- `code-explorer` first for read-only discovery, tracing, and evidence gathering.
+- `quick-implementer` for a well-defined change in one or two files.
+- `implementer` for a scoped multi-file feature or bug fix with tests.
+- `code-reviewer` after implementation for an independent read-only diff review.
+- `commit-pusher` only after Pi has integrated the change and completed required
+  validation, with an explicit instruction naming the exact paths and ref.
+
+Parallelize only independent read-only investigations or disjoint immutable
+work. Do not run concurrent writers against the same checkout. Prefer an
+isolated worktree for implementation delegates; Pi owns integration, conflict
+resolution, final validation, frontier measurement, and milestone decisions.
+
+Each delegated prompt must include the goal/task scope, expected deliverable,
+acceptance checks, relevant paths, and prohibited actions. A subagent report is
+evidence for Pi, not proof by itself: Pi must inspect the diff, run the required
+checks, and record the result before completing the task.
+
 ## Progress metric
 
 The only progress KPI is the real frontier: the highest number of guest
