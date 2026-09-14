@@ -23,8 +23,11 @@ prod.keys
 title.keys
 *.keys
 
-# Pi goal/session state and generated reports/logs
-/.pi/
+# Pi goal/session state and generated reports/logs. Project agent profiles
+# are intentionally versioned; runtime goal/session files remain ignored.
+/.pi/*
+!/.pi/agents/
+!/.pi/agents/*.md
 *.log
 /reports/
 /build/generated/
