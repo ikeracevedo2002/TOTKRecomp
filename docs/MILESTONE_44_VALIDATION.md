@@ -76,10 +76,17 @@ of the historical wrapper, not a fabricated value.
 | frontier 5 confirmation | 87,919 → 87,919 | same `memory_fault` (`sdk`, `0x72047bb870`) | same faithful-bootstrap blocker; no frontier advance is claimed | 316.20 s; user/system not captured by wrapper | diagnosis extraction 1.73 s (shared); fixture 0.07 s (shared); resume validation 0.06 s; byte-identical terminal report | 1 | compact evidence SHA `912ee0…`; identical to frontier 4; zero fake progress |
 
 The frontier-5 row is deliberately a real terminal confirmation, not an
-advancing frontier. The latest state is therefore 87,919 executed guest
-instructions and the next stop is the honest `sdk` TLS/bootstrap boundary.
-Clearing it requires faithful runtime evidence; a host stub, selected TLS
-address, forced register, or weakened completeness check is prohibited.
+advancing frontier and therefore does **not** satisfy the requested fifth new
+frontier. The latest state is 87,919 executed guest instructions and the next
+stop is the honest `sdk` TLS/bootstrap boundary. Dynamic-symbol evidence maps
+the stopped function at `sdk + 0x13186c` to
+`nn::os::detail::InternalCriticalSectionImplByHorizon::IsLockedByCurrentThread`;
+its TLS-relative read requires a faithful Horizon current-thread/bootstrap
+object, not merely writable memory. The selected ExeFS set contains only the
+four frozen modules and supplies no launch-time Horizon thread state. Clearing
+this boundary therefore requires new external bootstrap evidence or an
+explicitly revalidated launch contract; a host stub, selected TLS address,
+forced register, or weakened completeness check is prohibited.
 
 ## Final validation
 
