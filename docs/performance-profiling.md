@@ -3,11 +3,12 @@
 Set `SWITCHRECOMP_PROFILE=1` to emit lightweight timing and lift-cache counters
 on stderr. The normal execution JSON and guest accounting are unchanged.
 
-The execution-session lift cache is scoped to a session generation. Entries are
-validated by the finalized function-map object and a deterministic CFG
-fingerprint (module/address lookup remains the outer key). A changed CFG
-therefore invalidates only its entry; immutable records are reused for later
-execution slices. `ExecutionSessionResult::performance` exposes hit, miss,
+The execution-session lift cache survives deterministic reruns and exact
+refinement continuation. Entries are validated by a deterministic CFG and
+entry-state identity (module/address lookup remains the outer key). A changed
+CFG or trust/translation state therefore invalidates only its entry; immutable
+lifted IR is reused for later execution slices without replaying the guest
+prefix. `ExecutionSessionResult::performance` exposes hit, miss,
 invalidations, and lift counters to library callers and focused tests.
 
 Function-map construction also reports its elapsed time when profiling is
@@ -15,11 +16,16 @@ enabled. Refinement publishes immutable process maps by sharing unchanged
 module records and rebuilding only touched modules. The rebuilt module passes
 the previous frozen map to `FunctionMapBuilder`, which retains decoded/finalized
 records until a newly introduced callable boundary invalidates their ownership
-or boundary dependency. `ProcessFunctionMap::replace_module` shares its
-immutable executable-range index when the replaced module keeps the same
-layout; only a new module or changed layout takes the complete index-building
-path. This keeps publication work proportional to the touched module and
-preserves exact canonical-entry collision checks.
+or boundary dependency. Reused `FunctionRecord` CFGs are immutable shared
+objects, so generation publication copies record metadata without copying every
+decoded block and instruction. Incremental validation rechecks changed records
+and overlap relationships while trusting only structural records proven identical
+to the already-frozen input map; the public one-argument validator remains a
+complete check. `ProcessFunctionMap::replace_module` shares its immutable
+executable-range index when the replaced module keeps the same layout; only a
+new module or changed layout takes the complete index-building path. This keeps
+publication work proportional to the touched module and preserves exact
+canonical-entry collision checks.
 
 The refinement driver first assesses the currently pending candidates against
 one map generation. Structurally independent candidates are grouped by target

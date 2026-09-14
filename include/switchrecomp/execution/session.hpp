@@ -593,13 +593,17 @@ class ExecutionSession
     ~ExecutionSession() noexcept;
 
     [[nodiscard]] Result<ExecutionSessionResult> run(const EntrySelection& entry);
+    // Continue an exact stopped indirect boundary after the owning immutable
+    // process map has been refined. Guest CPU, stack, frames, and memory remain
+    // unchanged; only newly validated code identity becomes dispatchable.
+    [[nodiscard]] Result<ExecutionSessionResult> resume_after_refinement(
+        ExecutionSessionResult previous);
 
   private:
     struct LiftCacheEntry
     {
         std::optional<ir::Function> function;
         std::optional<Error> error;
-        const analysis::FinalizedFunctionMap* function_map = nullptr;
         std::uint64_t cfg_identity = 0U;
     };
 
@@ -700,6 +704,9 @@ class ExecutionSession
     std::vector<memory::GuestAddress> instruction_observation_targets_;
     std::vector<SessionFrame> suspended_frames_;
     std::optional<memory::GuestMemoryMappingToken> stack_mapping_;
+    std::optional<runtime::ExecutionResult> pending_refinement_boundary_;
+    bool pending_refinement_is_call_ = false;
+    std::optional<ExecutionSessionResult> resume_result_;
     SessionFrame current_;
     runtime::CpuState cpu_{};
     runtime::RuntimeContext runtime_{};

@@ -93,6 +93,7 @@ enum class FunctionBoundaryReconciliationKind : std::uint8_t
 {
     None,
     AnalyzerOverClaim,
+    SharedTail,
     IncompatiblePreciseOverlap,
 };
 

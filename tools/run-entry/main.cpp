@@ -1467,9 +1467,23 @@ int main(int argc, char** argv)
         const auto refinement_start = std::chrono::steady_clock::now();
         std::int64_t assessment_elapsed_us = 0;
         std::int64_t refinement_publication_elapsed_us = 0;
+        std::int64_t guest_execution_elapsed_us = 0;
+        std::size_t cumulative_guest_instructions = 0U;
+        std::size_t cumulative_guest_blocks = 0U;
+        std::size_t cumulative_execution_slices = 0U;
+        std::size_t cumulative_functions_lifted = 0U;
+        std::size_t cumulative_lift_cache_hits = 0U;
+        std::size_t cumulative_lift_cache_misses = 0U;
+        std::uint64_t cumulative_ir_verification_elapsed_us = 0U;
+        std::size_t cumulative_ir_verification_calls = 0U;
         std::vector<analysis::IndirectTargetAssessment> promoted_targets;
         std::optional<execution::ExecutionSessionResult> last_run_result;
         execution::ExecutionSessionResult final_result;
+        // The process-map object has stable address across immutable generation
+        // assignments, allowing this session to retain only immutable lifted IR.
+        execution::ExecutionSession session(process.value().memory(), process_map,
+                                            process.value(), execution_options, summary,
+                                            &runtime_imports);
         for (;;)
         {
             if (!worklist.begin_round())
@@ -1482,16 +1496,30 @@ int main(int argc, char** argv)
                 final_result.diagnostic = refinement_exhaustion_diagnostic(summary);
                 break;
             }
-            execution::ExecutionSession session(process.value().memory(), process_map,
-                                                process.value(), execution_options, summary,
-                                                &runtime_imports);
-            const auto run = session.run(selected.value());
+            const auto execution_start = std::chrono::steady_clock::now();
+            const auto run = [&]() {
+                if (!last_run_result) return session.run(selected.value());
+                auto previous = std::move(last_run_result.value());
+                last_run_result.reset();
+                return session.resume_after_refinement(std::move(previous));
+            }();
+            guest_execution_elapsed_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - execution_start).count();
             if (!run)
             {
                 print_error(run.error());
                 return static_cast<int>(ExitCode::InfrastructureFailure);
             }
             auto run_result = std::move(run).value();
+            cumulative_guest_instructions += run_result.guest_instruction_count;
+            cumulative_guest_blocks += run_result.guest_blocks;
+            cumulative_execution_slices += run_result.execution_slices;
+            cumulative_functions_lifted += run_result.performance.functions_lifted;
+            cumulative_lift_cache_hits += run_result.performance.lift_cache_hits;
+            cumulative_lift_cache_misses += run_result.performance.lift_cache_misses;
+            cumulative_ir_verification_elapsed_us +=
+                run_result.performance.ir_verification_elapsed_us;
+            cumulative_ir_verification_calls += run_result.performance.ir_verification_calls;
             if (run_result.stop_reason == execution::ExecutionStopReason::GuestMemoryResourceLimitExceeded &&
                 last_run_result)
             {
@@ -1728,6 +1756,17 @@ int main(int argc, char** argv)
                       << " candidate_assessments=" << refinement.candidate_assessments
                       << " assessment_elapsed_us=" << assessment_elapsed_us
                       << " publication_elapsed_us=" << refinement_publication_elapsed_us
+                      << " guest_execution_elapsed_us=" << guest_execution_elapsed_us
+                      << " cumulative_guest_instructions=" << cumulative_guest_instructions
+                      << " cumulative_guest_blocks=" << cumulative_guest_blocks
+                      << " cumulative_execution_slices=" << cumulative_execution_slices
+                      << " cumulative_functions_lifted=" << cumulative_functions_lifted
+                      << " cumulative_lift_cache_hits=" << cumulative_lift_cache_hits
+                      << " cumulative_lift_cache_misses=" << cumulative_lift_cache_misses
+                      << " cumulative_ir_verification_elapsed_us="
+                      << cumulative_ir_verification_elapsed_us
+                      << " cumulative_ir_verification_calls="
+                      << cumulative_ir_verification_calls
                       << " worker_count=" << analysis_workers
                       << " batch_count=" << refinement.refinement_batches
                       << " batch_candidates=" << refinement.batch_candidates

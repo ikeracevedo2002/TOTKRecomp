@@ -674,7 +674,7 @@ using json = nlohmann::json;
             continue;
         }
 
-        const auto lifted = lifter::lift_function(function.cfg.value(), options.lift);
+        const auto lifted = lifter::lift_function(*function.cfg, options.lift);
         if (!lifted)
         {
             translated.diagnostics.push_back(diagnostic_from_error(lifted.error(), function.canonical_entry));
@@ -1087,12 +1087,27 @@ std::string render_function_map_json(const FinalizedFunctionMap& map)
                                  {"second_confidence", function_confidence_name(conflict.second_confidence)},
                                  {"resolution", conflict.resolution}});
     }
-    return json{{"schema_version", 2U},
+    json result{{"schema_version", 2U},
                 {"input", identity_json(map.identity())},
                 {"module", map.identity().module},
                 {"functions", std::move(functions)},
-                {"conflicts", std::move(conflicts)}}
-        .dump(2);
+                {"conflicts", std::move(conflicts)}};
+    if (!map.shared_code().empty())
+    {
+        json shared_code = json::array();
+        for (const auto& shared : map.shared_code())
+        {
+            json ranges = json::array();
+            for (const auto& range : shared.ranges) ranges.push_back(range_json(range));
+            shared_code.push_back(json{{"module", shared.module},
+                                       {"first_function", hex_address(shared.first_function)},
+                                       {"second_function", hex_address(shared.second_function)},
+                                       {"ranges", std::move(ranges)},
+                                       {"resolution", shared.resolution}});
+        }
+        result["shared_code"] = std::move(shared_code);
+    }
+    return result.dump(2);
 }
 
 std::string render_translation_report_json(const WholeModuleTranslationResult& result)

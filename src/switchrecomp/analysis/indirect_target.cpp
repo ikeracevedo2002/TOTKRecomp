@@ -535,7 +535,7 @@ struct AnalyzerOverClaimAttempt
             continue;
         }
         const auto target = call.target.value();
-        const auto old_branch = ordinary_branch_source(existing_function.cfg.value(), target);
+        const auto old_branch = ordinary_branch_source(*existing_function.cfg, target);
         const auto new_branch = ordinary_branch_source(candidate_cfg, target);
         if (!old_branch || !new_branch) continue;
         boundary_entries.insert(target);
@@ -603,7 +603,7 @@ struct AnalyzerOverClaimAttempt
     reconciliation.candidate_owned_code_ranges_after = candidate_after->second;
     reconciliation.boundary_owned_code_ranges = normalized_boundary_ranges.value();
     reconciliation.boundary_entries.assign(boundary_entries.begin(), boundary_entries.end());
-    reconciliation.existing_cfg_before = existing_function.cfg;
+    reconciliation.existing_cfg_before = *existing_function.cfg;
     reconciliation.candidate_cfg_before = candidate_cfg;
     reconciliation.boundary_cfg = boundary_cfg;
     reconciliation.witnesses.push_back(FunctionBoundaryWitness{
@@ -971,6 +971,7 @@ std::string_view function_boundary_reconciliation_kind_name(
     {
     case FunctionBoundaryReconciliationKind::None: return "none";
     case FunctionBoundaryReconciliationKind::AnalyzerOverClaim: return "analyzer_over_claim";
+    case FunctionBoundaryReconciliationKind::SharedTail: return "shared_tail";
     case FunctionBoundaryReconciliationKind::IncompatiblePreciseOverlap:
         return "incompatible_precise_overlap";
     }
@@ -1395,11 +1396,11 @@ Result<IndirectTargetAssessment> assess_indirect_target(
         validation.ownership = record->canonical_entry == observed.target
                                    ? IndirectTargetOwnership::TrustedExistingEntry
                                    : IndirectTargetOwnership::ExistingSecondaryEntry;
-        validation.cfg = record->cfg;
+        validation.cfg = *record->cfg;
         validation.cfg_status = record->cfg
                                     ? IndirectTargetCFGStatus::ExistingTrustedCFG
                                     : IndirectTargetCFGStatus::NotAnalyzed;
-        if (record->cfg) account_cfg(record->cfg.value(), validation);
+        if (record->cfg) account_cfg(*record->cfg, validation);
         validation.candidate_owned_code_ranges = record->owned_code_ranges;
         add_record_evidence(record, assessment.static_evidence);
         normalize_evidence(assessment.static_evidence);
@@ -1546,6 +1547,7 @@ Result<IndirectTargetAssessment> assess_indirect_target(
                                              std::nullopt, {}, false, false,
                                              "bounded CFG decoded within configured limits"});
     bool reconciled_boundary = false;
+    bool shared_tail = false;
     if (analysis_map != nullptr)
     {
         std::vector<const FunctionRecord*> overlapping_functions;
@@ -1571,10 +1573,33 @@ Result<IndirectTargetAssessment> assess_indirect_target(
             validation.boundary_reconciliation.candidate_owned_code_ranges_before =
                 validation.candidate_owned_code_ranges;
             validation.boundary_reconciliation.precise_overlap_ranges = validation.overlap_ranges;
-            validation.boundary_reconciliation.existing_cfg_before = function->cfg;
+            validation.boundary_reconciliation.existing_cfg_before = *function->cfg;
             validation.boundary_reconciliation.candidate_cfg_before = graph.value();
 
-            if (overlapping_functions.size() == 1U && overlap && !overlap.value().empty())
+            FunctionRecord candidate_record;
+            candidate_record.canonical_entry = observed.target;
+            candidate_record.entry_trust_status = FunctionEntryTrustStatus::Trusted;
+            candidate_record.cfg = std::make_shared<ControlFlowGraph>(graph.value());
+            candidate_record.owned_code_ranges = validation.candidate_owned_code_ranges;
+            const bool all_shared = std::all_of(
+                overlapping_functions.begin(), overlapping_functions.end(),
+                [&](const FunctionRecord* existing) {
+                    const auto precise = intersect_owned_ranges(
+                        validation.candidate_owned_code_ranges, existing->owned_code_ranges);
+                    return precise && !precise.value().empty() &&
+                           is_structural_shared_tail(*existing, candidate_record, precise.value());
+                });
+            if (overlapping_functions.size() > 1U && all_shared)
+            {
+                validation.boundary_reconciliation.kind =
+                    FunctionBoundaryReconciliationKind::SharedTail;
+                validation.boundary_reconciliation.reason =
+                    "all precise overlaps are identical closed CFG suffixes reached by unconditional branches";
+                validation.ownership = IndirectTargetOwnership::NewEntry;
+                shared_tail = true;
+                reconciled_boundary = true;
+            }
+            else if (overlapping_functions.size() == 1U && overlap && !overlap.value().empty())
             {
                 const auto reconciliation = reconcile_analyzer_overclaim(
                     *function, graph.value(), validation.candidate_owned_code_ranges, memory,
@@ -1591,6 +1616,16 @@ Result<IndirectTargetAssessment> assess_indirect_target(
                     validation.unresolved_control_flow.clear();
                     validation.edges = 0U;
                     account_cfg(validation.cfg.value(), validation);
+                    reconciled_boundary = true;
+                }
+                else if (is_structural_shared_tail(*function, candidate_record, overlap.value()))
+                {
+                    validation.boundary_reconciliation.kind =
+                        FunctionBoundaryReconciliationKind::SharedTail;
+                    validation.boundary_reconciliation.reason =
+                        "precise overlap is an identical closed CFG suffix reached by unconditional branches";
+                    validation.ownership = IndirectTargetOwnership::NewEntry;
+                    shared_tail = true;
                     reconciled_boundary = true;
                 }
             }
@@ -1653,7 +1688,9 @@ Result<IndirectTargetAssessment> assess_indirect_target(
         }
     }
     decision.canonical_entry = observed.target;
-    decision.reason = reconciled_boundary
+    decision.reason = shared_tail
+                          ? "observed indirect target has a distinct callable entry and a validated structural shared tail"
+                      : reconciled_boundary
                           ? "observed indirect target passed typed analyzer-overclaim reconciliation; "
                             "the separately discovered direct-call helper is excluded from candidate ownership"
                       : validation.pointer_slot_relocation_found &&
