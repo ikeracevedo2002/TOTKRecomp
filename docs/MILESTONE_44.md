@@ -44,9 +44,13 @@ unless the existing complete-provider checks authorize it.
 
 ## Real frontier chain under the unchanged contract
 
-Every run below used the same manifest-verified four-module set, `dt-init`, ten
-workers, and a declared 600 s wall budget. The baseline and each transition are
-path-free compact reports in the private runtime directory.
+The optimized continuation and frontier runs below used the same
+manifest-verified four-module set and `dt-init`; the optimized continuation used
+four workers, the frontier runs used ten workers, and each frontier run had a
+declared 600 s wall budget. The baseline and each transition are path-free
+compact reports in the private runtime directory. A sanitized, tracked outcome
+record with the full decomposition and per-frontier ledger is in
+[M44 validation](MILESTONE_44_VALIDATION.md).
 
 | state | guest instructions | terminal frontier | next stop |
 | --- | ---: | --- | --- |
@@ -68,13 +72,14 @@ repeated runs are evidence of deterministic terminal state, not a claimed
 frontier advance. Final A/B wall times were 317.08 s and 319.83 s, both below
 budget; user/system times were 588.88/5.79 s and 596.48/5.86 s.
 
-The baseline decomposition remains: 851.70 s execution replay, 122.71 s map
-builds, 46.17 s conflict processing, 61.64 s validation, 9.65 s report
-publication, with the remainder in lifting/verification, candidate handling,
-CFG/ownership work, and map reconstruction/copying. The optimized runs also
-record bounded worker counts, reuse/copy counters, relocation pair checks, and
-zero pending candidates in their private reports. The ten-worker deterministic
-A/B pair produced identical frontier/refinement evidence.
+The baseline decomposition is detailed in the tracked validation record:
+851.70 s execution replay, 122.71 s map builds, 46.17 s conflict processing,
+61.64 s validation, 9.65 s report publication, plus measured
+lifting/verification, candidate handling, CFG/ownership, map reconstruction,
+copy, allocation, and pair-check counters. The optimized runs also record
+bounded worker counts, reuse/copy counters, relocation pair checks, and zero
+pending candidates in their private reports. The ten-worker deterministic A/B
+pair produced identical frontier/refinement evidence.
 
 Frontier 3 resolves the ownership/function-boundary case without forcing the
 call: the candidate at `main + 0x2478740` is promoted from its validated CFG,

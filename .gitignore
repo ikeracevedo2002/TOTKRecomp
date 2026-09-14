@@ -23,7 +23,8 @@ prod.keys
 title.keys
 *.keys
 
-# Generated reports and logs
+# Pi goal/session state and generated reports/logs
+/.pi/
 *.log
 /reports/
 /build/generated/

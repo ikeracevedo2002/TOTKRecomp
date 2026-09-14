@@ -63,7 +63,8 @@ Milestone 44 validates the selected four-module recovery manifest and confirms
 that `__nnmusl_init_dso` resolves to guest `sdk` without a host replacement. The
 same frozen real run now reaches the later `sdk` TLS/bootstrap boundary, where
 synthetic-zero `TPIDR_EL0` causes an honest unmapped read at `0x1f8`. No TLS or
-Horizon bootstrap state is fabricated; see [Milestone 44](docs/MILESTONE_44.md).
+Horizon bootstrap state is fabricated; see [Milestone 44](docs/MILESTONE_44.md)
+and its [sanitized validation record](docs/MILESTONE_44_VALIDATION.md).
 
 Milestone 32 replaces the ordinary historical candidate-assessment event ceiling
 with generation-aware semantic accounting: first assessments are bounded by the
