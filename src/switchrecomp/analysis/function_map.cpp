@@ -786,13 +786,146 @@ void populate_boundary_dependencies(FunctionRecord& record,
         "unresolved; manual review required"});
 }
 
-[[nodiscard]] bool ranges_overlap(const FunctionRecord& left,
-                                  const FunctionRecord& right) noexcept
+[[nodiscard]] std::set<std::pair<std::size_t, std::size_t>> overlapping_function_pairs(
+    const std::vector<FunctionRecord>& functions)
 {
-    return owned_ranges_overlap(left.owned_code_ranges, right.owned_code_ranges);
+    struct Span
+    {
+        GuestAddress base;
+        GuestAddress end;
+        std::size_t function;
+    };
+    std::vector<Span> spans;
+    for (std::size_t index = 0U; index < functions.size(); ++index)
+    {
+        if (!functions[index].cfg) continue;
+        for (const auto& range : functions[index].owned_code_ranges)
+            spans.push_back(Span{range.base, range.base + range.size, index});
+    }
+    std::sort(spans.begin(), spans.end(), [](const Span& left, const Span& right) {
+        return std::tie(left.base, left.end, left.function) <
+               std::tie(right.base, right.end, right.function);
+    });
+    std::vector<Span> active;
+    std::set<std::pair<std::size_t, std::size_t>> pairs;
+    for (const auto& span : spans)
+    {
+        active.erase(std::remove_if(active.begin(), active.end(), [&](const Span& item) {
+                         return item.end <= span.base;
+                     }), active.end());
+        for (const auto& item : active)
+        {
+            if (item.function == span.function) continue;
+            pairs.emplace(std::min(item.function, span.function),
+                          std::max(item.function, span.function));
+        }
+        active.push_back(span);
+    }
+    return pairs;
+}
+
+[[nodiscard]] bool structural_shared_tail_impl(
+    const FunctionRecord& left, const FunctionRecord& right,
+    const std::vector<GuestAddressRange>& overlap) noexcept
+{
+    if (!left.cfg || !right.cfg ||
+        left.entry_trust_status != FunctionEntryTrustStatus::Trusted ||
+        right.entry_trust_status != FunctionEntryTrustStatus::Trusted || overlap.size() != 1U ||
+        overlap == left.owned_code_ranges || overlap == right.owned_code_ranges)
+        return false;
+    const auto in_overlap = [&overlap](GuestAddress address) {
+        return contains_any(overlap, address, 4U);
+    };
+    std::set<GuestAddress> left_blocks;
+    std::set<GuestAddress> right_blocks;
+    std::set<GuestAddress> left_entries;
+    std::set<GuestAddress> right_entries;
+    bool terminal = false;
+    const auto inspect = [&](const ControlFlowGraph& cfg, std::set<GuestAddress>& blocks,
+                             std::set<GuestAddress>& entries) {
+        for (const auto& [address, block] : cfg.blocks)
+        {
+            const bool shared = in_overlap(address);
+            for (const auto& instruction : block.instructions)
+                if (in_overlap(instruction.address) != shared) return false;
+            if (shared)
+            {
+                blocks.insert(address);
+                if (block.successors.empty()) terminal = true;
+                for (const auto& edge : block.successors)
+                    if (edge.internal && !in_overlap(edge.target)) return false;
+            }
+            else
+            {
+                for (const auto& edge : block.successors)
+                {
+                    if (!edge.internal || !in_overlap(edge.target)) continue;
+                    if (edge.kind != EdgeKind::Branch) return false;
+                    entries.insert(edge.target);
+                }
+            }
+        }
+        return true;
+    };
+    if (!inspect(*left.cfg, left_blocks, left_entries) ||
+        !inspect(*right.cfg, right_blocks, right_entries) ||
+        left_blocks.empty() || left_blocks != right_blocks || left_entries.empty() ||
+        left_entries != right_entries || !terminal)
+        return false;
+    std::map<GuestAddress, std::size_t> indegree;
+    for (const auto address : left_blocks) indegree.emplace(address, 0U);
+    for (const auto address : left_blocks)
+    {
+        const auto& block = left.cfg->blocks.at(address);
+        for (const auto& edge : block.successors)
+            if (edge.internal && in_overlap(edge.target)) ++indegree[edge.target];
+    }
+    std::vector<GuestAddress> ready;
+    for (const auto& [address, count] : indegree)
+        if (count == 0U) ready.push_back(address);
+    std::size_t visited = 0U;
+    while (!ready.empty())
+    {
+        const auto address = ready.back();
+        ready.pop_back();
+        ++visited;
+        for (const auto& edge : left.cfg->blocks.at(address).successors)
+        {
+            if (!edge.internal || !in_overlap(edge.target)) continue;
+            auto& count = indegree[edge.target];
+            if (--count == 0U) ready.push_back(edge.target);
+        }
+    }
+    if (visited != left_blocks.size()) return false;
+    for (const auto address : left_blocks)
+    {
+        const auto& a = left.cfg->blocks.at(address);
+        const auto& b = right.cfg->blocks.at(address);
+        if (a.instructions.size() != b.instructions.size() ||
+            a.successors.size() != b.successors.size() || a.calls.size() != b.calls.size() ||
+            a.termination != b.termination)
+            return false;
+        for (std::size_t i = 0U; i < a.instructions.size(); ++i)
+            if (a.instructions[i].address != b.instructions[i].address ||
+                a.instructions[i].opcode != b.instructions[i].opcode)
+                return false;
+        for (std::size_t i = 0U; i < a.successors.size(); ++i)
+            if (a.successors[i].source != b.successors[i].source ||
+                a.successors[i].target != b.successors[i].target ||
+                a.successors[i].kind != b.successors[i].kind ||
+                a.successors[i].internal != b.successors[i].internal)
+                return false;
+    }
+    return true;
 }
 
 } // namespace
+
+bool is_structural_shared_tail(const FunctionRecord& left, const FunctionRecord& right,
+                               const std::vector<GuestAddressRange>& overlap) noexcept
+{
+    return structural_shared_tail_impl(left, right, overlap);
+}
 
 Result<std::vector<GuestAddressRange>> normalize_code_ranges(
     std::span<const GuestAddress> instruction_addresses)
@@ -1258,8 +1391,12 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
     std::set<GuestAddress> reused_originals;
     std::set<GuestAddress> previous_canonical_entries;
     std::set<GuestAddress> previous_boundary_entries;
+    std::int64_t reuse_copy_elapsed_us = 0;
+    std::size_t reused_records_copied = 0U;
+    std::size_t reused_cfgs_shared = 0U;
     if (reuse_enabled)
     {
+        const auto reuse_copy_start = std::chrono::steady_clock::now();
         const auto& previous = *options.reuse_map;
         if (!previous.frozen() || previous.identity().module != input.identity.module ||
             previous.identity().build_id != input.identity.build_id ||
@@ -1274,6 +1411,8 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
         for (const auto& function : previous.functions())
         {
             records.emplace(function.canonical_entry, function);
+            ++reused_records_copied;
+            if (function.cfg) ++reused_cfgs_shared;
             reused_originals.insert(function.canonical_entry);
             previous_canonical_entries.insert(function.canonical_entry);
             processed.insert(function.canonical_entry);
@@ -1293,6 +1432,8 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
         }
         accounting.reused_functions = records.size();
         accounting.refinement_transactions = 1U;
+        reuse_copy_elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - reuse_copy_start).count();
     }
     if (budgets.strategy == AnalysisStrategy::ExecutionClosure)
     {
@@ -1430,7 +1571,8 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
     // analysis worker for every CFG in this map build instead of paying that
     // setup cost once per discovered function. A decoder is kept private to
     // its worker because the underlying Capstone handle is not shared here.
-    const auto worker_count = std::max<std::size_t>(options.analysis_workers, 1U);
+    const auto worker_count = std::min<std::size_t>(
+        10U, std::max<std::size_t>(options.analysis_workers, 1U));
     std::vector<std::unique_ptr<aarch64::AArch64Decoder>> decoders;
     decoders.reserve(worker_count);
     for (std::size_t index = 0U; index < worker_count; ++index)
@@ -1671,7 +1813,7 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
             ++accounting.newly_analyzed_functions;
         ++accounting.phases.cfg_discovery;
 
-        record->second.cfg = graph_value;
+        record->second.cfg = std::make_shared<ControlFlowGraph>(graph_value);
         ++accounting.phases.ownership_normalization;
         const auto range = populate_ownership(record->second, input.identity.executable_ranges);
         if (!range)
@@ -1838,7 +1980,7 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
                 ++accounting.reanalyzed_functions;
             else
                 ++accounting.newly_analyzed_functions;
-            record.cfg = graph.value();
+            record.cfg = std::make_shared<ControlFlowGraph>(graph.value());
             ++accounting.phases.ownership_normalization;
             const auto range = populate_ownership(record, input.identity.executable_ranges);
             if (!range)
@@ -1969,30 +2111,37 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
     // and range population has finished. The result functions are already in
     // canonical-entry order, so each pair is considered exactly once and its
     // identity is independent of seed/discovery order.
-    for (std::size_t left = 0U; left < result.functions_.size(); ++left)
+    const auto conflict_processing_start = std::chrono::steady_clock::now();
+    const auto overlapping_pairs = overlapping_function_pairs(result.functions_);
+    const std::size_t conflict_pair_checks = overlapping_pairs.size();
+    accounting.phases.conflict_processing += conflict_pair_checks;
+    for (const auto& [left, right] : overlapping_pairs)
     {
-        ++accounting.phases.conflict_processing;
-        if (!result.functions_[left].cfg)
+        const auto overlap = intersect_owned_ranges(
+            result.functions_[left].owned_code_ranges,
+            result.functions_[right].owned_code_ranges);
+        if (!overlap)
+            return Result<FinalizedFunctionMap>::failure(overlap.error());
+        if (is_structural_shared_tail(result.functions_[left], result.functions_[right],
+                                      overlap.value()))
         {
+            result.shared_code_.push_back(FunctionSharedCode{
+                input.identity.module, result.functions_[left].canonical_entry,
+                result.functions_[right].canonical_entry, overlap.value(),
+                "identical closed CFG suffix reached by unconditional branches"});
             continue;
         }
-        for (std::size_t right = left + 1U; right < result.functions_.size(); ++right)
+        const auto conflict = make_conflict(result.functions_[left], result.functions_[right],
+                                            input.identity.module);
+        if (!conflict)
         {
-            ++accounting.phases.conflict_processing;
-            if (!result.functions_[right].cfg ||
-                !ranges_overlap(result.functions_[left], result.functions_[right]))
-            {
-                continue;
-            }
-            const auto conflict = make_conflict(result.functions_[left], result.functions_[right],
-                                                input.identity.module);
-            if (!conflict)
-            {
-                return Result<FinalizedFunctionMap>::failure(conflict.error());
-            }
-            result.conflicts_.push_back(conflict.value());
+            return Result<FinalizedFunctionMap>::failure(conflict.error());
         }
+        result.conflicts_.push_back(conflict.value());
     }
+    const auto conflict_processing_elapsed_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - conflict_processing_start).count();
     // Mark records only after all conflict records have captured the original
     // discovery confidence. The evidence vector remains the provenance source
     // even after the finalized record receives Conflict status.
@@ -2049,7 +2198,7 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
             : 0U;
     accounting.canonical_functions_with_cfg = static_cast<std::size_t>(std::count_if(
         result.functions_.begin(), result.functions_.end(), [](const FunctionRecord& function) {
-            return function.cfg.has_value();
+            return static_cast<bool>(function.cfg);
         }));
     accounting.candidate_function_entries = static_cast<std::size_t>(std::count_if(
         result.functions_.begin(), result.functions_.end(), [](const FunctionRecord& function) {
@@ -2065,7 +2214,11 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
               [](const auto& left, const auto& right) { return left.source < right.source; });
     result.accounting_ = std::move(accounting);
     result.frozen_ = true;
-    const auto valid = validate_finalized_function_map(result);
+    const auto validation_start = std::chrono::steady_clock::now();
+    const auto valid = validate_finalized_function_map(
+        result, reuse_enabled ? options.reuse_map : nullptr);
+    const auto validation_elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - validation_start).count();
     if (!valid)
     {
         return Result<FinalizedFunctionMap>::failure(valid.error());
@@ -2075,13 +2228,50 @@ Result<FinalizedFunctionMap> FunctionMapBuilder::build(const ModuleAnalysisInput
         std::cerr << "[switchrecomp profile] map_build module=" << input.identity.module
                   << " map_builds=1 functions_analyzed=" << result.accounting_.functions_cfg_analyzed
                   << " functions_lifted=0 candidate_assessments=0 refinement_transactions="
-                  << result.accounting_.refinement_transactions << "\n";
+                  << result.accounting_.refinement_transactions
+                  << " reuse_copy_elapsed_us=" << reuse_copy_elapsed_us
+                  << " reused_records_copied=" << reused_records_copied
+                  << " reused_cfgs_shared=" << reused_cfgs_shared
+                  << " conflict_processing_elapsed_us=" << conflict_processing_elapsed_us
+                  << " conflict_pair_checks=" << conflict_pair_checks
+                  << " validation_mode=" << (reuse_enabled ? "incremental" : "full")
+                  << " validation_elapsed_us=" << validation_elapsed_us << "\n";
     }
     return Result<FinalizedFunctionMap>::success(std::move(result));
 }
 
 Result<void> validate_finalized_function_map(const FinalizedFunctionMap& map)
 {
+    return validate_finalized_function_map(map, nullptr);
+}
+
+Result<void> validate_finalized_function_map(
+    const FinalizedFunctionMap& map,
+    const FinalizedFunctionMap* validated_reuse_map)
+{
+    const auto is_unchanged = [&](const FunctionRecord& function) {
+        if (validated_reuse_map == nullptr || !validated_reuse_map->frozen_ ||
+            validated_reuse_map->identity_.module != map.identity_.module ||
+            validated_reuse_map->identity_.build_id != map.identity_.build_id ||
+            validated_reuse_map->identity_.input_sha256 != map.identity_.input_sha256 ||
+            validated_reuse_map->identity_.guest_base != map.identity_.guest_base ||
+            validated_reuse_map->identity_.executable_ranges != map.identity_.executable_ranges)
+        {
+            return false;
+        }
+        const auto* previous = validated_reuse_map->find_canonical_entry(function.canonical_entry);
+        return previous != nullptr && previous->module == function.module &&
+               previous->synthetic_id == function.synthetic_id &&
+               previous->entries == function.entries && previous->range_begin == function.range_begin &&
+               previous->range_end == function.range_end &&
+               previous->owned_code_ranges == function.owned_code_ranges &&
+               previous->boundary_dependencies == function.boundary_dependencies &&
+               previous->primary_source == function.primary_source &&
+               previous->confidence == function.confidence &&
+               previous->entry_trust_status == function.entry_trust_status &&
+               previous->translation_status == function.translation_status &&
+               previous->cfg == function.cfg;
+    };
     if (!map.frozen_)
     {
         return Result<void>::failure(
@@ -2122,7 +2312,7 @@ Result<void> validate_finalized_function_map(const FinalizedFunctionMap& map)
                                "function map contains an invalid or duplicate entry"));
             }
         }
-        if (function.cfg)
+        if (function.cfg && !is_unchanged(function))
         {
             std::vector<GuestAddress> instruction_addresses;
             instruction_addresses.reserve(function.cfg->instruction_count);
@@ -2186,7 +2376,7 @@ Result<void> validate_finalized_function_map(const FinalizedFunctionMap& map)
                     ErrorCode::InvalidGuestAddress,
                     "function envelope does not bound its precise ownership"));
             }
-            const auto valid_cfg = validate_control_flow_graph(function.cfg.value());
+            const auto valid_cfg = validate_control_flow_graph(*function.cfg);
             if (!valid_cfg)
             {
                 return Result<void>::failure(valid_cfg.error());
@@ -2195,6 +2385,8 @@ Result<void> validate_finalized_function_map(const FinalizedFunctionMap& map)
     }
 
     std::set<std::pair<GuestAddress, GuestAddress>> recorded_conflicts;
+    std::set<std::pair<GuestAddress, GuestAddress>> expected_conflicts;
+    std::set<std::pair<GuestAddress, GuestAddress>> expected_shared;
     std::optional<std::pair<GuestAddress, GuestAddress>> previous_conflict;
     for (const auto& conflict : map.conflicts_)
     {
@@ -2234,6 +2426,12 @@ Result<void> validate_finalized_function_map(const FinalizedFunctionMap& map)
                 ErrorCode::FunctionBoundaryConflict,
                 "function map contains a phantom or stale boundary conflict"));
         }
+        const auto pair = std::make_pair(conflict.first_function, conflict.second_function);
+        if (is_unchanged(*first) && is_unchanged(*second))
+        {
+            expected_conflicts.insert(pair);
+            continue;
+        }
         const auto expected_overlap =
             intersect_owned_ranges(first->owned_code_ranges, second->owned_code_ranges);
         const auto normalized_overlap = normalize_code_ranges(conflict.overlap_ranges);
@@ -2247,48 +2445,92 @@ Result<void> validate_finalized_function_map(const FinalizedFunctionMap& map)
         }
     }
 
-    std::set<std::pair<GuestAddress, GuestAddress>> expected_conflicts;
-    for (std::size_t left = 0U; left < map.functions_.size(); ++left)
+    std::set<std::pair<GuestAddress, GuestAddress>> recorded_shared;
+    for (const auto& shared : map.shared_code_)
     {
-        if (!map.functions_[left].cfg)
+        const auto pair = std::make_pair(shared.first_function, shared.second_function);
+        const auto* first = map.find_canonical_entry(shared.first_function);
+        const auto* second = map.find_canonical_entry(shared.second_function);
+        const auto overlap = first != nullptr && second != nullptr
+                                 ? intersect_owned_ranges(first->owned_code_ranges,
+                                                          second->owned_code_ranges)
+                                 : Result<std::vector<GuestAddressRange>>::failure(make_error(
+                                       ErrorCode::FunctionBoundaryConflict,
+                                       "shared code references a missing function"));
+        if (shared.module != map.identity_.module || shared.first_function >= shared.second_function ||
+            !recorded_shared.insert(pair).second || recorded_conflicts.contains(pair) ||
+            !overlap || overlap.value() != shared.ranges ||
+            ((!is_unchanged(*first) || !is_unchanged(*second)) &&
+             !is_structural_shared_tail(*first, *second, shared.ranges)))
         {
-            continue;
-        }
-        for (std::size_t right = left + 1U; right < map.functions_.size(); ++right)
-        {
-            if (!map.functions_[right].cfg)
-            {
-                continue;
-            }
-            if (!ranges_overlap(map.functions_[left], map.functions_[right]))
-            {
-                continue;
-            }
-            const auto pair = std::make_pair(map.functions_[left].canonical_entry,
-                                             map.functions_[right].canonical_entry);
-            expected_conflicts.insert(pair);
-            if (recorded_conflicts.find(pair) == recorded_conflicts.end())
-            {
-                return Result<void>::failure(make_error(
-                    ErrorCode::FunctionBoundaryConflict,
-                    "overlapping function ranges were not recorded as a conflict"));
-            }
-            if (map.functions_[left].confidence != FunctionConfidence::Conflict ||
-                map.functions_[left].translation_status != TranslationStatus::Conflict ||
-                map.functions_[right].confidence != FunctionConfidence::Conflict ||
-                map.functions_[right].translation_status != TranslationStatus::Conflict)
-            {
-                return Result<void>::failure(make_error(
-                    ErrorCode::FunctionBoundaryConflict,
-                    "overlapping functions were not marked as conflicting"));
-            }
+            return Result<void>::failure(make_error(
+                ErrorCode::FunctionBoundaryConflict,
+                "function map contains invalid or non-normalized shared code"));
         }
     }
-    if (recorded_conflicts != expected_conflicts)
+
+    const auto overlapping_pairs = overlapping_function_pairs(map.functions_);
+    const std::size_t conflict_validation_pair_checks = overlapping_pairs.size();
+    for (const auto& [left, right] : overlapping_pairs)
+    {
+        const auto pair = std::make_pair(map.functions_[left].canonical_entry,
+                                         map.functions_[right].canonical_entry);
+        if (is_unchanged(map.functions_[left]) && is_unchanged(map.functions_[right]))
+        {
+            if (recorded_shared.contains(pair))
+                expected_shared.insert(pair);
+            else if (recorded_conflicts.contains(pair))
+                expected_conflicts.insert(pair);
+            else
+                return Result<void>::failure(make_error(
+                    ErrorCode::FunctionBoundaryConflict,
+                    "unchanged overlapping functions have no recorded classification"));
+            continue;
+        }
+        const auto overlap = intersect_owned_ranges(
+            map.functions_[left].owned_code_ranges,
+            map.functions_[right].owned_code_ranges);
+        if (!overlap)
+            return Result<void>::failure(overlap.error());
+        if (is_structural_shared_tail(map.functions_[left], map.functions_[right],
+                                      overlap.value()))
+        {
+            expected_shared.insert(pair);
+            if (!recorded_shared.contains(pair))
+                return Result<void>::failure(make_error(
+                    ErrorCode::FunctionBoundaryConflict,
+                    "structural shared tail was not recorded"));
+            continue;
+        }
+        expected_conflicts.insert(pair);
+        if (recorded_conflicts.find(pair) == recorded_conflicts.end())
+        {
+            return Result<void>::failure(make_error(
+                ErrorCode::FunctionBoundaryConflict,
+                "overlapping function ranges were not recorded as a conflict"));
+        }
+        if (map.functions_[left].confidence != FunctionConfidence::Conflict ||
+            map.functions_[left].translation_status != TranslationStatus::Conflict ||
+            map.functions_[right].confidence != FunctionConfidence::Conflict ||
+            map.functions_[right].translation_status != TranslationStatus::Conflict)
+        {
+            return Result<void>::failure(make_error(
+                ErrorCode::FunctionBoundaryConflict,
+                "overlapping functions were not marked as conflicting"));
+        }
+    }
+    if (recorded_conflicts != expected_conflicts || recorded_shared != expected_shared)
     {
         return Result<void>::failure(make_error(
             ErrorCode::FunctionBoundaryConflict,
-            "finalized function map conflict set does not match precise ownership"));
+            "finalized function map overlap classification does not match precise ownership"));
+    }
+    const auto* profile = std::getenv("SWITCHRECOMP_PROFILE");
+    if (profile != nullptr && profile[0] != '\0' && profile[0] != '0')
+    {
+        std::cerr << "[switchrecomp profile] phase=function_map_validation module="
+                  << map.identity_.module
+                  << " conflict_pair_checks=" << conflict_validation_pair_checks << "\n";
     }
     return Result<void>::success();
 }

@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <set>
 #include <span>
@@ -249,6 +250,19 @@ struct FunctionBoundaryConflict
     std::string resolution;
 };
 
+struct FunctionSharedCode
+{
+    std::string module;
+    memory::GuestAddress first_function = 0U;
+    memory::GuestAddress second_function = 0U;
+    // Exact decoded instruction ranges shared by two callable identities. The
+    // functions remain distinct; these ranges are not themselves callable entries.
+    std::vector<GuestAddressRange> ranges;
+    std::string resolution;
+
+    friend bool operator==(const FunctionSharedCode&, const FunctionSharedCode&) = default;
+};
+
 struct FunctionRecord
 {
     std::string module;
@@ -269,7 +283,11 @@ struct FunctionRecord
     FunctionConfidence confidence = FunctionConfidence::Low;
     std::optional<std::string> name;
     std::vector<DiscoveryEvidence> evidence;
-    std::optional<ControlFlowGraph> cfg;
+    // CFGs are immutable after finalization. Reusing a map generation shares
+    // this decoded graph instead of copying its full block/instruction tree;
+    // a builder replaces the pointer when boundary invalidation requires a
+    // fresh analysis.
+    std::shared_ptr<const ControlFlowGraph> cfg;
     std::vector<memory::GuestAddress> direct_calls;
     std::vector<CallSite> indirect_calls;
     std::vector<UnresolvedControlFlow> unresolved_control_flow;
@@ -418,6 +436,9 @@ struct FunctionMapOptions
     const std::vector<GuestAddressRange>& input_ranges);
 [[nodiscard]] bool owned_ranges_overlap(const std::vector<GuestAddressRange>& left,
                                          const std::vector<GuestAddressRange>& right) noexcept;
+[[nodiscard]] bool is_structural_shared_tail(
+    const FunctionRecord& left, const FunctionRecord& right,
+    const std::vector<GuestAddressRange>& overlap) noexcept;
 [[nodiscard]] Result<std::vector<GuestAddressRange>> intersect_owned_ranges(
     const std::vector<GuestAddressRange>& left, const std::vector<GuestAddressRange>& right);
 [[nodiscard]] Result<memory::GuestSize> precise_owned_byte_count(
@@ -440,6 +461,10 @@ class FinalizedFunctionMap
     {
         return conflicts_;
     }
+    [[nodiscard]] const std::vector<FunctionSharedCode>& shared_code() const noexcept
+    {
+        return shared_code_;
+    }
     [[nodiscard]] const AnalysisAccounting& accounting() const noexcept { return accounting_; }
     // Exact callable-entry lookup includes explicitly accepted secondary
     // entries, but never infers callability from an ownership range.
@@ -458,9 +483,13 @@ class FinalizedFunctionMap
   private:
     friend class FunctionMapBuilder;
     friend Result<void> validate_finalized_function_map(const FinalizedFunctionMap& map);
+    friend Result<void> validate_finalized_function_map(
+        const FinalizedFunctionMap& map,
+        const FinalizedFunctionMap* validated_reuse_map);
     ModuleIdentity identity_;
     std::vector<FunctionRecord> functions_;
     std::vector<FunctionBoundaryConflict> conflicts_;
+    std::vector<FunctionSharedCode> shared_code_;
     AnalysisAccounting accounting_;
     bool frozen_ = false;
 };
@@ -473,5 +502,11 @@ class FunctionMapBuilder
 };
 
 [[nodiscard]] Result<void> validate_finalized_function_map(const FinalizedFunctionMap& map);
+// Validate a refinement generation while reusing the already validated
+// ownership/CFG invariants for records that are structurally shared with the
+// supplied frozen map. The default public validator remains the complete check.
+[[nodiscard]] Result<void> validate_finalized_function_map(
+    const FinalizedFunctionMap& map,
+    const FinalizedFunctionMap* validated_reuse_map);
 
 } // namespace switchrecomp::analysis

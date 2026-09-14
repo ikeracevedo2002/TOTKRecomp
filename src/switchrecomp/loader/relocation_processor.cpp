@@ -2,7 +2,9 @@
 
 #include "switchrecomp/common/checked_arithmetic.hpp"
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <new>
@@ -11,6 +13,9 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <mutex>
+#include <numeric>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -211,43 +216,144 @@ Result<void> apply_relocation_plan(memory::GuestMemory& guest_memory, const Relo
 {
     try
     {
-        // Revalidate the complete write set before committing any bytes. This
-        // keeps a retained plan safe even if its memory was changed meanwhile.
-        for (const auto& entry : plan.applied)
-        {
-            const auto target = validate_target(guest_memory, entry.relocation,
-                                                entry.relocation_index, options);
-            if (!target)
+        const auto worker_count = std::min<std::size_t>(
+            10U, std::min(std::max<std::size_t>(options.workers, 1U), plan.applied.size()));
+        std::optional<Error> worker_error;
+        std::mutex worker_error_mutex;
+        const auto record_worker_error = [&](Error error) {
+            std::lock_guard lock(worker_error_mutex);
+            if (!worker_error) worker_error = std::move(error);
+        };
+        const auto run_indexed = [&](const auto& operation) -> bool {
+            if (worker_count <= 1U)
             {
-                return target;
+                for (std::size_t index = 0U; index < plan.applied.size(); ++index)
+                {
+                    try { operation(index); }
+                    catch (const std::bad_alloc&)
+                    {
+                        record_worker_error(make_error(
+                            ErrorCode::ResourceLimit, "parallel relocation operation allocation failed"));
+                    }
+                    catch (...)
+                    {
+                        record_worker_error(make_error(
+                            ErrorCode::ThreadCreationFailed, "parallel relocation operation failed unexpectedly"));
+                    }
+                    if (worker_error) return false;
+                }
+                return true;
             }
+            std::atomic<std::size_t> next{0U};
+            std::vector<std::thread> workers;
+            workers.reserve(worker_count);
+            try
+            {
+                for (std::size_t worker = 0U; worker < worker_count; ++worker)
+                {
+                    workers.emplace_back([&]() {
+                        for (;;)
+                        {
+                            const auto index = next.fetch_add(1U, std::memory_order_relaxed);
+                            if (index >= plan.applied.size()) return;
+                            try { operation(index); }
+                            catch (const std::bad_alloc&)
+                            {
+                                record_worker_error(make_error(
+                                    ErrorCode::ResourceLimit,
+                                    "parallel relocation operation allocation failed"));
+                                return;
+                            }
+                            catch (...)
+                            {
+                                record_worker_error(make_error(
+                                    ErrorCode::ThreadCreationFailed,
+                                    "parallel relocation operation failed unexpectedly"));
+                                return;
+                            }
+                        }
+                    });
+                }
+            }
+            catch (...)
+            {
+                record_worker_error(make_error(
+                    ErrorCode::ThreadCreationFailed,
+                    "unable to create the bounded relocation worker pool"));
+            }
+            for (auto& worker : workers)
+                if (worker.joinable()) worker.join();
+            return !worker_error;
+        };
+
+        // Revalidate the complete write set before committing any bytes. This
+        // keeps a retained plan safe if its memory was changed meanwhile.
+        std::vector<std::optional<Error>> validation_errors(plan.applied.size());
+        if (!run_indexed([&](std::size_t index) {
+                const auto& entry = plan.applied[index];
+                const auto target = validate_target(guest_memory, entry.relocation,
+                                                    entry.relocation_index, options);
+                if (!target) validation_errors[index] = target.error();
+            }))
+        {
+            return Result<void>::failure(worker_error.value());
         }
+        for (const auto& error : validation_errors)
+            if (error) return Result<void>::failure(*error);
 
         struct Snapshot
         {
             memory::GuestAddress address = 0U;
             std::vector<std::byte> bytes;
         };
-        std::vector<Snapshot> snapshots;
-        snapshots.reserve(plan.applied.size());
-        for (const auto& entry : plan.applied)
-        {
-            Snapshot snapshot;
-            snapshot.address = entry.relocation.target_address;
-            snapshot.bytes.resize(entry.width);
-            const auto read = guest_memory.read(
-                snapshot.address, std::span<std::byte>(snapshot.bytes.data(), snapshot.bytes.size()));
-            if (!read)
-            {
-                return Result<void>::failure(make_error(
+        std::vector<Snapshot> snapshots(plan.applied.size());
+        std::vector<std::optional<Error>> snapshot_errors(plan.applied.size());
+        if (!run_indexed([&](std::size_t index) {
+                const auto& entry = plan.applied[index];
+                auto& snapshot = snapshots[index];
+                snapshot.address = entry.relocation.target_address;
+                snapshot.bytes.resize(entry.width);
+                const auto read = guest_memory.read(
+                    snapshot.address,
+                    std::span<std::byte>(snapshot.bytes.data(), snapshot.bytes.size()));
+                if (!read) snapshot_errors[index] = make_error(
                     read.error().code,
-                    "relocation plan could not snapshot target before commit: " + read.error().message));
+                    "relocation plan could not snapshot target before commit: " + read.error().message);
+            }))
+        {
+            return Result<void>::failure(worker_error.value());
+        }
+        for (const auto& error : snapshot_errors)
+            if (error) return Result<void>::failure(*error);
+
+        // Concurrent writes are valid only when target byte ranges are
+        // disjoint. Preserve the old ordered transaction for malformed or
+        // overlapping plans rather than permitting an arbitrary race.
+        std::vector<std::size_t> address_order(plan.applied.size());
+        std::iota(address_order.begin(), address_order.end(), 0U);
+        std::sort(address_order.begin(), address_order.end(), [&](std::size_t left, std::size_t right) {
+            if (plan.applied[left].relocation.target_address !=
+                plan.applied[right].relocation.target_address)
+                return plan.applied[left].relocation.target_address <
+                       plan.applied[right].relocation.target_address;
+            return left < right;
+        });
+        bool disjoint = true;
+        for (std::size_t index = 1U; index < address_order.size(); ++index)
+        {
+            const auto& previous = plan.applied[address_order[index - 1U]];
+            const auto& current = plan.applied[address_order[index]];
+            const auto previous_end = previous.relocation.target_address + previous.width;
+            if (current.relocation.target_address < previous_end)
+            {
+                disjoint = false;
+                break;
             }
-            snapshots.push_back(std::move(snapshot));
         }
 
-        for (const auto& entry : plan.applied)
-        {
+        worker_error.reset();
+        const auto write_one = [&](std::size_t index) {
+            const auto& entry = plan.applied[index];
             std::array<std::byte, sizeof(std::uint64_t)> bytes{};
             encode_u64_le(entry.value, bytes);
             const auto result = options.use_loader_write
@@ -257,32 +363,41 @@ Result<void> apply_relocation_plan(memory::GuestMemory& guest_memory, const Relo
                                     : guest_memory.write(
                                           entry.relocation.target_address,
                                           std::span<const std::byte>(bytes.data(), entry.width));
-            if (!result)
+            if (!result) record_worker_error(make_error(
+                ErrorCode::RelocationPlanFailed,
+                "relocation plan commit failed: " + result.error().message));
+        };
+        if (disjoint && worker_count > 1U)
+        {
+            (void)run_indexed(write_one);
+        }
+        else
+        {
+            for (std::size_t index = 0U; index < plan.applied.size(); ++index)
             {
-                // Writes are committed only as one logical transaction. The
-                // preflight above catches ordinary failures; this rollback
-                // also protects callers if a write becomes invalid between
-                // preflight and commit.
-                for (std::size_t index = snapshots.size(); index > 0U; --index)
-                {
-                    const auto& snapshot = snapshots[index - 1U];
-                    if (options.use_loader_write)
-                    {
-                        (void)guest_memory.loader_write(
-                            snapshot.address,
-                            std::span<const std::byte>(snapshot.bytes.data(), snapshot.bytes.size()));
-                    }
-                    else
-                    {
-                        (void)guest_memory.write(
-                            snapshot.address,
-                            std::span<const std::byte>(snapshot.bytes.data(), snapshot.bytes.size()));
-                    }
-                }
-                return Result<void>::failure(make_error(
-                    ErrorCode::RelocationPlanFailed,
-                    "relocation plan commit failed and was rolled back: " + result.error().message));
+                write_one(index);
+                if (worker_error) break;
             }
+        }
+        if (worker_error)
+        {
+            // Writes are committed only as one logical transaction. The
+            // preflight above catches ordinary failures; this rollback also
+            // protects callers if a write becomes invalid between preflight
+            // and commit.
+            for (std::size_t index = snapshots.size(); index > 0U; --index)
+            {
+                const auto& snapshot = snapshots[index - 1U];
+                if (options.use_loader_write)
+                    (void)guest_memory.loader_write(
+                        snapshot.address,
+                        std::span<const std::byte>(snapshot.bytes.data(), snapshot.bytes.size()));
+                else
+                    (void)guest_memory.write(
+                        snapshot.address,
+                        std::span<const std::byte>(snapshot.bytes.data(), snapshot.bytes.size()));
+            }
+            return Result<void>::failure(*worker_error);
         }
         return Result<void>::success();
     }

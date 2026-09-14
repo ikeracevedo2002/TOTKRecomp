@@ -2,6 +2,7 @@
 
 #include "switchrecomp/aarch64/decoder.hpp"
 #include "switchrecomp/common/checked_arithmetic.hpp"
+#include "switchrecomp/ir/verifier.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1749,14 +1750,9 @@ ExecutionSession::ExecutionSession(
       runtime_imports_(runtime_imports == nullptr ? &empty_runtime_imports_ : runtime_imports),
       options_(std::move(options)), load_summary_(load_summary)
 {
-    for (const auto& map : function_map.maps())
-    {
-        if (map.identity().module == process_image.summary().primary_module)
-        {
-            function_map_ = &map;
-            break;
-        }
-    }
+    // Process-map lookups must always go through the owning immutable process
+    // map. Its module storage may be replaced between continuation slices, so
+    // retaining a raw pointer to one MapView element would become dangling.
 }
 
 ExecutionSession::ExecutionSession(
@@ -1768,7 +1764,6 @@ ExecutionSession::ExecutionSession(
       runtime_imports_(runtime_imports == nullptr ? &empty_runtime_imports_ : runtime_imports),
       options_(std::move(options)), load_summary_(load_summary)
 {
-    if (!function_map.maps().empty()) function_map_ = &function_map.maps().front();
 }
 
 ExecutionSession::~ExecutionSession() noexcept
@@ -2226,12 +2221,15 @@ Result<const ir::Function*> ExecutionSession::lift_for_execution(
 {
     ProfileTimer timer("execution.lift_for_execution", &profile_totals_.lift_elapsed_us,
                        &profile_totals_.lift_calls);
-    const auto* map = function_map_for(entry);
     const auto* record = function_record(entry);
-    const auto identity = record != nullptr && record->cfg ? cfg_identity(record->cfg.value()) : 0U;
+    auto identity = record != nullptr && record->cfg ? cfg_identity(*record->cfg) : 0U;
+    if (record != nullptr)
+    {
+        identity ^= static_cast<std::uint64_t>(record->translation_status) << 56U;
+        identity ^= static_cast<std::uint64_t>(record->entry_trust_status) << 48U;
+    }
     const auto found = lift_cache_.find(entry);
-    if (found != lift_cache_.end() && found->second.function_map == map &&
-        found->second.cfg_identity == identity)
+    if (found != lift_cache_.end() && found->second.cfg_identity == identity)
     {
         ++result.performance.lift_cache_hits;
         if (found->second.function) return Result<const ir::Function*>::success(&found->second.function.value());
@@ -2248,7 +2246,7 @@ Result<const ir::Function*> ExecutionSession::lift_for_execution(
     {
         const auto error = make_error(ErrorCode::UnknownGuestFunction,
                                       "guest address is not an exact finalized function entry");
-        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error, map, identity});
+        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error, identity});
         return Result<const ir::Function*>::failure(error);
     }
     if (record->translation_status == analysis::TranslationStatus::Conflict)
@@ -2273,7 +2271,7 @@ Result<const ir::Function*> ExecutionSession::lift_for_execution(
             }
         }
         const auto error = make_error(ErrorCode::FunctionBoundaryConflict, message.str());
-        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error, map, identity});
+        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error, identity});
         return Result<const ir::Function*>::failure(error);
     }
     if (!record->cfg)
@@ -2281,20 +2279,44 @@ Result<const ir::Function*> ExecutionSession::lift_for_execution(
         const auto error = make_error(
             ErrorCode::UnsupportedInstruction,
             "finalized function has no executable CFG: " + hex_address(entry));
-        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error, map, identity});
+        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, error, identity});
         return Result<const ir::Function*>::failure(error);
     }
     lifter::LiftOptions lift_options;
     lift_options.stop_at_unsupported_instruction = true;
-    const auto lifted = lifter::lift_function(record->cfg.value(), lift_options);
+    const auto lifted = lifter::lift_function(*record->cfg, lift_options);
     if (!lifted)
     {
-        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, lifted.error(), map, identity});
+        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, lifted.error(), identity});
         return Result<const ir::Function*>::failure(lifted.error());
     }
-    auto inserted = lift_cache_.emplace(entry, LiftCacheEntry{lifted.value(), std::nullopt, map, identity});
+    const auto verification_start = profiling_enabled() ? std::chrono::steady_clock::now()
+                                                          : std::chrono::steady_clock::time_point{};
+    const auto verified = ir::verify(lifted.value());
+    if (profiling_enabled())
+    {
+        result.performance.ir_verification_elapsed_us += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - verification_start)
+                .count());
+        ++result.performance.ir_verification_calls;
+    }
+    if (!verified)
+    {
+        lift_cache_.emplace(entry, LiftCacheEntry{std::nullopt, verified.error(), identity, false});
+        return Result<const ir::Function*>::failure(verified.error());
+    }
+    auto inserted = lift_cache_.emplace(
+        entry, LiftCacheEntry{lifted.value(), std::nullopt, identity, true});
     ++result.performance.functions_lifted;
     return Result<const ir::Function*>::success(&inserted.first->second.function.value());
+}
+
+bool ExecutionSession::is_function_preverified(memory::GuestAddress entry) const noexcept
+{
+    const auto found = lift_cache_.find(entry);
+    return found != lift_cache_.end() && found->second.function.has_value() &&
+           found->second.function_preverified;
 }
 
 FunctionTransitionEvidence ExecutionSession::make_transition_evidence(
@@ -2692,7 +2714,8 @@ Result<void> ExecutionSession::classify_target(const runtime::ExecutionResult& b
                                       : analysis::IndirectTargetPointerProvenanceKind::Unknown;
     if (payload.has_provenance_address) observed.guest_load_address = payload.provenance_address;
     const auto assessment = analysis::assess_indirect_target(
-        observed, *memory_, function_map_, process_function_map_, process_image_);
+        observed, *memory_, process_function_map_ == nullptr ? function_map_ : nullptr,
+        process_function_map_, process_image_);
     if (assessment)
         result.indirect_target_discovery.push_back(assessment.value());
     const auto* record = function_record(target);
@@ -2716,6 +2739,8 @@ Result<void> ExecutionSession::classify_target(const runtime::ExecutionResult& b
     }
     if (record == nullptr || record->entry_trust_status != analysis::FunctionEntryTrustStatus::Trusted)
     {
+        pending_refinement_boundary_ = boundary;
+        pending_refinement_is_call_ = call;
         return stop(result, ExecutionStopReason::UnknownGuestFunction,
                     "aligned executable target is not an exact trusted function entry", target, &boundary);
     }
@@ -3146,6 +3171,20 @@ Result<void> ExecutionSession::dispatch_runtime_import(
     return Result<void>::success();
 }
 
+Result<ExecutionSessionResult> ExecutionSession::resume_after_refinement(
+    ExecutionSessionResult previous)
+{
+    if (running_ || !pending_refinement_boundary_ || resume_result_)
+    {
+        return Result<ExecutionSessionResult>::failure(make_error(
+            ErrorCode::InvalidArgument,
+            "execution session has no unique stopped refinement boundary to resume"));
+    }
+    const auto entry = previous.entry;
+    resume_result_ = std::move(previous);
+    return run(entry);
+}
+
 Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry)
 {
     if (running_)
@@ -3153,7 +3192,9 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         return Result<ExecutionSessionResult>::failure(
             make_error(ErrorCode::InvalidArgument, "execution session is already running"));
     }
-    if (memory_ == nullptr || function_map_ == nullptr || options_.budgets.slice_ir_operations == 0U ||
+    if (memory_ == nullptr ||
+        (function_map_ == nullptr && process_function_map_ == nullptr) ||
+        options_.budgets.slice_ir_operations == 0U ||
         (options_.budgets.max_ir_operations && options_.budgets.max_ir_operations.value() == 0U) ||
         options_.budgets.max_function_transitions == 0U || options_.budgets.max_call_depth == 0U ||
         (options_.budgets.max_events && options_.budgets.max_events.value() == 0U) ||
@@ -3168,7 +3209,39 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
             make_error(ErrorCode::InvalidGuestAddress, "selected execution entry is invalid"));
     }
     ProfileTimer timer("execution.run");
-
+    ExecutionSessionResult result;
+    if (resume_result_)
+    {
+        result = std::move(resume_result_.value());
+        resume_result_.reset();
+        running_ = true;
+        profile_totals_ = ProfileTotals{};
+        const auto boundary = pending_refinement_boundary_.value();
+        const bool call = pending_refinement_is_call_;
+        pending_refinement_boundary_.reset();
+        result.stop_reason = ExecutionStopReason::UnsupportedSemantic;
+        result.diagnostic.clear();
+        result.target.reset();
+        result.source_pc.reset();
+        result.diagnostic_pc.reset();
+        result.diagnostic_opcode.reset();
+        result.diagnostic_instruction_id.clear();
+        result.diagnostic_instruction.clear();
+        result.import_boundary.reset();
+        result.terminal_ir_block.reset();
+        result.terminal_ir_operation_index.reset();
+        result.target_register.clear();
+        result.target_provenance.clear();
+        const auto dispatched = call ? dispatch_call(boundary, result)
+                                     : dispatch_transfer(boundary, result);
+        if (!dispatched)
+        {
+            running_ = false;
+            return Result<ExecutionSessionResult>::failure(dispatched.error());
+        }
+    }
+    else
+    {
     // A second run on the same session replaces the previous logical
     // generation. The first run's stack was kept alive through its caller's
     // assessment window; releasing it here is the replacement boundary.
@@ -3181,13 +3254,23 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
     running_ = true;
     suspended_frames_.clear();
     current_ = SessionFrame{};
-    lift_cache_.clear();
+    // Immutable lifted IR survives deterministic reruns. Changed CFG or trust
+    // state is rejected by the cache identity in lift_for_execution.
     profile_totals_ = ProfileTotals{};
     executed_function_index_.clear();
     instruction_evidence_index_.clear();
     runtime_state_.reset();
-    ExecutionSessionResult result;
-    result.identity = function_map_->identity();
+    pending_refinement_boundary_.reset();
+    const auto* entry_map = process_function_map_ != nullptr
+                                 ? process_function_map_->map_for(entry.address)
+                                 : function_map_;
+    if (entry_map == nullptr)
+    {
+        running_ = false;
+        return Result<ExecutionSessionResult>::failure(make_error(
+            ErrorCode::InvalidArgument, "selected execution entry is not owned by a finalized map"));
+    }
+    result.identity = entry_map->identity();
     result.entry = entry;
     result.options = options_;
     result.event_resource.retention_limit = options_.budgets.event_history_limit;
@@ -3379,6 +3462,7 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
         running_ = false;
         return Result<ExecutionSessionResult>::failure(entered.error());
     }
+    }
     bool former_blocker_seen = false;
     std::optional<memory::GuestAddress> former_blocker_pc;
     bool smulh_seen = false;
@@ -3416,6 +3500,7 @@ Result<ExecutionSessionResult> ExecutionSession::run(const EntrySelection& entry
                                                           result.ir_operations)
                                                     : std::nullopt;
         interpreter_options.slice_ir_operations = options_.budgets.slice_ir_operations;
+        interpreter_options.function_preverified = is_function_preverified(current_.function_entry);
         interpreter_options.observed_guest_pcs =
             std::span<const memory::GuestAddress>(instruction_observation_targets_);
         interpreter_options.max_observed_guest_pcs = 32U;

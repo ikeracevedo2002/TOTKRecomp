@@ -178,11 +178,43 @@ TEST_CASE("M22 disjoint candidate promotion is transactional and idempotent")
     REQUIRE(repeated.value().map.functions().size() == refinement.value().map.functions().size());
 }
 
-TEST_CASE("M22 unexplained precise overlap remains a typed conflict")
+TEST_CASE("M22 refinement keeps an honest failed direct-call closure separate from the candidate")
 {
     auto code = std::vector<std::byte>(0x80U, std::byte{});
-    write_words(code, 0U, {branch(0x1000U, 0x1040U)});
-    write_words(code, 0x40U, {0xd65f03c0U});
+    write_words(code, 0U, {0xd65f03c0U});
+    write_words(code, 0x20U, {branch(0x1020U, 0x1040U, true), 0xd65f03c0U});
+    write_words(code, 0x40U, {branch(0x1040U, 0x1050U)});
+    write_words(code, 0x50U, {0xffffffffU});
+    auto fixture = make_fixture(0x1000U, 0x80U, std::move(code), {manual_seed(0x1000U)});
+    REQUIRE(fixture);
+
+    const auto refinement = analysis::refine_function_map(
+        fixture.value().map, input_for(fixture.value()), observed(0x1020U));
+    REQUIRE(refinement);
+    REQUIRE(refinement.value().assessment.decision.promoted);
+
+    const auto* candidate = refinement.value().map.find_exact_entry(0x1020U);
+    REQUIRE(candidate != nullptr);
+    REQUIRE(candidate->cfg != nullptr);
+    const auto* failed_callee = refinement.value().map.find_exact_entry(0x1040U);
+    REQUIRE(failed_callee != nullptr);
+    REQUIRE(failed_callee->cfg == nullptr);
+    REQUIRE(failed_callee->translation_status == analysis::TranslationStatus::Failed);
+
+    // An exact failed record is not dereferenced as though it had a CFG.
+    const auto failed_assessment = analysis::assess_indirect_target(
+        observed(0x1040U), fixture.value().memory, &refinement.value().map);
+    REQUIRE(failed_assessment);
+    REQUIRE_FALSE(failed_assessment.value().decision.eligible_for_promotion);
+    REQUIRE(failed_assessment.value().decision.kind ==
+            IndirectTargetDecisionKind::InsufficientEvidence);
+}
+
+TEST_CASE("M22 internal fallthrough overlap remains a typed conflict")
+{
+    auto code = std::vector<std::byte>(0x80U, std::byte{});
+    write_words(code, 0U, {branch(0x1000U, 0x103cU)});
+    write_words(code, 0x3cU, {0xd503201fU, 0xd65f03c0U});
     write_words(code, 0x60U, {branch(0x1060U, 0x1040U)});
     auto fixture = make_fixture(0x1000U, 0x80U, std::move(code), {manual_seed(0x1000U)});
     REQUIRE(fixture);
@@ -195,6 +227,170 @@ TEST_CASE("M22 unexplained precise overlap remains a typed conflict")
     REQUIRE(assessment.value().validation.overlap_ranges ==
             std::vector<analysis::GuestAddressRange>{{0x1040U, 4U}});
     REQUIRE_FALSE(assessment.value().decision.eligible_for_promotion);
+}
+
+TEST_CASE("M22 distinct callable entries may share an identical closed tail")
+{
+    auto code = std::vector<std::byte>(0xa0U, std::byte{});
+    write_words(code, 0U, {branch(0x1000U, 0x1040U)});
+    write_words(code, 0x40U, {0xd65f03c0U});
+    write_words(code, 0x60U, {branch(0x1060U, 0x1040U)});
+    write_words(code, 0x80U, {branch(0x1080U, 0x1040U)});
+    auto fixture = make_fixture(0x1000U, 0xa0U, std::move(code), {manual_seed(0x1000U)});
+    REQUIRE(fixture);
+
+    const auto assessment = analysis::assess_indirect_target(
+        observed(0x1060U), fixture.value().memory, &fixture.value().map);
+    REQUIRE(assessment);
+    REQUIRE(assessment.value().decision.kind == IndirectTargetDecisionKind::TrustedNewEntry);
+    REQUIRE(assessment.value().decision.eligible_for_promotion);
+    REQUIRE(assessment.value().validation.boundary_reconciliation.kind ==
+            FunctionBoundaryReconciliationKind::SharedTail);
+
+    const auto refinement = analysis::refine_function_map(
+        fixture.value().map, input_for(fixture.value()), observed(0x1060U));
+    REQUIRE(refinement);
+    REQUIRE(refinement.value().assessment.decision.promoted);
+    REQUIRE(refinement.value().map.conflicts().empty());
+    REQUIRE(refinement.value().map.shared_code().size() == 1U);
+    REQUIRE(refinement.value().map.shared_code().front().ranges ==
+            std::vector<analysis::GuestAddressRange>{{0x1040U, 4U}});
+    REQUIRE(refinement.value().map.find_precise_owners(0x1040U).size() == 2U);
+
+    const auto third = analysis::refine_function_map(
+        refinement.value().map, input_for(fixture.value()), observed(0x1080U));
+    REQUIRE(third);
+    REQUIRE(third.value().assessment.decision.promoted);
+    REQUIRE(third.value().assessment.validation.boundary_reconciliation.kind ==
+            FunctionBoundaryReconciliationKind::SharedTail);
+    REQUIRE(third.value().map.conflicts().empty());
+    REQUIRE(third.value().map.shared_code().size() == 3U);
+    REQUIRE(third.value().map.find_precise_owners(0x1040U).size() == 3U);
+}
+
+TEST_CASE("M22 shared-tail classification is seed-order worker and reuse deterministic")
+{
+    auto code = std::vector<std::byte>(0x80U, std::byte{});
+    write_words(code, 0U, {branch(0x1000U, 0x1040U)});
+    write_words(code, 0x40U, {0xd65f03c0U});
+    write_words(code, 0x60U, {branch(0x1060U, 0x1040U)});
+    auto fixture = make_fixture(0x1000U, 0x80U, std::move(code), {manual_seed(0x1000U)});
+    REQUIRE(fixture);
+    const auto incremental = analysis::refine_function_map(
+        fixture.value().map, input_for(fixture.value()), observed(0x1060U));
+    REQUIRE(incremental);
+    REQUIRE(incremental.value().assessment.decision.promoted);
+
+    const auto build = [&](std::vector<analysis::FunctionSeed> seeds, std::size_t workers) {
+        analysis::FunctionMapOptions options;
+        options.analysis_workers = workers;
+        return analysis::FunctionMapBuilder::build(
+            analysis::ModuleAnalysisInput{fixture.value().identity, &fixture.value().memory,
+                                          std::move(seeds)},
+            options);
+    };
+    const auto forward = build({manual_seed(0x1000U), manual_seed(0x1060U)}, 1U);
+    const auto reverse = build({manual_seed(0x1060U), manual_seed(0x1000U)}, 1U);
+    const auto parallel = build({manual_seed(0x1000U), manual_seed(0x1060U)}, 2U);
+    REQUIRE(forward);
+    REQUIRE(reverse);
+    REQUIRE(parallel);
+
+    const auto snapshot = [](const analysis::FinalizedFunctionMap& map) {
+        std::vector<std::pair<GuestAddress, std::vector<analysis::GuestAddressRange>>> result;
+        for (const auto& function : map.functions())
+            result.emplace_back(function.canonical_entry, function.owned_code_ranges);
+        return std::make_pair(result, map.shared_code());
+    };
+    REQUIRE(snapshot(forward.value()) == snapshot(reverse.value()));
+    REQUIRE(snapshot(forward.value()) == snapshot(parallel.value()));
+    REQUIRE(snapshot(forward.value()) == snapshot(incremental.value().map));
+    REQUIRE(forward.value().conflicts().empty());
+}
+
+TEST_CASE("M22 execution resumes an exact refined indirect-call boundary without replay")
+{
+    auto code = std::vector<std::byte>(0x40U, std::byte{});
+    write_words(code, 0U, {0xd2820410U, 0xd63f0200U, 0xd65f03c0U});
+    write_words(code, 0x20U, {0xd65f03c0U});
+    auto fixture = make_fixture(0x1000U, 0x40U, std::move(code), {manual_seed(0x1000U)});
+    REQUIRE(fixture);
+    execution::ExecutionSession session(fixture.value().memory, fixture.value().map, {});
+    execution::EntrySelection selection;
+    selection.kind = execution::EntrySelectionKind::AnalystAddress;
+    selection.address = 0x1000U;
+    selection.source = "M22 resumable refinement fixture";
+    selection.confidence = FunctionConfidence::Manual;
+    auto first = session.run(selection);
+    REQUIRE(first);
+    REQUIRE(first.value().stop_reason == execution::ExecutionStopReason::UnknownGuestFunction);
+    REQUIRE(first.value().target == 0x1020U);
+    const auto prefix_instructions = first.value().guest_instruction_count;
+
+    const auto refinement = analysis::refine_function_map(
+        fixture.value().map, input_for(fixture.value()), observed(0x1020U));
+    REQUIRE(refinement);
+    REQUIRE(refinement.value().assessment.decision.promoted);
+    fixture.value().map = refinement.value().map;
+    const auto resumed = session.resume_after_refinement(std::move(first).value());
+    REQUIRE(resumed);
+    REQUIRE(resumed.value().stop_reason == execution::ExecutionStopReason::EntryReturned);
+    REQUIRE(resumed.value().guest_instruction_count == prefix_instructions + 2U);
+    REQUIRE(resumed.value().indirect_calls == 1U);
+}
+
+TEST_CASE("M22 refinement clears stale boundary diagnostics before resumed execution")
+{
+    auto code = std::vector<std::byte>(0x40U, std::byte{});
+    write_words(code, 0U, {0xd2820410U, 0xd63f0200U, 0xd65f03c0U});
+    write_words(code, 0x20U, {0xf9400000U, 0xd65f03c0U});
+    auto fixture = make_fixture(0x1000U, 0x40U, std::move(code), {manual_seed(0x1000U)});
+    REQUIRE(fixture);
+    execution::ExecutionSession session(fixture.value().memory, fixture.value().map, {});
+    execution::EntrySelection selection;
+    selection.kind = execution::EntrySelectionKind::AnalystAddress;
+    selection.address = 0x1000U;
+    selection.source = "M22 stale diagnostic reset fixture";
+    selection.confidence = FunctionConfidence::Manual;
+
+    auto first = session.run(selection);
+    REQUIRE(first);
+    REQUIRE(first.value().stop_reason == execution::ExecutionStopReason::UnknownGuestFunction);
+    const auto refinement = analysis::refine_function_map(
+        fixture.value().map, input_for(fixture.value()), observed(0x1020U));
+    REQUIRE(refinement);
+    REQUIRE(refinement.value().assessment.decision.promoted);
+    fixture.value().map = refinement.value().map;
+
+    auto resumed = session.resume_after_refinement(std::move(first).value());
+    REQUIRE(resumed);
+    REQUIRE(resumed.value().stop_reason == execution::ExecutionStopReason::MemoryFault);
+    REQUIRE_FALSE(resumed.value().diagnostic_pc.has_value());
+    REQUIRE_FALSE(resumed.value().diagnostic_opcode.has_value());
+    REQUIRE(resumed.value().diagnostic_instruction_id.empty());
+    REQUIRE(resumed.value().diagnostic_instruction.empty());
+}
+
+TEST_CASE("M22 immutable lift artifacts survive deterministic session reruns")
+{
+    auto code = words({0xd65f03c0U});
+    auto fixture = make_fixture(0x1000U, 0x20U, std::move(code), {manual_seed(0x1000U)});
+    REQUIRE(fixture);
+    execution::ExecutionSession session(fixture.value().memory, fixture.value().map, {});
+    execution::EntrySelection selection;
+    selection.kind = execution::EntrySelectionKind::AnalystAddress;
+    selection.address = 0x1000U;
+    selection.source = "M22 deterministic cache fixture";
+    selection.confidence = FunctionConfidence::Manual;
+    const auto first = session.run(selection);
+    const auto second = session.run(selection);
+    REQUIRE(first);
+    REQUIRE(second);
+    REQUIRE(first.value().stop_reason == execution::ExecutionStopReason::EntryReturned);
+    REQUIRE(second.value().stop_reason == execution::ExecutionStopReason::EntryReturned);
+    REQUIRE(first.value().performance.functions_lifted == 1U);
+    REQUIRE(second.value().performance.functions_lifted == 0U);
+    REQUIRE(second.value().performance.lift_cache_hits >= 1U);
 }
 
 TEST_CASE("M22 display-envelope overlap does not imply precise ownership")

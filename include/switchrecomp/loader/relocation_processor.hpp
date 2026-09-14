@@ -16,6 +16,10 @@ struct RelocationProcessorOptions
     // Relocations are loader-time writes. Keeping this explicit makes it
     // impossible to accidentally turn normal guest writes into privileged ones.
     bool use_loader_write = true;
+    // Independent relocation validation/snapshot/commit work may use this
+    // bounded pool. Overlapping targets deliberately fall back to the serial
+    // transactional path.
+    std::size_t workers = 1U;
 };
 
 struct AppliedRelocation

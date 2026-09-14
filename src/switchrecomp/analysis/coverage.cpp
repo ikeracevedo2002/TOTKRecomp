@@ -157,6 +157,10 @@ namespace
     case aarch64::SimdOperation::Fnmadd:
     case aarch64::SimdOperation::Fnmsub:
         return false;
+    case aarch64::SimdOperation::Fneg:
+    case aarch64::SimdOperation::Fabs:
+    case aarch64::SimdOperation::Fsqrt:
+        return aarch64::is_fp_unary_form_liftable(instruction);
     case aarch64::SimdOperation::Tbl:
     case aarch64::SimdOperation::Tbx:
         return aarch64::is_table_lookup_form_liftable(instruction);
@@ -292,8 +296,8 @@ Result<CoverageReport> scan_coverage(const memory::GuestMemory& memory, memory::
         std::vector<std::size_t> first_unsupported_indices;
     };
 
-    const auto worker_count = std::min(std::max<std::size_t>(options.workers, 1U),
-                                        instruction_count);
+    const auto worker_count = std::min<std::size_t>(
+        10U, std::min(std::max<std::size_t>(options.workers, 1U), instruction_count));
     std::vector<std::optional<Result<WorkerReport>>> worker_reports(worker_count);
     const auto scan_range = [&](std::size_t worker) -> Result<WorkerReport> {
         const auto worker_decoder = aarch64::AArch64Decoder::create();

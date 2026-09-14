@@ -197,6 +197,8 @@ TEST_CASE("M27 disjoint immutable refinement reuses unaffected finalized analysi
     REQUIRE(refined);
     REQUIRE(refined.value().assessment.decision.promoted);
     REQUIRE(refined.value().map.find_exact_entry(0x1020U) != nullptr);
+    REQUIRE(refined.value().map.find_exact_entry(0x1000U)->cfg.get() ==
+            initial.value().find_exact_entry(0x1000U)->cfg.get());
     REQUIRE(refined.value().analysis_work.functions_reused == 1U);
     REQUIRE(refined.value().analysis_work.invalidated_records == 0U);
     REQUIRE(refined.value().analysis_work.functions_reanalyzed == 0U);
@@ -234,6 +236,8 @@ TEST_CASE("M27 newly introduced callable boundaries invalidate dependent ownersh
     REQUIRE(rebuilt.value().find_exact_entry(base + 0x8U) != nullptr);
     REQUIRE(rebuilt.value().find_precise_owners(base + 0x8U).size() == 1U);
     REQUIRE(rebuilt.value().accounting().invalidated_records == 1U);
+    REQUIRE(rebuilt.value().find_exact_entry(base)->cfg.get() !=
+            initial.value().find_exact_entry(base)->cfg.get());
     REQUIRE(rebuilt.value().accounting().reanalyzed_functions >= 1U);
     REQUIRE(rebuilt.value().accounting().reused_functions == 0U);
     REQUIRE(rebuilt.value().conflicts().empty());

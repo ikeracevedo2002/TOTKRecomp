@@ -7,7 +7,9 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <new>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -20,6 +22,15 @@ namespace
 
 using memory::GuestAddress;
 using memory::GuestMemory;
+
+[[nodiscard]] std::uint64_t load_u64_le(const std::byte* bytes) noexcept
+{
+    std::uint64_t value = 0U;
+    for (std::size_t index = 0U; index < sizeof(value); ++index)
+        value |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(bytes[index])) <<
+                 (index * 8U);
+    return value;
+}
 
 [[nodiscard]] Result<std::vector<RelaEntry>> parse_table(
     const GuestMemory& guest_memory, GuestAddress module_base,
@@ -45,58 +56,47 @@ using memory::GuestMemory;
 
     try
     {
+        const auto table_size = checked_mul_u64(
+            static_cast<std::uint64_t>(count.value()), static_cast<std::uint64_t>(elf64_rela_size));
+        if (!table_size)
+            return Result<std::vector<RelaEntry>>::failure(make_error(
+                table_size.error().code, std::string(name) + " table size overflows"));
+        if (table_size.value() > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+            return Result<std::vector<RelaEntry>>::failure(make_error(
+                ErrorCode::ResourceLimit, std::string(name) + " table is too large for the host"));
+        const auto table_end = checked_add_u64(table->address, table_size.value());
+        if (!table_end)
+            return Result<std::vector<RelaEntry>>::failure(make_error(
+                table_end.error().code, std::string(name) + " table address overflows"));
+
+        std::vector<std::byte> table_bytes(static_cast<std::size_t>(table_size.value()));
+        if (!table_bytes.empty())
+        {
+            const auto read = guest_memory.read(table->address, table_bytes);
+            if (!read)
+                return Result<std::vector<RelaEntry>>::failure(make_error(
+                    read.error().code,
+                    "failed to read " + std::string(name) + " table: " + read.error().message));
+        }
         std::vector<RelaEntry> result;
         result.reserve(count.value());
         for (std::size_t index = 0U; index < count.value(); ++index)
         {
-            const auto byte_offset = checked_mul_u64(static_cast<std::uint64_t>(index),
-                                                     static_cast<std::uint64_t>(elf64_rela_size));
-            if (!byte_offset)
-            {
-                return Result<std::vector<RelaEntry>>::failure(make_error(
-                    byte_offset.error().code,
-                    std::string(name) + " entry offset overflows"));
-            }
-            const auto entry_address = checked_add_u64(table->address, byte_offset.value());
-            if (!entry_address)
-            {
-                return Result<std::vector<RelaEntry>>::failure(make_error(
-                    entry_address.error().code,
-                    std::string(name) + " entry address overflows"));
-            }
+            const auto byte_offset = index * elf64_rela_size;
+            const auto* entry_bytes = table_bytes.data() + static_cast<std::ptrdiff_t>(byte_offset);
+            const auto offset = load_u64_le(entry_bytes);
+            const auto info = load_u64_le(entry_bytes + 8U);
+            const auto raw_addend = load_u64_le(entry_bytes + 16U);
 
-            std::array<std::byte, elf64_rela_size> bytes{};
-            const auto read = guest_memory.read(entry_address.value(), bytes);
-            if (!read)
-            {
-                return Result<std::vector<RelaEntry>>::failure(make_error(
-                    read.error().code,
-                    "failed to read " + std::string(name) + " entry " +
-                        std::to_string(index) + ": " + read.error().message));
-            }
-            const BinaryReader reader(bytes);
-            const auto offset = reader.read_u64_le(0U);
-            const auto info = reader.read_u64_le(8U);
-            const auto raw_addend = reader.read_u64_le(16U);
-            if (!offset || !info || !raw_addend)
-            {
-                const Error* error = !offset ? &offset.error() : !info ? &info.error()
-                                                                        : &raw_addend.error();
-                return Result<std::vector<RelaEntry>>::failure(make_error(
-                    error->code,
-                    "failed to decode " + std::string(name) + " entry " +
-                        std::to_string(index) + ": " + error->message));
-            }
-
-            const auto target_address = checked_add_u64(module_base, offset.value());
+            const auto target_address = checked_add_u64(module_base, offset);
             if (!target_address)
             {
                 return Result<std::vector<RelaEntry>>::failure(make_error(
                     target_address.error().code,
                     std::string(name) + " target address overflows module base"));
             }
-            result.push_back(RelaEntry{offset.value(), target_address.value(), info.value(),
-                                       std::bit_cast<std::int64_t>(raw_addend.value())});
+            result.push_back(RelaEntry{offset, target_address.value(), info,
+                                       std::bit_cast<std::int64_t>(raw_addend)});
         }
         return Result<std::vector<RelaEntry>>::success(std::move(result));
     }

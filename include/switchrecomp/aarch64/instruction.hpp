@@ -112,6 +112,7 @@ struct DecodedInstruction
 [[nodiscard]] bool is_scalar_widening_multiply_form_liftable(const DecodedInstruction& instruction) noexcept;
 [[nodiscard]] bool is_simd_widening_multiply_form_liftable(const DecodedInstruction& instruction) noexcept;
 [[nodiscard]] bool is_table_lookup_form_liftable(const DecodedInstruction& instruction) noexcept;
+[[nodiscard]] bool is_fp_unary_form_liftable(const DecodedInstruction& instruction) noexcept;
 [[nodiscard]] std::string_view barrier_option_name(BarrierOption option) noexcept;
 [[nodiscard]] std::string_view system_register_name(SystemRegister reg) noexcept;
 

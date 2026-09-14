@@ -11,6 +11,7 @@
 #include <limits>
 #include <new>
 #include <stdexcept>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -22,6 +23,27 @@ namespace
 
 using memory::GuestAddress;
 using memory::GuestMemory;
+
+[[nodiscard]] std::uint64_t load_u64_le(const std::byte* bytes) noexcept
+{
+    std::uint64_t value = 0U;
+    for (std::size_t index = 0U; index < sizeof(value); ++index)
+        value |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(bytes[index])) <<
+                 (index * 8U);
+    return value;
+}
+
+[[nodiscard]] std::uint32_t load_u32_le(const std::byte* bytes) noexcept
+{
+    return static_cast<std::uint32_t>(load_u64_le(bytes));
+}
+
+[[nodiscard]] std::uint16_t load_u16_le(const std::byte* bytes) noexcept
+{
+    return static_cast<std::uint16_t>(
+        static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes[0])) |
+        static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes[1])) << 8U);
+}
 
 template <typename T>
 [[nodiscard]] Result<T> contextual_failure(const Error& error, std::string_view context)
@@ -530,6 +552,11 @@ Result<DynamicSymbolTable> DynamicSymbolTable::parse(const GuestMemory& guest_me
     {
         return Result<DynamicSymbolTable>::failure(table_size.error());
     }
+    if (table_size.value() > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+    {
+        return Result<DynamicSymbolTable>::failure(make_error(
+            ErrorCode::ArithmeticOverflow, "dynamic symbol table size does not fit host size_t"));
+    }
     const auto table_readable = require_readable(guest_memory, dynamic.symtab->address,
                                                  table_size.value(), "DT_SYMTAB");
     if (!table_readable)
@@ -539,62 +566,39 @@ Result<DynamicSymbolTable> DynamicSymbolTable::parse(const GuestMemory& guest_me
 
     try
     {
+        std::vector<std::byte> table_bytes(static_cast<std::size_t>(table_size.value()));
+        if (!table_bytes.empty())
+        {
+            const auto read = guest_memory.read(dynamic.symtab->address, table_bytes);
+            if (!read)
+            {
+                return Result<DynamicSymbolTable>::failure(make_error(
+                    read.error().code, "dynamic symbol table is not readable: " + read.error().message));
+            }
+        }
         DynamicSymbolTable result{ {}, strings.value() };
         result.symbols.reserve(count.value());
         for (std::size_t index = 0U; index < count.value(); ++index)
         {
-            const auto byte_offset = checked_mul_u64(static_cast<std::uint64_t>(index),
-                                                     static_cast<std::uint64_t>(elf64_sym_size));
-            const auto address = byte_offset
-                                     ? checked_add_u64(dynamic.symtab->address, byte_offset.value())
-                                     : Result<std::uint64_t>::failure(byte_offset.error());
-            if (!byte_offset || !address)
-            {
-                const Error* error = !byte_offset ? &byte_offset.error() : &address.error();
-                return Result<DynamicSymbolTable>::failure(*error);
-            }
-
-            std::array<std::byte, elf64_sym_size> bytes{};
-            const auto read = guest_memory.read(address.value(), bytes);
-            if (!read)
-            {
-                return Result<DynamicSymbolTable>::failure(make_error(
-                    read.error().code,
-                    "symbol[" + std::to_string(index) + "] is not readable: " +
-                        read.error().message));
-            }
-            const BinaryReader reader(bytes);
-            const auto name_offset = reader.read_u32_le(0U);
-            const auto raw_info = reader.slice(4U, 1U);
-            const auto raw_other = reader.slice(5U, 1U);
-            const auto section = reader.read_u16_le(6U);
-            const auto value = reader.read_u64_le(8U);
-            const auto size = reader.read_u64_le(16U);
-            if (!name_offset || !raw_info || !raw_other || !section || !value || !size)
-            {
-                const Error* error = !name_offset ? &name_offset.error()
-                                  : !raw_info    ? &raw_info.error()
-                                  : !raw_other   ? &raw_other.error()
-                                  : !section     ? &section.error()
-                                  : !value       ? &value.error()
-                                                 : &size.error();
-                return Result<DynamicSymbolTable>::failure(make_error(
-                    error->code, "failed to decode symbol[" + std::to_string(index) + "]: " +
-                                     error->message));
-            }
-            const auto symbol_name = strings.value().get(name_offset.value());
+            const auto byte_offset = index * elf64_sym_size;
+            const auto* symbol_bytes = table_bytes.data() + static_cast<std::ptrdiff_t>(byte_offset);
+            const auto name_offset = load_u32_le(symbol_bytes);
+            const auto raw_info = std::to_integer<std::uint8_t>(symbol_bytes[4U]);
+            const auto raw_other = std::to_integer<std::uint8_t>(symbol_bytes[5U]);
+            const auto section = load_u16_le(symbol_bytes + 6U);
+            const auto value = load_u64_le(symbol_bytes + 8U);
+            const auto size = load_u64_le(symbol_bytes + 16U);
+            const auto symbol_name = strings.value().get(name_offset);
             if (!symbol_name)
             {
                 return Result<DynamicSymbolTable>::failure(make_error(
                     symbol_name.error().code,
                     "symbol[" + std::to_string(index) + "]: " + symbol_name.error().message));
             }
-            const auto info = std::to_integer<std::uint8_t>(raw_info.value()[0]);
-            const auto other = std::to_integer<std::uint8_t>(raw_other.value()[0]);
             result.symbols.push_back(DynamicSymbol{
-                static_cast<std::uint32_t>(index), name_offset.value(), std::string(symbol_name.value()),
-                decode_binding(info), decode_type(info), decode_visibility(other), section.value(),
-                value.value(), size.value()});
+                static_cast<std::uint32_t>(index), name_offset, std::string(symbol_name.value()),
+                decode_binding(raw_info), decode_type(raw_info), decode_visibility(raw_other), section,
+                value, size});
         }
         return Result<DynamicSymbolTable>::success(std::move(result));
     }

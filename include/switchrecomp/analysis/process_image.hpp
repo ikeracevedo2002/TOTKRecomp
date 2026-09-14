@@ -11,6 +11,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace switchrecomp::analysis
@@ -115,6 +116,10 @@ struct ProcessImageOptions
     std::string module_set_source = "explicit";
     std::vector<std::string> ignored_module_entries;
     ProcessModuleOrderEvidence module_order;
+    // Independent NSO digest/header/materialization work may run concurrently.
+    // Layout assignment, mapping, symbol binding, and relocation publication
+    // remain deterministic and ordered.
+    std::size_t module_workers = 1U;
     // Inventory tools can deliberately stop after parsing/analysis metadata.
     // Such a ProcessImage is useful for evidence, but is not an executable
     // relocation-applied process state.
@@ -227,8 +232,14 @@ class ProcessSymbolNamespace
     [[nodiscard]] static Result<ProcessSymbolNamespace> build_impl(
         const memory::GuestMemory& memory, std::span<const ProcessSymbolSource> sources,
         bool strict_invalid_providers);
+    using SymbolRange = std::pair<std::size_t, std::size_t>;
     std::vector<ProviderCandidate> candidates_;
     std::vector<ProviderOccurrence> occurrences_;
+    // Entries are sorted before these indexes are built. A lookup therefore
+    // copies only the matching name range instead of rescanning every symbol
+    // for each relocation.
+    std::map<std::string, SymbolRange, std::less<>> candidate_index_;
+    std::map<std::string, SymbolRange, std::less<>> occurrence_index_;
 };
 
 struct ProcessBinding

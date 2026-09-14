@@ -232,6 +232,31 @@ TEST_CASE("guest memory uses checked little-endian helpers")
     REQUIRE(std::to_integer<unsigned int>(bytes[7]) == 0x11U);
 }
 
+TEST_CASE("ordinary shared guest accesses permit architecturally valid unaligned scalars")
+{
+    memory::GuestMemory memory;
+    constexpr memory::GuestAddress data_address = 0x200000U;
+    REQUIRE(memory.map(data_address, 16U, memory::GuestMemoryPermissions::Read |
+                                             memory::GuestMemoryPermissions::Write,
+                       "fixture.data", memory::GuestRegionKind::Data));
+    runtime::SharedRuntimeState shared(memory);
+    runtime::RuntimeContext context{&memory, &shared};
+
+    constexpr std::uint64_t expected = 0x1122334455667788U;
+    REQUIRE(runtime::switchrecomp_runtime_guest_store(&context, data_address + 1U, 8U,
+                                                       expected) == 0U);
+    std::uint64_t actual = 0U;
+    REQUIRE(runtime::switchrecomp_runtime_guest_load(&context, data_address + 1U, 8U,
+                                                      &actual) == 0U);
+    REQUIRE(actual == expected);
+
+    std::uint64_t atomic = 0U;
+    REQUIRE(runtime::switchrecomp_runtime_atomic_load(
+                &context, data_address + 1U, 8U,
+                static_cast<std::uint8_t>(ir::MemoryOrder::Relaxed), &atomic) != 0U);
+    REQUIRE(context.last_error.code == ErrorCode::MisalignedAtomicAccess);
+}
+
 TEST_CASE("interpreter enforces execution limits and traps")
 {
     auto loop = make_fixture({0x14000000U}); // b .

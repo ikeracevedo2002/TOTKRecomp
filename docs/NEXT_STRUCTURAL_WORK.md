@@ -49,29 +49,25 @@ its own milestone with a full A/B, not a side edit.
 Recommendation: take the scoped fix first; it is cheap, and it is also the
 safety net the better fix needs.
 
-## Debt 2 — the provider/completeness boundary is the real blocker
+## Debt 2 — faithful TLS/bootstrap state is the real blocker
 
-Real guest execution stops at `__nnmusl_init_dso`. This is not a missing
-instruction: `ProcessSymbolNamespace::lookup` returns
-`ProviderSearchIncomplete` before inspecting candidates whenever the module set
-is `Incomplete`, and the local configuration declares
-`provider_search_complete: false` with `coherence: "unverified"`. A candidate in
-`sdk` is already found and discarded by policy.
+The historical provider/completeness boundary was correctly rejected while the
+module set was unverified. It is now resolved for the selected exact recovery
+contract: the four-module manifest is coherent and `__nnmusl_init_dso` resolves
+to guest `sdk`. The old rejection remains part of the milestone history.
 
-Refusing the candidate is **correct** behaviour for an unverified module set and
-must not be weakened, stubbed, or routed around. The way to clear the boundary is
-evidence, not code: a manifest-verified complete module set (sizes, digests, load
-order, exact-build coherence) that promotes completeness to
-`ManifestVerifiedComplete` on proof rather than on assertion.
+The current real run stops later in `sdk` at `ldr x8, [x8, #0x1f8]` after reading
+`TPIDR_EL0`. The controlled launch contract intentionally supplies synthetic
+zero TLS, so this is an honest unmapped read rather than a missing provider.
+Clearing it requires faithful TLS/rtld bootstrap evidence. A host stub, a chosen
+TLS address, a forced register value, or a weakened completeness check would be
+fake progress and is prohibited.
 
-`scripts/verify_measurement_contract.py` now fails a milestone whose input
-drifts from a frozen contract. It verifies the input; it does not, and should
-not, certify that the module set is complete. Completeness proof is the missing
-piece and is the highest-value capability work available.
-
-Until that boundary moves, instruction-family work lowers the static diagnostic
-only. Per the progress metric in `AGENTS.md`, that is coverage work, not
-capability work, and must not be reported as a frontier advance.
+`scripts/verify_measurement_contract.py` verifies that a milestone input does
+not drift from its frozen contract; it does not and should not manufacture
+bootstrap evidence. Until faithful TLS state is available, changes to
+unreachable instruction families lower diagnostics only and must not be reported
+as frontier progress.
 
 ## Measured costs worth keeping in view
 

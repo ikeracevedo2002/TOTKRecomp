@@ -998,6 +998,51 @@ class FunctionLifter
         return write_vector(destination, result_vector.value(), instruction);
     }
 
+    [[nodiscard]] Result<void> lift_vector_unary(const DecodedInstruction& instruction)
+    {
+        if (!aarch64::is_fp_unary_form_liftable(instruction) ||
+            instruction.operands[0].reg.width != aarch64::RegisterWidth::Q128)
+            return Result<void>::failure(unsupported(instruction, "unsupported vector FP unary form"));
+        const auto arrangement = vector_arrangement(instruction.operands[0], instruction);
+        if (!arrangement || arrangement.value() == ir::VectorArrangement::Raw128)
+            return Result<void>::failure(!arrangement ? arrangement.error()
+                                                      : unsupported(instruction, "vector FP unary requires an arrangement"));
+        const auto source = read_vector(instruction.operands[1].reg, instruction);
+        if (!source) return Result<void>::failure(source.error());
+        const auto lanes = aarch64::vector_lane_count(instruction.operands[0].arrangement);
+        const auto bits = aarch64::vector_element_bits(instruction.operands[0].arrangement);
+        const auto fp_type = bits == 32U ? ir::f32_type() : ir::f64_type();
+        const auto integer_type = bits == 32U ? ir::i32_type() : ir::i64_type();
+        const auto operation = instruction.simd_operation == aarch64::SimdOperation::Fneg
+                                   ? ir::FpUnaryOperation::Neg
+                                   : instruction.simd_operation == aarch64::SimdOperation::Fabs
+                                         ? ir::FpUnaryOperation::Abs
+                                         : ir::FpUnaryOperation::Sqrt;
+        auto result_vector = zero_vector(instruction);
+        if (!result_vector) return Result<void>::failure(result_vector.error());
+        for (std::uint8_t lane = 0U; lane < lanes; ++lane)
+        {
+            const auto integer_lane = vector_extract(source.value(), arrangement.value(), lane, instruction);
+            if (!integer_lane) return Result<void>::failure(integer_lane.error());
+            const auto floating_lane = bitcast(integer_lane.value(), fp_type, instruction);
+            if (!floating_lane) return Result<void>::failure(floating_lane.error());
+            const auto transformed = emit_fp_unary(floating_lane.value(), fp_type, operation, instruction);
+            if (!transformed) return Result<void>::failure(transformed.error());
+            const auto transformed_bits = bitcast(transformed.value(), integer_type, instruction);
+            if (!transformed_bits) return Result<void>::failure(transformed_bits.error());
+            ir::Instruction insert;
+            insert.opcode = ir::Opcode::VectorInsertLane;
+            insert.result_type = ir::v128_type();
+            insert.operands = {result_vector.value(), transformed_bits.value()};
+            insert.arrangement = arrangement.value();
+            insert.lane_index = lane;
+            insert.source = source_location(instruction);
+            result_vector = emit_value(std::move(insert));
+            if (!result_vector) return Result<void>::failure(result_vector.error());
+        }
+        return write_vector(instruction.operands[0].reg, result_vector.value(), instruction);
+    }
+
     [[nodiscard]] Result<void> lift_vector_common(const DecodedInstruction& instruction)
     {
         if (instruction.operands.size() < 3U || instruction.operands[0].kind != aarch64::OperandKind::Register ||
@@ -1395,6 +1440,12 @@ class FunctionLifter
                           : Result<void>::failure(result.error());
         };
 
+        if ((op == Op::Fneg || op == Op::Fabs || op == Op::Fsqrt) &&
+            !instruction.operands.empty())
+        {
+            if (instruction.operands[0].reg.width == aarch64::RegisterWidth::Q128)
+                return lift_vector_unary(instruction);
+        }
         switch (op)
         {
         case Op::Fadd: case Op::Fsub: case Op::Fmul: case Op::Fdiv:

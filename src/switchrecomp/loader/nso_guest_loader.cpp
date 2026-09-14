@@ -124,19 +124,6 @@ resolve_address(GuestAddress module_base, std::uint64_t memory_offset, std::stri
     return Result<void>::success();
 }
 
-[[nodiscard]] Result<void> map_segment(GuestMemory& guest_memory, const SegmentMapping& mapping)
-{
-    const auto mapped = guest_memory.map(mapping.base, mapping.bytes, mapping.permissions,
-                                         mapping.name, mapping.kind);
-    if (!mapped)
-    {
-        return Result<void>::failure(make_error(
-            mapped.error().code, "failed to map " + std::string(mapping.name) + " at " +
-                                     hex_address(mapping.base) + ": " + mapped.error().message));
-    }
-    return Result<void>::success();
-}
-
 void log_mapping(const SegmentMapping& mapping)
 {
     logging::log_debug(logging::LogCategory::Memory,
@@ -190,37 +177,21 @@ Result<void> load_nso(const format::NsoImage& image, memory::GuestMemory& guest_
                        GuestMemoryPermissions::Read | GuestMemoryPermissions::Write,
                        GuestRegionKind::Bss, ".bss"}};
 
-    try
-    {
-        // Stage the complete load so overlap, limit, and allocation failures cannot mutate the
-        // caller's existing map. The copy is intentionally limited to module-load operations;
-        // individual reads and writes never copy backing storage.
-        GuestMemory staged = guest_memory;
-        for (const auto& mapping : mappings)
-        {
-            const auto mapped = map_segment(staged, mapping);
-            if (!mapped)
-            {
-                return mapped;
-            }
-        }
-        guest_memory = std::move(staged);
-    }
-    catch (const std::bad_alloc&)
-    {
-        return Result<void>::failure(
-            make_error(ErrorCode::ResourceLimit, "failed to stage the NSO guest memory load"));
-    }
-    catch (const std::length_error&)
+    const std::array<memory::GuestMemoryMapRequest, 4> requests{
+        memory::GuestMemoryMapRequest{mappings[0].base, mappings[0].bytes, mappings[0].permissions,
+                                      mappings[0].name, mappings[0].kind},
+        memory::GuestMemoryMapRequest{mappings[1].base, mappings[1].bytes, mappings[1].permissions,
+                                      mappings[1].name, mappings[1].kind},
+        memory::GuestMemoryMapRequest{mappings[2].base, mappings[2].bytes, mappings[2].permissions,
+                                      mappings[2].name, mappings[2].kind},
+        memory::GuestMemoryMapRequest{mappings[3].base, mappings[3].bytes, mappings[3].permissions,
+                                      mappings[3].name, mappings[3].kind}};
+    const auto mapped = guest_memory.map_batch(requests);
+    if (!mapped)
     {
         return Result<void>::failure(make_error(
-            ErrorCode::ResourceLimit, "NSO guest memory load exceeds host container limits"));
-    }
-    catch (const std::logic_error& error)
-    {
-        return Result<void>::failure(make_error(
-            ErrorCode::InvalidArgument, "NSO guest memory staging is not available: " +
-                                            std::string(error.what())));
+            mapped.error().code,
+            "failed to map the NSO segment batch: " + mapped.error().message));
     }
 
     for (const auto& mapping : mappings)

@@ -130,7 +130,7 @@ void help(std::ostream& output)
               "  --entry KIND                   dt-init, dt-fini, text-start, process.\n"
               "  --entry-address ADDR           Unverified analyst address.\n"
               "  --analysis-focus-symbol NAME  Analyze only the bounded startup/provider closure for NAME.\n"
-              "  --analysis-workers N          Bounded independent function/refinement workers.\n"
+              "  --analysis-workers N          Independent function/refinement workers (1-10).\n"
               "  --backend interpreter           M11 reference backend.\n"
               "  --stack-size N                 Synthetic guest stack size.\n"
               "  --report PATH                  Write deterministic JSON report.\n"
@@ -277,11 +277,13 @@ refinement_analysis_dimension_for_option(std::string_view argument)
     return std::nullopt;
 }
 
+inline constexpr std::size_t max_analysis_workers = 10U;
+
 [[nodiscard]] std::size_t default_analysis_workers() noexcept
 {
     const auto hardware = std::thread::hardware_concurrency();
     if (hardware == 0U) return 1U;
-    return std::min<std::size_t>(4U, hardware);
+    return std::min(max_analysis_workers, static_cast<std::size_t>(hardware));
 }
 
 [[nodiscard]] bool ranges_overlap(
@@ -647,6 +649,8 @@ int main(int argc, char** argv)
             destination = static_cast<T>(parsed);
             if ((refinement_analysis_dimension_for_option(argument) ||
                  argument == "--analysis-workers") && parsed == 0U)
+                invalid_number = true;
+            if (argument == "--analysis-workers" && parsed > max_analysis_workers)
                 invalid_number = true;
             return true;
         };
@@ -1262,6 +1266,7 @@ int main(int argc, char** argv)
             inventory_options.coherence_basis = module_set_coherence_basis;
             inventory_options.expected_logical_names = expected_module_names;
             inventory_options.expected_modules = expected_modules;
+            inventory_options.workers = analysis_workers;
             inventory_options.explicit_bases = configured_bases;
             if (module_set_completeness == analysis::ModuleSetCompleteness::Incomplete &&
                 module_set_completeness_basis == analysis::ModuleSetCompletenessBasis::LegacyConfigFalse)
@@ -1292,6 +1297,7 @@ int main(int argc, char** argv)
             inventory_options.coherence_basis = module_set_coherence_basis;
             inventory_options.expected_logical_names = expected_module_names;
             inventory_options.expected_modules = expected_modules;
+            inventory_options.workers = analysis_workers;
             const auto loaded = analysis::ingest_module_files(file_inputs, inventory_options);
             if (!loaded) { print_error(loaded.error()); return static_cast<int>(ExitCode::InfrastructureFailure); }
             inventory = std::move(loaded).value();
@@ -1322,7 +1328,9 @@ int main(int argc, char** argv)
         process_options.ignored_module_entries = inventory.ignored_entries;
         process_options.module_order = analysis::ProcessModuleOrderEvidence{
             inventory.module_load_order, inventory.module_load_order_basis};
+        process_options.module_workers = analysis_workers;
         process_options.module_options = load_options;
+        process_options.module_options.relocation_options.workers = analysis_workers;
         process_options.module_options.module_base = 0U;
         process_options.module_options.module_name = "";
         auto process = analysis::load_process_image(module_inputs, process_options);
@@ -1467,9 +1475,23 @@ int main(int argc, char** argv)
         const auto refinement_start = std::chrono::steady_clock::now();
         std::int64_t assessment_elapsed_us = 0;
         std::int64_t refinement_publication_elapsed_us = 0;
+        std::int64_t guest_execution_elapsed_us = 0;
+        std::size_t cumulative_guest_instructions = 0U;
+        std::size_t cumulative_guest_blocks = 0U;
+        std::size_t cumulative_execution_slices = 0U;
+        std::size_t cumulative_functions_lifted = 0U;
+        std::size_t cumulative_lift_cache_hits = 0U;
+        std::size_t cumulative_lift_cache_misses = 0U;
+        std::uint64_t cumulative_ir_verification_elapsed_us = 0U;
+        std::size_t cumulative_ir_verification_calls = 0U;
         std::vector<analysis::IndirectTargetAssessment> promoted_targets;
         std::optional<execution::ExecutionSessionResult> last_run_result;
         execution::ExecutionSessionResult final_result;
+        // The process-map object has stable address across immutable generation
+        // assignments, allowing this session to retain only immutable lifted IR.
+        execution::ExecutionSession session(process.value().memory(), process_map,
+                                            process.value(), execution_options, summary,
+                                            &runtime_imports);
         for (;;)
         {
             if (!worklist.begin_round())
@@ -1482,16 +1504,30 @@ int main(int argc, char** argv)
                 final_result.diagnostic = refinement_exhaustion_diagnostic(summary);
                 break;
             }
-            execution::ExecutionSession session(process.value().memory(), process_map,
-                                                process.value(), execution_options, summary,
-                                                &runtime_imports);
-            const auto run = session.run(selected.value());
+            const auto execution_start = std::chrono::steady_clock::now();
+            auto run = [&]() {
+                if (!last_run_result) return session.run(selected.value());
+                auto previous = std::move(last_run_result.value());
+                last_run_result.reset();
+                return session.resume_after_refinement(std::move(previous));
+            }();
+            guest_execution_elapsed_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - execution_start).count();
             if (!run)
             {
                 print_error(run.error());
                 return static_cast<int>(ExitCode::InfrastructureFailure);
             }
             auto run_result = std::move(run).value();
+            cumulative_guest_instructions += run_result.guest_instruction_count;
+            cumulative_guest_blocks += run_result.guest_blocks;
+            cumulative_execution_slices += run_result.execution_slices;
+            cumulative_functions_lifted += run_result.performance.functions_lifted;
+            cumulative_lift_cache_hits += run_result.performance.lift_cache_hits;
+            cumulative_lift_cache_misses += run_result.performance.lift_cache_misses;
+            cumulative_ir_verification_elapsed_us +=
+                run_result.performance.ir_verification_elapsed_us;
+            cumulative_ir_verification_calls += run_result.performance.ir_verification_calls;
             if (run_result.stop_reason == execution::ExecutionStopReason::GuestMemoryResourceLimitExceeded &&
                 last_run_result)
             {
@@ -1728,6 +1764,17 @@ int main(int argc, char** argv)
                       << " candidate_assessments=" << refinement.candidate_assessments
                       << " assessment_elapsed_us=" << assessment_elapsed_us
                       << " publication_elapsed_us=" << refinement_publication_elapsed_us
+                      << " guest_execution_elapsed_us=" << guest_execution_elapsed_us
+                      << " cumulative_guest_instructions=" << cumulative_guest_instructions
+                      << " cumulative_guest_blocks=" << cumulative_guest_blocks
+                      << " cumulative_execution_slices=" << cumulative_execution_slices
+                      << " cumulative_functions_lifted=" << cumulative_functions_lifted
+                      << " cumulative_lift_cache_hits=" << cumulative_lift_cache_hits
+                      << " cumulative_lift_cache_misses=" << cumulative_lift_cache_misses
+                      << " cumulative_ir_verification_elapsed_us="
+                      << cumulative_ir_verification_elapsed_us
+                      << " cumulative_ir_verification_calls="
+                      << cumulative_ir_verification_calls
                       << " worker_count=" << analysis_workers
                       << " batch_count=" << refinement.refinement_batches
                       << " batch_candidates=" << refinement.batch_candidates

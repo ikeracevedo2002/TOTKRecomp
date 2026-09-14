@@ -2,10 +2,11 @@
 
 > Status: Proposed architecture, reconciled against the implemented history
 > Original RFC snapshot: 2026-09-07 (described Milestones 0–13)
-> Reconciliation snapshot: current `main` after the M41–M43 checkpoint and
-> repository cleanup. The M42/M43 semantic changes, measurement-contract
-> verifier, operating-contract updates, and hygiene fixes are now part of the
-> merged history. See “Estado de reconciliación” below.
+> Reconciliation snapshot: current M44 checkpoint after the M41–M43 history
+> and repository cleanup. The M42/M43 semantic changes, measurement-contract
+> verifier, operating-contract updates, hygiene fixes, deterministic continuation,
+> and frontier-specific reuse work are recorded in the merged/current history.
+> See “Estado de reconciliación” below.
 > Target: The Legend of Zelda: Tears of the Kingdom for Nintendo Switch  
 > Current repository state: Initial C++20 build/test foundation, target-manifest model, common safety utilities, CI, strict NSO0 header parsing, bounded NSO image materialization with SHA-256 verification and explicit BSS, checked host-backed guest memory loading, MOD0/dynamic/RELA metadata discovery, dynamic symbol/relocation application, expanded AArch64 Semantic IR and lifting, deterministic whole-module function discovery/translation reporting, synthetic tests, and deterministic inspection/coverage reports are committed; no supported game build has been committed.
 
@@ -34,6 +35,18 @@ Reglas de esta reconciliación: ninguna sección se elimina; los números solo s
 afirman si aparecen en `docs/MILESTONE_*.md` del snapshot correspondiente; las
 referencias a M42/M43 se contrastan con sus documentos actuales y con el
 checkpoint combinado que los integró.
+
+### Estado actual M44
+
+M44 actualiza el estado de ejecución real sin borrar la historia anterior. El
+manifiesto privado de cuatro módulos validó el mismo build exacto y reprodujo el
+frontier previo de 32.265 instrucciones en `main + 0x3a2650`. La resolución huésped
+de `__nnmusl_init_dso` está confirmada hacia `sdk`, mientras que las comprobaciones
+de completitud y el veto al fallback no se han debilitado. La continuación exacta
+y la reutilización incremental cruzaron ese frontier; el run posterior terminó en
+74.803 instrucciones con `memory_fault` en `main + 0x62c1a4`. Los detalles medidos y
+las condiciones de validación están en `docs/MILESTONE_44.md`; los artefactos privados
+siguen fuera del repositorio.
 
 ### Las decisiones más afectadas
 
